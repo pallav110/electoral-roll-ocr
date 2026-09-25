@@ -1,0 +1,15 @@
+# System packages are also required:
+#   tesseract-ocr, tesseract-ocr-hin
+
+fastapi==0.115.0
+uvicorn==0.32.0
+python-multipart==0.0.12
+pymupdf==1.24.10
+pytesseract==0.3.13
+Pillow==10.4.0
+numpy==2.2.6
+opencv-python==5.0.0.93
+opencv-contrib-python==5.0.0.93
+paddleocr==2.10.0
+paddlepaddle==3.0.0
+
