@@ -875,6 +875,9 @@ MAX_BATCH_BYTES = int(
 BATCH_WORK_DIR = Path(
     os.getenv("OCR_BATCH_WORK_DIR", "/tmp/ocr_pdf_jobs")
 ).expanduser().resolve()
+OCR_OUTPUT_DIR = Path(
+    os.getenv("OCR_OUTPUT_DIR", "results/new_runs/ocr_output")
+).expanduser().resolve()
 OCR_PROCESS_LOCK_FILE = Path(
     os.getenv("OCR_PROCESS_LOCK_FILE", "/tmp/ocr_pdf_api.lock")
 ).expanduser().resolve()
@@ -1403,17 +1406,31 @@ def _choose_age(
     return "", "missing", reasons
 
 
-def _extract_card(page: fitz.Page, card_rect: fitz.Rect) -> Optional[dict[str, Any]]:
+def _extract_card(
+    page: fitz.Page,
+    card_rect: fitz.Rect,
+    page_number: Optional[int] = None,
+    card_index: Optional[int] = None,
+) -> Optional[dict[str, Any]]:
+    card_started = time.perf_counter()
+    card_label = f"page={page_number or '?'} card={card_index or '?'}"
+    stage_seconds: dict[str, float] = {}
+
+    stage_started = time.perf_counter()
     hindi_bytes = page.get_pixmap(
         dpi=200, clip=card_rect, alpha=False).tobytes("png")
     metadata_bytes = page.get_pixmap(
         dpi=300, clip=card_rect, alpha=False).tobytes("png")
+    stage_seconds["render"] = time.perf_counter() - stage_started
 
+    stage_started = time.perf_counter()
     lines = _extract_text_with_tesseract(hindi_bytes)
     record = parse_voter_box_from_ocr_lines(lines or [])
     if record.get("empty"):
         record = _empty_record()
+    stage_seconds["tesseract_primary"] = time.perf_counter() - stage_started
 
+    stage_started = time.perf_counter()
     focused_lines = _extract_relation_fallback_with_tesseract(metadata_bytes)
     focused_lines = [
         re.sub(
@@ -1426,7 +1443,9 @@ def _extract_card(page: fitz.Page, card_rect: fitz.Rect) -> Optional[dict[str, A
     focused_outcome = _merge_focused_name_and_relation(
         record, focused_record)
     review_reasons = list(focused_outcome["conflicts"])
+    stage_seconds["tesseract_focused"] = time.perf_counter() - stage_started
 
+    stage_started = time.perf_counter()
     metadata = _extract_paddle_card_metadata(metadata_bytes)
     paddle_house_candidate = str(metadata.get("house_no", ""))
     primary_house_candidate = str(record.get("house_no", ""))
@@ -1438,9 +1457,12 @@ def _extract_card(page: fitz.Page, card_rect: fitz.Rect) -> Optional[dict[str, A
     ):
         metadata["focused_house_candidates"] = (
             _extract_tesseract_house_candidates(metadata_bytes))
+    stage_seconds["paddle_and_house_fallback"] = time.perf_counter() - stage_started
 
     record["sno"] = str(metadata.get("sno", ""))
+    stage_started = time.perf_counter()
     strict_epic = _extract_tesseract_epic(hindi_bytes)
+    stage_seconds["tesseract_epic"] = time.perf_counter() - stage_started
     paddle_epic = str(metadata.get("id_card_no", ""))
     parsed_epic = str(record.get("id_card_no", ""))
     record["id_card_no"] = strict_epic or paddle_epic or parsed_epic
@@ -1503,9 +1525,20 @@ def _extract_card(page: fitz.Page, card_rect: fitz.Rect) -> Optional[dict[str, A
     record["_field_sources"] = field_sources
     record["_review_reasons"] = sorted(set(review_reasons))
     record["_needs_review"] = bool(record["_review_reasons"])
-    if not any(record.get(key) for key in (
+    has_record = any(record.get(key) for key in (
         "sno", "id_card_no", "voter_first_name", "age", "is_deleted",
-    )):
+    ))
+    stage_report = " ".join(
+        f"{name}={elapsed:.2f}s"
+        for name, elapsed in stage_seconds.items()
+    )
+    print(
+        f"[OCR] {card_label} {stage_report} "
+        f"total={time.perf_counter() - card_started:.2f}s "
+        f"result={'record' if has_record else 'empty'}",
+        flush=True,
+    )
+    if not has_record:
         return None
     return record
 
@@ -1593,6 +1626,10 @@ def _extract_pdf_ocr_unlocked(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     source_pdf_name = _source_pdf_name(filename)
+    print(
+        f"[OCR] request_start file={source_pdf_name} bytes={len(pdf_bytes)}",
+        flush=True,
+    )
     try:
         document = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:
@@ -1606,10 +1643,21 @@ def _extract_pdf_ocr_unlocked(
             raise ValueError("PDF has no pages")
         first, last, mode = _resolve_page_range(
             page_count, start_page, end_page, whole_pdf)
+        print(
+            f"[OCR] selection mode={mode} pages={first}-{last} "
+            f"skip_non_voter_pages={skip_non_voter_pages}",
+            flush=True,
+        )
         metadata_page_number = 3 if page_count >= 3 else 1
+        metadata_started = time.perf_counter()
         roll_metadata = _extract_roll_header_metadata(
             document[metadata_page_number - 1])
         roll_metadata["state_code"] = _extract_state_code(document[0])
+        print(
+            f"[OCR] header_metadata page={metadata_page_number} "
+            f"elapsed={time.perf_counter() - metadata_started:.2f}s",
+            flush=True,
+        )
 
         records: list[dict[str, Any]] = []
         processed_pages: list[dict[str, Any]] = []
@@ -1618,7 +1666,18 @@ def _extract_pdf_ocr_unlocked(
 
         for page_number in range(first, last + 1):
             page = document[page_number - 1]
-            if skip_non_voter_pages and not _page_looks_like_voter_grid(page):
+            probe_started = time.perf_counter()
+            looks_like_voter_grid = (
+                _page_looks_like_voter_grid(page)
+                if skip_non_voter_pages else True
+            )
+            probe_elapsed = time.perf_counter() - probe_started
+            print(
+                f"[OCR] page={page_number} grid_probe="
+                f"{probe_elapsed:.2f}s voter_grid={looks_like_voter_grid}",
+                flush=True,
+            )
+            if not looks_like_voter_grid:
                 skipped_pages.append({
                     "page_number": page_number,
                     "reason": "no EPIC found in the first three expected card positions",
@@ -1627,8 +1686,10 @@ def _extract_pdf_ocr_unlocked(
 
             page_started = time.perf_counter()
             page_records: list[dict[str, Any]] = []
-            for card_index, card_rect in enumerate(_voter_card_rects(page), 1):
-                record = _extract_card(page, card_rect)
+            card_rects = _voter_card_rects(page)
+            for card_index, card_rect in enumerate(card_rects, 1):
+                record = _extract_card(
+                    page, card_rect, page_number, card_index)
                 if record is None:
                     continue
                 record["_page_number"] = page_number
@@ -1641,12 +1702,19 @@ def _extract_pdf_ocr_unlocked(
                 **correction,
             } for correction in page_serial_corrections)
             records.extend(page_records)
+            page_elapsed = time.perf_counter() - page_started
             processed_pages.append({
                 "page_number": page_number,
                 "records": len(page_records),
                 "serial_corrections": len(page_serial_corrections),
-                "elapsed_seconds": round(time.perf_counter() - page_started, 2),
+                "elapsed_seconds": round(page_elapsed, 2),
             })
+            print(
+                f"[OCR] page={page_number} complete "
+                f"cards={len(card_rects)} records={len(page_records)} "
+                f"elapsed={page_elapsed:.2f}s",
+                flush=True,
+            )
 
     record_numbers = {
         (record["_page_number"], record["_card_index"]): counter
@@ -1669,6 +1737,13 @@ def _extract_pdf_ocr_unlocked(
         for reason in record["review_reasons"]
     )
 
+    elapsed = time.perf_counter() - started
+    print(
+        f"[OCR] request_complete pages_processed={len(processed_pages)} "
+        f"pages_skipped={len(skipped_pages)} records={len(public_records)} "
+        f"elapsed={elapsed:.2f}s",
+        flush=True,
+    )
     return {
         "ok": True,
         "filename": source_pdf_name,
@@ -1691,7 +1766,7 @@ def _extract_pdf_ocr_unlocked(
         "records_needing_review": sum(
             record["needs_review"] for record in public_records),
         "review_reason_counts": dict(sorted(review_reason_counts.items())),
-        "elapsed_seconds": round(time.perf_counter() - started, 2),
+        "elapsed_seconds": round(elapsed, 2),
         "records": public_records,
     }
 
@@ -1845,9 +1920,13 @@ else:
 async def health() -> dict[str, Any]:
     return {
         "status": "ok",
-        "engine": "tesseract+paddleocr",
+        "engine": (
+            "tesseract+paddleocr"
+            if OCR_ENHANCEMENT_AVAILABLE else "tesseract"
+        ),
         "busy": _OCR_LOCK.locked(),
         "max_pdf_mb": MAX_PDF_BYTES // (1024 * 1024),
+        "paddleocr_available": OCR_ENHANCEMENT_AVAILABLE,
         "celery_available": CELERY_AVAILABLE,
         "batch_max_files": MAX_BATCH_FILES,
     }
@@ -1878,7 +1957,7 @@ async def ocr_extract_endpoint(
 
     try:
         async with _OCR_LOCK:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 extract_pdf_ocr,
                 raw,
                 filename,
@@ -1887,6 +1966,14 @@ async def ocr_extract_endpoint(
                 whole_pdf,
                 skip_non_voter_pages,
             )
+        safe_stem = re.sub(
+            r'[<>:"/\\|?*\x00-\x1f]', "_", Path(filename).stem,
+        ).strip(" .") or "document"
+        output_path = OCR_OUTPUT_DIR / (
+            f"{uuid.uuid4().hex}_{safe_stem}_ocr.json")
+        result["json_output_file"] = str(output_path)
+        await asyncio.to_thread(_write_json_atomically, output_path, result)
+        return result
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
