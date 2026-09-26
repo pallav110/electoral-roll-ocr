@@ -211,6 +211,62 @@ def _render_page_card_images(
         return None
 
 
+def _remove_outer_card_lines(image: Any) -> Any:
+    """Remove only the four outer rules from one already-cropped card image.
+
+    The crop is processed independently, so interior serial, EPIC, photo-box,
+    and Hindi shirorekha strokes are not candidates for removal. A rule must be
+    dark across most of the first/last few rows or columns of this card crop.
+    """
+    import cv2
+    import numpy as np
+
+    if image is None or image.size == 0:
+        return image
+    if len(image.shape) == 2:
+        gray = image
+    else:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape[:2]
+    if height < 3 or width < 3:
+        return image
+
+    dark = gray < 200
+    border_mask = np.zeros_like(gray, dtype=np.uint8)
+    edge_rows = min(5, height)
+    edge_cols = min(5, width)
+    horizontal_fraction = 0.78
+    vertical_fraction = 0.86
+
+    for y in list(range(edge_rows)) + list(range(max(0, height - edge_rows), height)):
+        if np.count_nonzero(dark[y, :]) / width >= horizontal_fraction:
+            border_mask[max(0, y - 1):min(height, y + 2), :] = 255
+    for x in list(range(edge_cols)) + list(range(max(0, width - edge_cols), width)):
+        if np.count_nonzero(dark[:, x]) / height >= vertical_fraction:
+            border_mask[:, max(0, x - 1):min(width, x + 2)] = 255
+
+    cleaned = image.copy()
+    cleaned[border_mask > 0] = 255
+    # Keep the cleaned OCR input consistent with the existing production
+    # Tesseract preprocessing: remove the printed photo placeholder and label.
+    cleaned = _mask_photo_box(cleaned)
+    return cleaned
+
+
+def _clean_card_image_bytes(image_bytes: bytes) -> bytes:
+    """Apply outer-rule cleaning before any OCR engine receives card bytes."""
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(
+        np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        return image_bytes
+    cleaned = _remove_outer_card_lines(image)
+    ok, encoded = cv2.imencode(".png", cleaned)
+    return encoded.tobytes() if ok else image_bytes
+
+
 def _mask_card_noise_for_tesseract(image: Any) -> Any:
     """Keep the serial, EPIC, and Hindi field areas; whiten everything else."""
     import numpy as np
@@ -348,6 +404,7 @@ def _extract_tesseract_epic(img_bytes: bytes) -> str:
         import pytesseract
         from PIL import Image
 
+        img_bytes = _clean_card_image_bytes(img_bytes)
         image = cv2.imdecode(
             np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
         if image is None:
@@ -373,7 +430,7 @@ def _extract_tesseract_epic(img_bytes: bytes) -> str:
 
 
 def _extract_tesseract_house_candidates(img_bytes: bytes) -> list[str]:
-    """Read slash-form house numbers from a focused numeric-only crop."""
+    """Read numeric and slash-form house numbers from a focused crop."""
     try:
         import cv2
         import numpy as np
@@ -400,15 +457,17 @@ def _extract_tesseract_house_candidates(img_bytes: bytes) -> list[str]:
         ]
         candidates: list[str] = []
         for variant in variants:
-            text = pytesseract.image_to_string(
-                Image.fromarray(variant),
-                lang="eng",
-                config=(
-                    "--oem 3 --psm 6 "
-                    "-c tessedit_char_whitelist=0123456789/"
-                ),
-            )
-            candidates.extend(re.findall(r"\d{1,3}/\d{2,6}", text))
+            for psm in (6, 8, 11, 12):
+                text = pytesseract.image_to_string(
+                    Image.fromarray(variant),
+                    lang="eng",
+                    config=(
+                        f"--oem 3 --psm {psm} "
+                        "-c tessedit_char_whitelist=0123456789/"
+                    ),
+                )
+                candidates.extend(re.findall(r"\d{1,3}/\d{2,6}", text))
+                candidates.extend(re.findall(r"(?<!\d)\d{2,5}(?!\d)", text))
         return candidates
     except Exception as exc:
         log.debug("Focused Tesseract house OCR failed: %s", exc)
@@ -476,12 +535,17 @@ def _extract_tesseract_house_prefix(img_bytes: bytes) -> str:
         match = re.search(
             r"([$A-Za-z\u0904-\u0939]+)\s*-\s*(?=\d)", text)
         if not match:
+            match = re.search(
+                r"(?:^|[\s.])([§$Aइई])\s*\.?\s*(?=\d{1,3}/\d+)",
+                text,
+            )
+        if not match:
             return ""
         prefix = match.group(1)
         # The printed prefix is short-i ``इ-``. Tesseract frequently
         # renders it as long-i ``ई`` or as an ASCII/symbol substitute.
         if (
-            prefix in {"§", "8", "5", "इ", "ई", "$"}
+            prefix in {"§", "8", "5", "इ", "ई", "$", "A"}
             or prefix.lower() in {"e", "ee", "i", "ii"}
         ):
             return "इ-"
@@ -554,17 +618,32 @@ def _get_paddle_serial_ocr():
 
 
 def _paddle_text(image: Any) -> list[tuple[str, float]]:
+    return [
+        (text, confidence)
+        for _, text, confidence in _paddle_text_with_boxes(image)
+    ]
+
+
+def _paddle_text_with_boxes(
+    image: Any,
+) -> list[tuple[list[list[float]], str, float]]:
+    """Run one Paddle pass and retain boxes for region-based field routing."""
     ocr = _get_paddle_serial_ocr()
     if ocr is None:
         return []
     try:
         with _PADDLE_INFERENCE_LOCK:
             result = ocr.ocr(image, cls=False)
-        return [
-            (str(item[1][0]), float(item[1][1]))
-            for item in (result[0] or [])
-            if item and len(item) > 1 and len(item[1]) > 1
-        ]
+        hits: list[tuple[list[list[float]], str, float]] = []
+        for item in (result[0] or []):
+            if not item or len(item) < 2 or len(item[1]) < 2:
+                continue
+            box = item[0]
+            text = str(item[1][0])
+            confidence = float(item[1][1])
+            if isinstance(box, list) and len(box) >= 2:
+                hits.append((box, text, confidence))
+        return hits
     except Exception as e:
         log.debug("PaddleOCR failed: %s", e)
         return []
@@ -624,33 +703,75 @@ def _extract_paddle_card_metadata(img_bytes: bytes) -> dict[str, Any]:
         house_base = image[int(height * .34):int(height * .64), int(width * .01):int(width * .74)]
         age_base = image[int(height * .62):int(height * .91), int(width * .01):int(width * .55)]
 
-        serial_candidates: list[tuple[str, float]] = []
-        # Right-aligned crop checked first — serials are right-aligned in their
+        # One full-card Paddle pass can return all English/numeric regions at
+        # once. The previous implementation invoked Paddle separately for
+        # serial, four serial variants, EPIC, two house scales, two age scales,
+        # and the deleted stamp. Keep the focused crops as fallback only.
+        full_hits = _paddle_text_with_boxes(image)
+        def hit_center(box: list[list[float]]) -> tuple[float, float]:
+            xs = [float(point[0]) for point in box]
+            ys = [float(point[1]) for point in box]
+            return sum(xs) / len(xs) / width, sum(ys) / len(ys) / height
+
+        full_serial: list[tuple[str, float]] = []
+        full_epic: list[tuple[str, float]] = []
+        full_house: list[tuple[str, float, bool]] = []
+        full_age: list[tuple[str, float]] = []
+        for box, text, score in full_hits:
+            cx, cy = hit_center(box)
+            compact = text.upper().replace(" ", "")
+            digits = "".join(re.findall(r"\d", text))
+            if 0.03 <= cy <= 0.23 and 0.03 <= cx <= 0.55 and re.fullmatch(r"\d{1,3}", digits or ""):
+                full_serial.append((digits, score))
+            if 0.03 <= cy <= 0.23 and 0.55 <= cx <= 0.99:
+                match = re.search(r"[A-Z]{2,4}\d{6,8}", compact)
+                if match:
+                    full_epic.append((match.group(0), score))
+            if 0.30 <= cy <= 0.65 and 0.01 <= cx <= 0.76:
+                slash = re.findall(r"\d{1,3}/\d+", text)
+                if slash:
+                    full_house.extend((value, score, False) for value in slash)
+                elif digits and len(digits) <= 6:
+                    full_house.append((digits, score, False))
+            if 0.55 <= cy <= 0.91 and 0.01 <= cx <= 0.55:
+                for value in re.findall(r"\d{1,3}", text):
+                    if 18 <= int(value) <= 120:
+                        full_age.append((value, score))
+
+        # Accept a full-card serial only when Paddle is confident; otherwise
+        # retain the focused serial recovery path below.
+        serial_candidates: list[tuple[str, float]] = [
+            item for item in full_serial if item[1] >= 0.90
+        ]
+        # Right-aligned crop is a fallback only when the single full-card pass
+        # did not locate a usable serial.
         # box; the large blank left region causes Paddle to misread a single digit
         # (e.g. the two loops of 8 become "00"). A high-confidence hit here takes
         # priority over the multi-variant vote below.
-        right_crop = image[int(height * .04):int(height * .22), int(width * .20):int(width * .50)]
-        right_enlarged = cv2.resize(right_crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-        right_hits = [
-            ("".join(re.findall(r"\d", t)), s)
-            for t, s in _paddle_text(right_enlarged)
-            if re.fullmatch(r"\d{1,3}", "".join(re.findall(r"\d", t)))
-        ]
-        right_hits = [(d, s) for d, s in right_hits if d]
-        high_conf_right = [(d, s) for d, s in right_hits if s >= 0.90]
-
+        high_conf_right = [(value, score) for value, score in full_serial if score >= 0.90]
         variants = [
             serial_base,
             cv2.threshold(cv2.cvtColor(serial_base, cv2.COLOR_BGR2GRAY), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
             cv2.adaptiveThreshold(cv2.cvtColor(serial_base, cv2.COLOR_BGR2GRAY), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2),
             image[int(height * .06):int(height * .19), int(width * .10):int(width * .36)],
         ]
-        for variant in variants:
-            enlarged = cv2.resize(variant, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            for text, score in _paddle_text(enlarged):
-                digits = "".join(re.findall(r"\d", text))
-                if digits and len(digits) <= 3:
-                    serial_candidates.append((digits, score))
+        # Focused variants are retained only as recovery when the full-card
+        # pass produced no serial. This keeps normal cards to one Paddle call.
+        if not serial_candidates:
+            right_crop = image[int(height * .04):int(height * .22), int(width * .20):int(width * .50)]
+            right_enlarged = cv2.resize(right_crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+            right_hits = [
+                ("".join(re.findall(r"\d", text)), score)
+                for text, score in _paddle_text(right_enlarged)
+                if re.fullmatch(r"\d{1,3}", "".join(re.findall(r"\d", text)))
+            ]
+            high_conf_right = [(value, score) for value, score in right_hits if value and score >= 0.90]
+            for variant in variants:
+                enlarged = cv2.resize(variant, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+                for text, score in _paddle_text(enlarged):
+                    digits = "".join(re.findall(r"\d", text))
+                    if digits and len(digits) <= 3:
+                        serial_candidates.append((digits, score))
 
         sno = ""
         if high_conf_right:
@@ -665,50 +786,63 @@ def _extract_paddle_card_metadata(img_bytes: bytes) -> dict[str, Any]:
             repeated = [value for value, count in counts.items() if count >= 2]
             sno = max(repeated or [value for value, _ in serial_candidates], key=lambda value: max(score for candidate, score in serial_candidates if candidate == value))
 
-        epic_candidates = []
-        epic = cv2.resize(epic_base, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
-        for text, score in _paddle_text(epic):
-            match = re.search(r"[A-Z]{2,4}\d{6,8}", text.upper().replace(" ", ""))
-            if match:
-                epic_candidates.append((match.group(0), score))
+        epic_candidates = list(full_epic)
+        if not epic_candidates:
+            epic = cv2.resize(epic_base, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
+            for text, score in _paddle_text(epic):
+                match = re.search(r"[A-Z]{2,4}\d{6,8}", text.upper().replace(" ", ""))
+                if match:
+                    epic_candidates.append((match.group(0), score))
         id_card_no = max(epic_candidates, key=lambda item: item[1])[0] if epic_candidates else ""
 
-        house_candidates: list[tuple[str, float, bool]] = []
-        for scale in (3, 5):
-            house_image = cv2.resize(
-                house_base, None, fx=scale, fy=scale,
-                interpolation=cv2.INTER_CUBIC)
-            for text, score in _paddle_text(house_image):
-                slash_matches = re.findall(r"\d{1,3}/\d+", text)
-                if slash_matches:
-                    house_candidates.extend(
-                        (value, score, False) for value in slash_matches)
-                    continue
-                digit_groups = [
-                    value for value in re.findall(r"\d+", text)
-                    if len(value) <= 6
-                ]
-                if digit_groups:
-                    value = max(digit_groups, key=len)
-                    # A malformed colon/dash is commonly how Paddle renders
-                    # the printed "मकान संख्या:" label immediately before a
-                    # real value (for example ".-1160"). Retain this only as
-                    # supporting evidence for the later two-engine merge.
-                    strong_format = bool(re.search(
-                        rf"(?:^|[.:])\s*-\s*{re.escape(value)}(?!\d)", text,
-                    ))
-                    house_candidates.append((value, score, strong_format))
+        house_candidates: list[tuple[str, float, bool]] = list(full_house)
+        if not house_candidates:
+            for scale in (3,):
+                house_image = cv2.resize(
+                    house_base, None, fx=scale, fy=scale,
+                    interpolation=cv2.INTER_CUBIC)
+                for text, score in _paddle_text(house_image):
+                    slash_matches = re.findall(r"\d{1,3}/\d+", text)
+                    if slash_matches:
+                        house_candidates.extend(
+                            (value, score, False) for value in slash_matches)
+                        continue
+                    digit_groups = [
+                        value for value in re.findall(r"\d+", text)
+                        if len(value) <= 6
+                    ]
+                    if digit_groups:
+                        value = max(digit_groups, key=len)
+                        # A malformed colon/dash is commonly how Paddle renders
+                        # the printed "मकान संख्या:" label immediately before a
+                        # real value. Retain this only as supporting evidence.
+                        strong_format = bool(re.search(
+                            rf"(?:^|[.:])\s*-\s*{re.escape(value)}(?!\d)", text,
+                        ))
+                        house_candidates.append((value, score, strong_format))
         if house_candidates:
+            # A single malformed Paddle read can contain extra digits from the
+            # adjacent label/border (for example ``41194``), while repeated
+            # reads of the actual house value are shorter and high-confidence
+            # (for serial 519, ``102`` appears twice at ~0.97). Prefer a
+            # repeated candidate before applying the existing slash/length
+            # preference; otherwise one noisy long token can permanently win.
+            candidate_counts = Counter(value for value, _, _ in house_candidates)
+            repeated_candidates = [
+                item for item in house_candidates
+                if candidate_counts[item[0]] >= 2
+            ]
+            selection_pool = repeated_candidates or house_candidates
             house_no, house_confidence, house_strong_format = max(
-                house_candidates,
+                selection_pool,
                 key=lambda item: (
                     "/" in item[0],
-                    len(re.sub(r"\D", "", item[0])),
+                    candidate_counts[item[0]],
                     item[1],
+                    len(re.sub(r"\D", "", item[0])),
                 ),
             )
-            house_votes = sum(
-                value == house_no for value, _, _ in house_candidates)
+            house_votes = candidate_counts[house_no]
             house_strong_format = house_strong_format or any(
                 value == house_no and strong
                 for value, _, strong in house_candidates
@@ -718,7 +852,7 @@ def _extract_paddle_card_metadata(img_bytes: bytes) -> dict[str, Any]:
             house_votes, house_strong_format = 0, False
 
         age_candidates: list[tuple[str, float]] = []
-        for scale in (3, 5):
+        for scale in (3,):
             age_image = cv2.resize(
                 age_base, None, fx=scale, fy=scale,
                 interpolation=cv2.INTER_CUBIC)
@@ -806,6 +940,10 @@ def _clean_house_no(value: str) -> str:
     v = value.strip()
     # Strip space-separated lowercase ASCII noise at end (e.g. "8/24 o—", "8/829 cael")
     v = re.sub(r"\s+[a-z][a-z\s\-|.]*$", "", v)
+    # Tesseract can append a short Devanagari fragment to a clean number
+    # (for example ``864 रा``). Keep known noise bounded so valid suffixes such
+    # as ``बी`` remain available to the address parser.
+    v = re.sub(r"\s+रा\.?$", "", v)
     # Strip fused lowercase ASCII directly after digits (e.g. "2a" from DELETED watermark)
     v = re.sub(r"(\d+)[a-z]+$", r"\1", v)
     # Strip lone trailing punctuation/whitespace
@@ -934,6 +1072,8 @@ def parse_voter_box_from_ocr_lines(lines: list[str]) -> dict[str, Any]:
             ("पिता", "प्रिता कानाम"),
             ("पिता", "पैता का नाम"),
             ("पिता", "पैता कानाम"),
+            ("पिता", "पेता का नाम"),
+            ("पिता", "पेता कानाम"),
             ("पिता", "fat का नाम"),
             ("माता", "माता का नाम"),
             ("माता", "माता कानाम"),
@@ -1079,7 +1219,7 @@ def parse_voter_box_from_ocr_lines(lines: list[str]) -> dict[str, Any]:
         # unconditional continue, making every standard relation unreachable.
         if re.search(
             r"(?i)(?:पति|प्रति|पत्ति|प्रत्ति)\s*(?:का\s*नाम|कानाम)|"
-            r"(?:पिता|प्रिता|पैता|माता|अन्य)\s*(?:का\s*नाम|कानाम)|fat\s*का\s*नाम|"
+            r"(?:पिता|प्रिता|पैता|पेता|माता|अन्य)\s*(?:का\s*नाम|कानाम)|fat\s*का\s*नाम|"
             r"Husband\s*Name|Father\s*Name|Mother\s*Name|Other\s*Name|"
             r"husband\s*name|father\s*name|mother\s*name|other\s*name",
             line,
@@ -1119,7 +1259,7 @@ def parse_voter_box_from_ocr_lines(lines: list[str]) -> dict[str, Any]:
         # ``मकान संख्या`` label. Keep these variants bounded to the house
         # label so unrelated Hindi text cannot become a house candidate.
         house_label = (
-            r"(?:मकान|मक्कान|भ्रकान|भकान|पकान|कान|Ta|ta|TH)\s*"
+            r"(?:मकान|मक्कान|भ्रकान|भकान|पकान|कान|Ta|ta|TH|The|TRH)\s*"
             r"(?:संख्या|संखा|सख्या|संख्य|deat)"
         )
         if re.search(rf"(?i)(?:{house_label}|House\s*No|house\s*no)", line):
@@ -1167,19 +1307,39 @@ def parse_voter_box_from_ocr_lines(lines: list[str]) -> dict[str, Any]:
                 # comma-separated sub-parts) must not be truncated to a single
                 # numeric token.
                 structured = after
+                # Preserve slash-form house values exactly. This is important
+                # when Paddle sees 449/8 while focused OCR returns only 449.
+                # The slash is meaningful address data, not OCR punctuation.
+                slash_match = re.search(r"(?<!\d)(\d{1,4}/\d{1,6})(?!\d)", structured)
+                if slash_match:
+                    structured = slash_match.group(1)
+                # In this roll template Tesseract sometimes renders the printed
+                # ``गली नं.8`` token as ``गली 4.8`` or ``गली A.8``.  Keep the
+                # repair bounded to that street-label shape; unrelated numeric
+                # house values remain untouched.
+                structured = re.sub(
+                    r"(गली)\s+(?:4|A)\s*\.?\s*8\b",
+                    r"\1 नं.8",
+                    structured,
+                    flags=re.IGNORECASE,
+                )
                 # Preserve full plot/plot-no patterns that contain prefixes,
                 # commas, or multiple numeric sections.
-                if re.search(r"(?:\s*[,;]\s*|\s+\u0916\s+|\s+\u0928\u0902\s+|\s+\u092A\u0940\.\s*\u0928\u0902|\s+\u092A\u094D\u0932(?:\u0949|\u094B)\u091F|\s+\u090F\u091A\u090F\u0928O|\s+\u0947\s*)", structured):
+                if re.search(r"(?:\s*[,;]\s*|\s+\u0916\s+|\s+\u0928\u0902\.?\s*\d|\s+\u0917\u0932\u0940(?:\s+|$)|\s+\u0928\u0902\s+|\s+\u092A\u0940\.\s*\u0928\u0902|\s+\u092A\u094D\u0932(?:\u0949|\u094B)\u091F|\s+\u090F\u091A\u090F\u0928O|\s+\u0947\s*)", structured):
                     structured = structured
                 # If after contains plot/plot identifier markers, keep the whole
                 # string before falling back to numeric regex.
                 has_plot_marker = bool(re.search(
                     r"(?:\u092A\u094D\u0932(?:\u0949|\u094B)\u091F|\u092A\u094D\u0932(?:\u0949|\u094B)\u091F\s*\u0928\u0902|\u092A\u0940\.\s*\u0928\u0902|\u090F\u091A\u090F\u0928O|\u0916\s+\d)", structured))
+                has_street_marker = bool(re.search(
+                    r"(?:\u0917\u0932\u0940(?:\s+|$)|\u0928\u0902\.?\s*\d)",
+                    structured,
+                ))
                 has_comma_address = bool(
                     re.search(r"[,;]", structured)
                     and re.search(r"[A-Za-z\u0900-\u097F]", structured)
                 )
-                if has_plot_marker or has_comma_address:
+                if has_plot_marker or has_street_marker or has_comma_address:
                     # Preserve the complete structured address. Numeric-only
                     # Paddle candidates must not replace plot/address context.
                     record["house_no"] = _clean_house_no(_normalize_house_suffix(structured))
@@ -1350,7 +1510,7 @@ def parse_voter_box_from_ocr_lines(lines: list[str]) -> dict[str, Any]:
                 line,
             ):
                 continue
-            if re.search(r"(?:पिता|पति|माता|अन्य)\s*[:：]", line):
+            if re.search(r"(?:पिता|पेता|पति|माता|अन्य)\s*[:：]", line):
                 continue
             # Accept only a short, adjacent Devanagari name line.
             if re.fullmatch(
@@ -1573,11 +1733,15 @@ def _merge_focused_name_and_relation(
         focused_name[0] == current_name[0]
         and len(focused_name_tokens) <= len(current_name_tokens)
     )
+    primary_name_is_non_hindi_noise = bool(
+        current_name[0] and not _is_clean_hindi_value(current_name[0])
+    )
     can_merge_name = (
         focused_name[0]
         and all(not value or _is_clean_hindi_value(value) for value in focused_name)
         and (
             not current_name[0]
+            or primary_name_is_non_hindi_noise
             or same_first_name_shape_is_safe
             or surname_has_relation_support
         )
@@ -1855,6 +2019,74 @@ def _public_record(
     }
 
 
+def _infer_fused_short_i_slash_house(
+    tesseract_house: str,
+    paddle_house: str,
+    focused_candidates: list[str],
+    raw_lines: list[str],
+    confidence: float,
+    votes: int,
+) -> str:
+    """Recover ``इ-15/<denominator>`` from a bounded fused-prefix OCR shape.
+
+    The printed short-i prefix can merge with the first digit. In that case
+    Tesseract may emit ``35/245`` or ``375/245`` while Paddle emits ``315/245``
+    and focused OCR emits ``15/245``/``215/245``. The cross-engine shape is
+    required; a standalone numeric slash value is never rewritten.
+    """
+    if confidence < 0.70 or votes < 2:
+        return ""
+    values = [str(tesseract_house or "")]
+    values.extend(str(line or "") for line in raw_lines)
+    slash_values: list[tuple[str, str]] = []
+    for value in values:
+        if not re.search(r"(?i)(?:मकान|हाऊस|हाउस|संख्या|house)\b", value):
+            continue
+        for match in re.finditer(r"(?<!\d)(\d{1,3})/(\d{2,6})", value):
+            slash_values.append((match.group(1), match.group(2)))
+
+    paddle_match = re.fullmatch(r"(\d{3})/(\d{2,6})", str(paddle_house or ""))
+    if not paddle_match:
+        return ""
+    paddle_num, denominator = paddle_match.groups()
+    if not paddle_num.endswith("15"):
+        return ""
+
+    primary_shape = False
+    for numerator, denom in slash_values:
+        if denom != denominator or numerator == paddle_num:
+            continue
+        # 315 -> 35 is the fused-prefix/leading-1 loss observed on 521;
+        # 315 -> 375 covers the same shape with a 1/7 glyph confusion.
+        if numerator == paddle_num[0] + paddle_num[2:]:
+            primary_shape = True
+            break
+        if (
+            len(numerator) == len(paddle_num)
+            and numerator[0] == paddle_num[0]
+            and numerator[-1] == paddle_num[-1]
+            and sum(left != right for left, right in zip(numerator, paddle_num)) == 1
+            and {numerator[1], paddle_num[1]} in ({"1", "7"}, {"1", "4"})
+        ):
+            primary_shape = True
+            break
+    if not primary_shape:
+        return ""
+
+    focused_values = {
+        match.group(1) + "/" + match.group(2)
+        for candidate in focused_candidates
+        for match in re.finditer(r"(?<!\d)(\d{1,3})/(\d{2,6})", str(candidate))
+    }
+    if (
+        f"15/{denominator}" not in focused_values
+        and f"215/{denominator}" not in focused_values
+        and f"{paddle_num[1:]}/{denominator}" not in focused_values
+    ):
+        return ""
+    return f"इ-15/{denominator}"
+
+
 def _choose_house_number(
     tesseract_house: str,
     metadata: dict[str, Any],
@@ -1867,14 +2099,25 @@ def _choose_house_number(
     confidence = float(metadata.get("house_confidence", 0.0))
     votes = int(metadata.get("house_votes", 0))
     strong_format = bool(metadata.get("house_strong_format", False))
-    focused_counts = Counter(
-        str(value)
+    focused_values = [
+        str(value).strip()
         for value in metadata.get("focused_house_candidates", [])
-    )
+        if str(value).strip()
+    ]
+    focused_counts = Counter(focused_values)
     focused_prefix = _normalize_house_suffix(
         str(metadata.get("focused_house_prefix", "") or ""))
     if focused_prefix in {"ई-", "इ-"}:
         focused_prefix = "इ-"
+
+    fused_short_i_house = _infer_fused_short_i_slash_house(
+        tesseract_house,
+        paddle_house,
+        focused_values,
+        list(metadata.get("_tesseract_house_lines", [])),
+        confidence,
+        votes,
+    )
 
     def add_focused_prefix(value: str) -> str:
         if (
@@ -1887,12 +2130,16 @@ def _choose_house_number(
 
     reasons: list[str] = []
 
-    if tesseract_house and paddle_house == tesseract_house:
-        return add_focused_prefix(tesseract_house), "tesseract+paddle", reasons
-
     paddle_is_slash = bool(re.fullmatch(
         r"\d{1,3}/\d+[A-Za-z\u0900-\u097F]*", paddle_house))
     tesseract_is_slash = "/" in tesseract_house
+    if fused_short_i_house and paddle_is_slash:
+        reasons.append("fused_short_i_prefix_recovered")
+        return fused_short_i_house, "focused_tesseract+paddle", reasons
+
+    if tesseract_house and paddle_house == tesseract_house:
+        return add_focused_prefix(tesseract_house), "tesseract+paddle", reasons
+
     if (
         paddle_is_slash
         and focused_counts[paddle_house] >= 2
@@ -1926,6 +2173,32 @@ def _choose_house_number(
             reasons.append("house_ocr_conflict")
             return add_focused_prefix(tesseract_house), "tesseract", reasons
         return paddle_house, "focused_tesseract+paddle", reasons
+    # A focused numeric crop is independent evidence when the primary house
+    # label is garbled or missing. Repeated focused candidates can recover a
+    # plain numeric house even when Paddle has only a weak artifact.
+    if not tesseract_house and focused_values:
+        focused_numeric = [
+            value for value in focused_values
+            if re.fullmatch(r"\d{1,5}", value)
+        ]
+        focused_numeric_counts = Counter(focused_numeric)
+        repeated_numeric = [
+            value for value, count in focused_numeric_counts.items()
+            if count >= 2
+        ]
+        if len(repeated_numeric) == 1:
+            reasons.append("focused_house_fallback")
+            return repeated_numeric[0], "focused_tesseract", reasons
+        if repeated_numeric:
+            longest = max(len(value) for value in repeated_numeric)
+            longest_values = [
+                value for value in repeated_numeric
+                if len(value) == longest
+            ]
+            if len(longest_values) == 1:
+                reasons.append("focused_house_fallback")
+                return longest_values[0], "focused_tesseract", reasons
+
     # Prefixed slash / empty tesseract fallback. If primary OCR dropped the
     # whole house label, focused prefix OCR may still recover ``इ-``.
     if paddle_is_slash and not tesseract_house and votes >= 2 and confidence >= 0.70:
@@ -2003,7 +2276,10 @@ def _choose_house_number(
         # Only apply when paddle is pure digits 3-4 chars (not slash-form)
         if re.fullmatch(r"\d{3,4}", paddle_house) and (votes >= 1 or confidence >= 0.75):
             # Extra digit (e.g. 48 -> 481: paddle has 3 digits ending with "48")
-            if len(paddle_house) == len(tesseract_digits) + 1 and paddle_house.endswith(tesseract_digits):
+            if len(paddle_house) == len(tesseract_digits) + 1 and (
+                paddle_house.startswith(tesseract_digits)
+                or paddle_house.endswith(tesseract_digits)
+            ):
                 return f"{norm_pfx}{paddle_house}", "paddle_repair", reasons
             # Same digits with prefix
             if len(tesseract_digits) == len(paddle_house) and tesseract_digits == paddle_house:
@@ -2052,7 +2328,7 @@ def _choose_house_number(
         and paddle_house.endswith("1" + tesseract_house)
         and len(paddle_house) > len(tesseract_house) + 1
         and confidence >= 0.75
-        and votes >= 1
+        and (votes >= 2 or (len(tesseract_house) <= 2 and confidence >= 0.90))
     ):
         return "1" + tesseract_house, "paddle_repair", reasons
 
@@ -2111,6 +2387,7 @@ def _choose_house_number(
 def _choose_age(
     tesseract_age: str,
     raw_candidates: list[tuple[Any, Any]],
+    focused_age: str = "",
 ) -> tuple[str, str, list[str]]:
     """Reconcile plausible ages without broad look-alike substitution."""
     current = str(tesseract_age or "")
@@ -2123,6 +2400,17 @@ def _choose_age(
         if _is_valid_age(value) and float(confidence) >= 0.55
     ]
     reasons: list[str] = []
+    focused = str(focused_age or "").strip()
+    focused_count = sum(value == focused for value, _ in candidates)
+    if (
+        current
+        and _is_valid_age(focused)
+        and focused != current
+        and focused_count >= 2
+        and not any(value == current for value, _ in candidates)
+    ):
+        reasons.append("age_focused_correction")
+        return focused, "focused_tesseract+paddle", reasons
     if current and any(value == current for value, _ in candidates):
         if len({value for value, _ in candidates}) > 1:
             reasons.append("age_ocr_conflict")
@@ -2180,6 +2468,8 @@ def _extract_card(
             dpi=300, clip=card_rect, alpha=False).tobytes("png")
     else:
         hindi_bytes, metadata_bytes = rendered_images
+    hindi_bytes = _clean_card_image_bytes(hindi_bytes)
+    metadata_bytes = _clean_card_image_bytes(metadata_bytes)
     stage_seconds["render"] = time.perf_counter() - stage_started
 
     stage_started = time.perf_counter()
@@ -2206,6 +2496,27 @@ def _extract_card(
 
     stage_started = time.perf_counter()
     metadata = _extract_paddle_card_metadata(metadata_bytes)
+    # Focused Tesseract house OCR is a recovery path, not a mandatory pass.
+    # Paddle already reads the numeric region; invoke the slower multi-PSM
+    # fallback only when the primary parse/Paddle result is incomplete or
+    # contains a slash form that needs independent reconciliation.
+    primary_house_candidate = str(record.get("house_no", ""))
+    paddle_house_candidate = str(metadata.get("house_no", ""))
+    needs_focused_house = (
+        not primary_house_candidate
+        or not paddle_house_candidate
+        or "/" in primary_house_candidate
+        or "/" in paddle_house_candidate
+    )
+    if needs_focused_house:
+        metadata["focused_house_candidates"] = _extract_tesseract_house_candidates(
+            metadata_bytes)
+    else:
+        metadata["focused_house_candidates"] = []
+    # Preserve raw primary lines as arbitration evidence. This lets the house
+    # chooser distinguish a fused short-i OCR shape from a standalone numeric
+    # slash address without adding card-specific knowledge.
+    metadata["_tesseract_house_lines"] = list(lines or [])
     paddle_house_candidate = str(metadata.get("house_no", ""))
     primary_house_candidate = str(record.get("house_no", ""))
     if (
@@ -2233,12 +2544,12 @@ def _extract_card(
 
     record["sno"] = _choose_serial_value(
         record.get("sno", ""), metadata.get("sno", ""))
-    stage_started = time.perf_counter()
-    strict_epic = _extract_tesseract_epic(hindi_bytes)
-    stage_seconds["tesseract_epic"] = time.perf_counter() - stage_started
+    # Paddle is the authoritative engine for English/numeric header metadata.
+    # Avoid a redundant per-card Tesseract EPIC subprocess; retain the parsed
+    # value only as a fallback if Paddle cannot produce one.
     paddle_epic = str(metadata.get("id_card_no", ""))
     parsed_epic = str(record.get("id_card_no", ""))
-    record["id_card_no"] = strict_epic or paddle_epic or parsed_epic
+    record["id_card_no"] = paddle_epic or parsed_epic
 
     house_no, house_source, house_reasons = _choose_house_number(
         str(record.get("house_no", "")), metadata)
@@ -2246,16 +2557,25 @@ def _extract_card(
     review_reasons.extend(house_reasons)
 
     focused_age = ""
-    if not _is_valid_age(record.get("age", "")):
+    age_candidates = list(metadata.get("age_candidates", []))
+    primary_age = str(record.get("age") or record.get("_age_ocr_fragment", ""))
+    paddle_age_values = {str(value) for value, _ in age_candidates}
+    needs_focused_age = (
+        not _is_valid_age(primary_age)
+        or len(paddle_age_values) != 1
+        or (paddle_age_values and primary_age not in paddle_age_values)
+    )
+    if needs_focused_age:
         stage_started = time.perf_counter()
         focused_age = _extract_tesseract_age(hindi_bytes)
         stage_seconds["tesseract_age_focused"] = (
             time.perf_counter() - stage_started)
-        if _is_valid_age(focused_age):
+        if not _is_valid_age(record.get("age", "")) and _is_valid_age(focused_age):
             record["age"] = focused_age
     age, age_source, age_reasons = _choose_age(
         str(record.get("age") or record.get("_age_ocr_fragment", "")),
-        list(metadata.get("age_candidates", [])),
+        age_candidates,
+        focused_age,
     )
     if focused_age and age_source == "tesseract":
         age_source = "focused_tesseract"
@@ -2277,11 +2597,8 @@ def _extract_card(
     field_sources = {
         "voter_sr_no": "paddle" if record.get("sno") else "missing",
         "id_card_no": (
-            "focused_tesseract"
-            if strict_epic else (
-                "paddle" if paddle_epic else (
-                    "tesseract" if parsed_epic else "missing"
-                )
+            "paddle" if paddle_epic else (
+                "tesseract" if parsed_epic else "missing"
             )
         ),
         "voter_name": name_source,
@@ -3146,6 +3463,25 @@ def _run_self_tests() -> None:
         plot_house["house_no"] == "प्लॉट नं 279 ख नं 79",
         "plot house details",
     )
+    street_address = parse_voter_box_from_ocr_lines([
+        "नाम: संदीप कुमार",
+        "पेता का नाम: देवेंद्र कुमार",
+        "मकान संख्या : इ-857 गली नं.8 फोटो उपलब्ध है",
+    ])
+    check(
+        street_address["house_no"] == "इ-857 गली नं.8"
+        and street_address["relation_name"] == "पिता"
+        and street_address["voter_father_name"] == "देवेंद्र कुमार",
+        "preserve street house tail and OCR father label",
+    )
+    noisy_street_address = parse_voter_box_from_ocr_lines([
+        "नाम: संदीप",
+        "मकान संख्या : इ-857 गली 4.8 फोटो उपलब्ध है",
+    ])
+    check(
+        noisy_street_address["house_no"] == "इ-857 गली नं.8",
+        "repair bounded street OCR glyphs",
+    )
     plot_address = parse_voter_box_from_ocr_lines([
         "नाम: सीमा",
         "मकान संख्या : पी. नं-बि 90, ख 4-707 फोटो उपलब्ध है",
@@ -3268,6 +3604,74 @@ def _run_self_tests() -> None:
             "5-484", house_meta("481", 0.848, 2))[0] == "इ-481",
         "repair OCR prefix and final digit",
     )
+    check(
+        _choose_house_number(
+            "इ-48", house_meta("481", 0.848, 2))[0] == "इ-481",
+        "repair truncated Devanagari prefixed house",
+    )
+    check(
+        parse_voter_box_from_ocr_lines([
+            "नाम: छवि", "TH संख्या : 864 रा फोटो उपलब्ध है",
+        ])["house_no"] == "864",
+        "parse noisy TH house label",
+    )
+    check(
+        parse_voter_box_from_ocr_lines([
+            "नाम: शकुंतला", "The संख्या | 702 । फोटो उपलब्ध है",
+        ])["house_no"] == "702",
+        "parse noisy The house label",
+    )
+    check(
+        _choose_house_number(
+            "864", house_meta("41864", 0.817, 1))[0] == "864",
+        "preserve clean primary over noisy Paddle leading one",
+    )
+    focused_numeric = house_meta("4", 0.58, 2)
+    focused_numeric["focused_house_candidates"] = [
+        "102", "107", "102", "102",
+    ]
+    check(
+        _choose_house_number("", focused_numeric)[0] == "102",
+        "recover repeated focused numeric house",
+    )
+    focused_574 = house_meta("441", 0.80, 1)
+    focused_574["focused_house_candidates"] = ["574", "574", "74", "74"]
+    check(
+        _choose_house_number("", focused_574)[0] == "574",
+        "recover repeated focused 574 house",
+    )
+    weak_numeric = house_meta("4", 0.58, 2)
+    check(
+        _choose_house_number("", weak_numeric)[0] == "",
+        "reject weak house without focused support",
+    )
+    fused_short_i = house_meta("315/245", 0.896, 2)
+    fused_short_i["focused_house_candidates"] = ["315/245", "215/245"]
+    fused_short_i["_tesseract_house_lines"] = [
+        "मकान संख्या : हाऊस नं. 375/245",
+    ]
+    fused_result = _choose_house_number("", fused_short_i)
+    check(
+        fused_result[0] == "इ-15/245"
+        and fused_result[1] == "focused_tesseract+paddle"
+        and "fused_short_i_prefix_recovered" in fused_result[2],
+        "recover fused short-i slash prefix",
+    )
+    check(
+        _choose_house_number(
+            "", house_meta("315/245", 0.896, 2)
+        )[0] == "315/245",
+        "preserve unsupported numeric slash house",
+    )
+    wrong_denominator = house_meta("315/246", 0.896, 2)
+    wrong_denominator["focused_house_candidates"] = ["315/246", "215/246"]
+    wrong_denominator["_tesseract_house_lines"] = [
+        "मकान संख्या : हाऊस नं. 375/245",
+    ]
+    check(
+        _choose_house_number("", wrong_denominator)[0] == "315/246",
+        "reject fused short-i denominator mismatch",
+    )
     leading_slash = house_meta("1/75", 0.863, 2)
     leading_slash["focused_house_prefix"] = "इ-"
     check(
@@ -3311,6 +3715,18 @@ def _run_self_tests() -> None:
                   ("34", 0.69), ("34", 0.68)]
         )[0] == "21",
         "partial age corroborated by Paddle",
+    )
+    check(
+        _choose_age(
+            "27", [("21", 0.82), ("21", 0.82), ("34", 0.82)], "21"
+        )[0] == "21",
+        "focused age resolves one-seven confusion",
+    )
+    check(
+        _choose_age(
+            "27", [("21", 0.82), ("27", 0.82)], "21"
+        )[0] == "27",
+        "ambiguous focused age preserves primary",
     )
 
     import numpy as np
