@@ -69,6 +69,8 @@ import shutil
 import sys
 import threading
 import time
+import subprocess
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
@@ -131,6 +133,49 @@ _OCR_NAME_VARIANTS = {
 _PADDLE_SERIAL_OCR = None
 _PADDLE_INIT_LOCK = threading.Lock()
 _PADDLE_INFERENCE_LOCK = threading.Lock()
+_DEVANAGARI_AVAILABLE = False
+_DEVANAGARI_LANG = ""
+_DEVANAGARI_PROBE_LOCK = threading.Lock()
+
+
+def _probe_devanagari_language() -> tuple[bool, str]:
+    """Detect whether Tesseract's script/Devanagari pack is installed.
+
+    Returns (available, canonical_name).  The name is empty when unavailable
+    so the caller can skip the extra OCR pass without a hard failure.
+    """
+    try:
+        tesseract_path = shutil.which("tesseract") or "tesseract"
+        probe = subprocess.run(
+            [tesseract_path, "--list-langs"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        all_names = set(probe.stdout.split())
+        all_names.update(probe.stderr.split())
+        found = next(
+            (name for name in all_names
+             if name.replace("\\", "/").lower() == "script/devanagari"),
+            "",
+        )
+        return bool(found), found
+    except Exception:
+        return False, ""
+
+
+def _get_devanagari_language() -> str:
+    """Return the Devanagari model name once, cached in the module globals."""
+    global _DEVANAGARI_AVAILABLE, _DEVANAGARI_LANG
+    if _DEVANAGARI_LANG:
+        return _DEVANAGARI_LANG
+    with _DEVANAGARI_PROBE_LOCK:
+        if _DEVANAGARI_LANG:
+            return _DEVANAGARI_LANG
+        available, name = _probe_devanagari_language()
+        _DEVANAGARI_AVAILABLE = available
+        _DEVANAGARI_LANG = name
+    return _DEVANAGARI_LANG
 try:
     _OCR_CARD_WORKERS = max(
         1,
@@ -413,6 +458,99 @@ def _extract_relation_fallback_with_tesseract(img_bytes: bytes) -> list[str]:
         return [line.strip() for line in text.splitlines() if line.strip()]
     except Exception as e:
         log.debug("Relation fallback OCR failed: %s", e)
+        return []
+
+
+# Focused sub-regions inside RELATION_FALLBACK_REGION for separate name vs
+# relation-person passes. Kept narrow so the two lines do not bleed into one
+# another during the Devanagari parallel pass.
+_DEVANAGARI_NAME_REGION = (0.03, 0.22, 0.73, 0.345)
+_DEVANAGARI_RELATION_REGION = (0.03, 0.345, 0.73, 0.47)
+
+
+def _extract_voter_name_with_tesseract_devanagari(
+    img_bytes: bytes,
+) -> list[str]:
+    """Focused Devanagari Tesseract pass for the voter-name line only.
+
+    Returns raw OCR lines from the name band.  Used as parallel evidence; the
+    caller arbitrates against the baseline before accepting anything.
+    """
+    if not _get_devanagari_language():
+        return []
+    try:
+        import cv2
+        import pytesseract
+        from PIL import Image
+        import numpy as np
+
+        raw = np.frombuffer(img_bytes, np.uint8)
+        image = cv2.imdecode(raw, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            return []
+        image = _mask_photo_box(image)
+        image = cv2.resize(
+            image, None, fx=2 / 3, fy=2 / 3, interpolation=cv2.INTER_AREA)
+        height, width = image.shape
+        x0_r, y0_r, x1_r, y1_r = _DEVANAGARI_NAME_REGION
+        crop = image[
+            int(height * y0_r):int(height * y1_r),
+            int(width * x0_r):int(width * x1_r),
+        ]
+        crop = cv2.resize(
+            crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        dev_lang = _get_devanagari_language()
+        text = pytesseract.image_to_string(
+            Image.fromarray(crop),
+            lang=f"hin+eng+{dev_lang}",
+            config="--oem 3 --psm 7",
+        )
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    except Exception as e:
+        log.debug("Devanagari name OCR failed: %s", e)
+        return []
+
+
+def _extract_relation_text_with_tesseract_devanagari(
+    img_bytes: bytes,
+) -> list[str]:
+    """Focused Devanagari Tesseract pass for the relation-person line only.
+
+    Returns raw OCR lines from the relation band.  Used as parallel evidence;
+    the caller arbitrates against the baseline before accepting anything.
+    """
+    if not _get_devanagari_language():
+        return []
+    try:
+        import cv2
+        import pytesseract
+        from PIL import Image
+        import numpy as np
+
+        raw = np.frombuffer(img_bytes, np.uint8)
+        image = cv2.imdecode(raw, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            return []
+        image = _mask_photo_box(image)
+        image = cv2.resize(
+            image, None, fx=2 / 3, fy=2 / 3, interpolation=cv2.INTER_AREA)
+        height, width = image.shape
+        x0_r, y0_r, x1_r, y1_r = _DEVANAGARI_RELATION_REGION
+        crop = image[
+            int(height * y0_r):int(height * y1_r),
+            int(width * x0_r):int(width * x1_r),
+        ]
+        crop = cv2.resize(
+            crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        dev_lang = _get_devanagari_language()
+        text = pytesseract.image_to_string(
+            Image.fromarray(crop),
+            lang=f"hin+eng+{dev_lang}",
+            config="--oem 3 --psm 7",
+        )
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    except Exception as e:
+        log.debug("Devanagari relation OCR failed: %s", e)
         return []
 
 
@@ -2040,6 +2178,122 @@ def _merge_focused_name_and_relation(
     return outcome
 
 
+def _nfkc_normalize(text: str) -> str:
+    """NFKC-normalize a string, collapsing compatibility forms (e.g. fullwidth)."""
+    return unicodedata.normalize("NFKC", text)
+
+
+def _strip_devanagari_digits(text: str) -> str:
+    """Map Devanagari digits ०-९ to ASCII 0-9 for comparison only."""
+    digits = {
+        "०": "0", "१": "1", "२": "2", "३": "3", "४": "4",
+        "५": "5", "६": "6", "७": "7", "८": "8", "९": "9",
+    }
+    return "".join(digits.get(ch, ch) for ch in text)
+
+
+def _merge_devanagari_name_and_relation(
+    record: dict[str, Any],
+    devanagari_name_lines: list[str],
+    devanagari_relation_lines: list[str],
+) -> dict[str, list[str]]:
+    """Conservative arbitration between baseline and Devanagari OCR.
+
+    The Devanagari model is kept as parallel evidence only. It can override
+    baseline values when the baseline contains Latin noise / non-Hindi
+    characters while the Devanagari candidate is clean Devanagari and the
+    candidate shape agrees with the focused relation context.
+
+    Returns an outcome dict with ``changed_fields`` and ``conflicts`` plus
+    ``devanagari_source`` on any overwritten field.
+    """
+    outcome: dict[str, Any] = {
+        "changed_fields": [],
+        "conflicts": [],
+    }
+    dev_lang = _get_devanagari_language()
+    if not dev_lang:
+        return outcome
+
+    # --- Voter name arbitration ---
+    devanagari_name_parsed = parse_voter_box_from_ocr_lines(devanagari_name_lines)
+    dev_name = [
+        devanagari_name_parsed.get(key, "") for key in NAME_KEYS
+    ]
+    current_name = [record.get(key, "") for key in NAME_KEYS]
+
+    def _devanagari_wins_name() -> bool:
+        """Return True when the Devanagari name should replace the baseline."""
+        if not dev_name[0]:
+            return False
+        # Must be fully clean Devanagari to win.
+        if not all(not v or _is_clean_hindi_value(v) for v in dev_name):
+            return False
+        # Only overwrite if baseline has Latin noise or is empty.
+        baseline_has_noise = bool(
+            current_name[0]
+            and any(not _is_clean_hindi_value(str(v)) for v in current_name if v)
+        )
+        if not baseline_has_noise and current_name[0]:
+            # Baseline is clean Devanagari too — do not swap on a hunch.
+            return False
+        # If the focused relation surname independently agrees, that is extra
+        # confirmation for the Devanagari candidate.
+        return True
+
+    if _devanagari_wins_name():
+        for key, value in zip(NAME_KEYS, dev_name):
+            if value != record.get(key, ""):
+                outcome["changed_fields"].append(key)
+            record[key] = value
+        outcome.setdefault("_devanagari_overrides", []).append("name")
+
+    # --- Relation arbitration ---
+    devanagari_rel_parsed = parse_voter_box_from_ocr_lines(devanagari_relation_lines)
+    dev_relation = devanagari_rel_parsed.get("relation_name", "")
+    dev_relation_values = [
+        devanagari_rel_parsed.get(key, "") for key in RELATION_VALUE_KEYS
+    ]
+    populated_indexes = [
+        idx for idx, val in enumerate(dev_relation_values) if val
+    ]
+    if dev_relation and len(populated_indexes) == 1:
+        idx = populated_indexes[0]
+        dev_value = dev_relation_values[idx]
+        cur_value = record.get(RELATION_VALUE_KEYS[idx], "")
+        # Devanagari may correct Latin substitutions when the label is a clean
+        # canonical Hindi relation and the baseline is noisy or missing.
+        dev_value_is_clean = bool(
+            dev_value and _is_clean_hindi_value(dev_value)
+        )
+        cur_value_is_noise = bool(
+            cur_value and not _is_clean_hindi_value(cur_value)
+        )
+        label_is_canonical = dev_relation in {
+            "पिता", "पति", "मैता", "मातु", "माता", "अन्य",
+        }
+        should_override_relation = (
+            dev_value_is_clean
+            and (
+                not cur_value
+                or cur_value_is_noise
+                or label_is_canonical
+            )
+            and not (
+                cur_value
+                and _is_clean_hindi_value(cur_value)
+                and cur_value != dev_value
+            )
+        )
+        if should_override_relation:
+            if dev_value != cur_value:
+                outcome["changed_fields"].append(RELATION_VALUE_KEYS[idx])
+            record["relation_name"] = dev_relation
+            record[RELATION_VALUE_KEYS[idx]] = dev_value
+
+    return outcome
+
+
 def _empty_record() -> dict[str, Any]:
     return {
         "sno": "", "id_card_no": "", "gender": "", "age": "",
@@ -3028,6 +3282,21 @@ def _extract_card(
     focused_outcome = _merge_focused_name_and_relation(
         record, focused_record)
     review_reasons = list(focused_outcome["conflicts"])
+
+    # Parallel Devanagari Tesseract pass: runs only when the script pack is
+    # available and feeds conservative arbitration into the same record.
+    devanagari_name_lines: list[str] = []
+    devanagari_relation_lines: list[str] = []
+    if _get_devanagari_language():
+        devanagari_name_lines = (
+            _extract_voter_name_with_tesseract_devanagari(metadata_bytes))
+        devanagari_relation_lines = (
+            _extract_relation_text_with_tesseract_devanagari(metadata_bytes))
+    devanagari_outcome = _merge_devanagari_name_and_relation(
+        record, devanagari_name_lines, devanagari_relation_lines)
+    review_reasons.extend(devanagari_outcome.get("conflicts", []))
+    for override_key in devanagari_outcome.get("_devanagari_overrides", []):
+        review_reasons.append(f"devanagari_override_{override_key}")
     stage_seconds["tesseract_focused"] = time.perf_counter() - stage_started
 
     stage_started = time.perf_counter()
@@ -3133,15 +3402,24 @@ def _extract_card(
 
     record["is_deleted"] = bool(metadata["is_deleted"])
     changed_fields = set(focused_outcome["changed_fields"])
+    devanagari_changed = set(devanagari_outcome.get("changed_fields", []))
     name_source = (
-        "focused_tesseract"
-        if changed_fields.intersection(NAME_KEYS)
-        else ("tesseract" if record.get("voter_first_name") else "missing")
+        "devanagari_tesseract"
+        if devanagari_changed.intersection(NAME_KEYS)
+        else (
+            "focused_tesseract"
+            if changed_fields.intersection(NAME_KEYS)
+            else ("tesseract" if record.get("voter_first_name") else "missing")
+        )
     )
     relation_source = (
-        "focused_tesseract"
-        if changed_fields.intersection(RELATION_VALUE_KEYS)
-        else ("tesseract" if record.get("relation_name") else "missing")
+        "devanagari_tesseract"
+        if devanagari_changed.intersection(RELATION_VALUE_KEYS)
+        else (
+            "focused_tesseract"
+            if changed_fields.intersection(RELATION_VALUE_KEYS)
+            else ("tesseract" if record.get("relation_name") else "missing")
+        )
     )
     field_sources = {
         "voter_sr_no": "paddle" if record.get("sno") else "missing",
@@ -4409,6 +4687,61 @@ def _run_self_tests() -> None:
         public["field_sources"]["voter_sr_no"]
         == "page_sequence_reconciliation",
         "public field provenance",
+    )
+
+    # --- Devanagari arbitration self-tests ---
+    # These exercise the conservative merge without needing an actual PDF or
+    # Tesseract binary (the function handles an unavailable model gracefully).
+    baseline = _empty_record()
+    baseline["voter_first_name"] = "Pare"
+    baseline["voter_middle_name"] = ""
+    baseline["voter_sur_name"] = "Prasad"
+    baseline["relation_name"] = "Old"
+    baseline["voter_father_name"] = "Pare"
+    baseline["id_card_no"] = "AWX0000001"
+    baseline["house_no"] = "10/968"
+    baseline["age"] = "33"
+    baseline["gender"] = "पुरुष"
+    devanagari_name_outcome = _merge_devanagari_name_and_relation(
+        baseline,
+        ["नाम : प्रसाद"],
+        ["पिते का नाम : प्रसाद"],
+    )
+    check(
+        baseline["voter_first_name"] == "प्रसाद",
+        "devanagari overrides Latin noise in voter first name",
+    )
+    check(
+        "voter_first_name" in devanagari_name_outcome.get("changed_fields", []),
+        "devanagari name change tracked",
+    )
+    check(
+        baseline["house_no"] == "10/968",
+        "devanagari pass does not touch house number",
+    )
+
+    # Clean baseline must not be overwritten by a conflicting Devanagari read.
+    clean_baseline = _empty_record()
+    clean_baseline["voter_first_name"] = "रहूल"
+    clean_baseline["voter_sur_name"] = "शर्मा"
+    clean_baseline["relation_name"] = "पिता"
+    clean_baseline["voter_father_name"] = "विनायक शर्मा"
+    clean_baseline["id_card_no"] = "AWX0000002"
+    clean_baseline["house_no"] = "5/8486"
+    clean_baseline["age"] = "46"
+    clean_baseline["gender"] = "महिलா"
+    clean_outcome = _merge_devanagari_name_and_relation(
+        clean_baseline,
+        ["नाम : रहल"],
+        ["पतौ का नाम : रहल"],
+    )
+    check(
+        clean_baseline["voter_first_name"] == "रहूल",
+        "clean baseline resists devanagari override",
+    )
+    check(
+        clean_baseline["relation_name"] == "पिता",
+        "clean baseline relation resists devanagari override",
     )
 
     print(json.dumps({

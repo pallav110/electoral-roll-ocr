@@ -72,9 +72,11 @@ def decode_image(image_bytes: bytes) -> np.ndarray:
 def run_tesseract_hindi_experiment(
     image: np.ndarray,
     trace_dir: Path,
+    field_name: str,
 ) -> dict[str, Any]:
     """Compare Hindi Tesseract languages, PSMs, and image preprocessing."""
     result: dict[str, Any] = {
+        "field": field_name,
         "purpose": (
             "Diagnostic only: compare Hindi/English Tesseract recognition "
             "without changing production OCR or arbitration."
@@ -144,7 +146,7 @@ def run_tesseract_hindi_experiment(
         for name, value in variants
     ]
     for name, value in variants:
-        save_image(trace_dir / f"tesseract_hindi_{name}.png", value)
+        save_image(trace_dir / f"tesseract_{field_name}_{name}.png", value)
 
     for language in language_sets:
         for variant_name, variant in variants:
@@ -196,6 +198,11 @@ def card_field_crops(image: np.ndarray) -> dict[str, np.ndarray]:
         "serial": crop(0.03, 0.04, 0.38, 0.22),
         "epic": crop(0.55, 0.04, 0.99, 0.22),
         "name_relation": crop(0.03, 0.22, 0.73, 0.47),
+        # Separate Hindi comparisons for the voter name and the related
+        # person's name. Keep the labels in each crop so PSM 6/7 can use the
+        # same visual context as the production OCR pass.
+        "voter_name": crop(0.03, 0.22, 0.73, 0.345),
+        "relation_name": crop(0.03, 0.345, 0.73, 0.47),
         "house": crop(0.03, 0.45, 0.73, 0.59),
         "age": crop(0.03, 0.59, 0.55, 0.78),
         "photo": crop(0.75, 0.23, 0.99, 0.96),
@@ -379,8 +386,16 @@ def trace_card(document: fitz.Document, page_number: int, card_index: int, outpu
         save_image(trace_dir / f"crop_{name}.png", crop)
 
     # Test-only matrix: do not feed any of these results into production.
-    trace["tesseract_hindi_experiment"] = run_tesseract_hindi_experiment(
-        field_crops["house"], trace_dir)
+    trace["tesseract_hindi_experiment"] = {
+        "house": run_tesseract_hindi_experiment(
+            field_crops["house"], trace_dir, "house"),
+        "name_relation": run_tesseract_hindi_experiment(
+            field_crops["name_relation"], trace_dir, "name_relation"),
+        "voter_name": run_tesseract_hindi_experiment(
+            field_crops["voter_name"], trace_dir, "voter_name"),
+        "relation_name": run_tesseract_hindi_experiment(
+            field_crops["relation_name"], trace_dir, "relation_name"),
+    }
 
     originals = patch_trace_functions(trace, trace_dir)
     try:
