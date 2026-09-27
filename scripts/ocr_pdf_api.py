@@ -151,6 +151,15 @@ TESSERACT_CARD_CONTENT_REGIONS = (
     (0.04, 0.22, 0.76, 0.94),
 )
 PHOTO_BOX_REGION = (0.75, 0.23, 0.99, 0.96)
+# Measured field bands for the current roll template. Keep these narrow so
+# focused OCR does not mix the relation, house, and age rows.
+RELATION_FALLBACK_REGION = (0.03, 0.22, 0.73, 0.47)
+HOUSE_OCR_REGION = (0.03, 0.45, 0.73, 0.59)
+AGE_OCR_REGION = (0.03, 0.59, 0.55, 0.78)
+# Numeric Paddle passes start after the Hindi label. Keeping the label out of
+# this crop prevents its glyphs from being fused into values such as 4102 or
+# 013/8486. Tesseract still uses HOUSE_OCR_REGION for prefixes/suffixes.
+HOUSE_VALUE_REGION = (0.20, 0.45, 0.73, 0.59)
 
 
 
@@ -389,9 +398,10 @@ def _extract_relation_fallback_with_tesseract(img_bytes: bytes) -> list[str]:
         image = cv2.resize(
             image, None, fx=2 / 3, fy=2 / 3, interpolation=cv2.INTER_AREA)
         height, width = image.shape
+        x0_ratio, y0_ratio, x1_ratio, y1_ratio = RELATION_FALLBACK_REGION
         relation = image[
-            int(height * 0.22):int(height * 0.52),
-            int(width * 0.01):int(width * 0.78),
+            int(height * y0_ratio):int(height * y1_ratio),
+            int(width * x0_ratio):int(width * x1_ratio),
         ]
         relation = cv2.resize(
             relation, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
@@ -452,20 +462,18 @@ def _extract_tesseract_house_candidates(img_bytes: bytes) -> list[str]:
         if image is None:
             return []
         height, width = image.shape
-        # The house line is above the age line.  The older broad crop often
-        # returned both fields, which made a clearly printed house look
-        # ambiguous.  Keep a broad band as a fallback, but add narrower bands
-        # centred on the house line for cards with a weak primary label.
+        # The house line is above the age line. Keep every focused band inside
+        # the measured house row so a neighboring age cannot become a house.
         bands = (
-            (0.36, 0.56),
-            (0.40, 0.60),
-            (0.34, 0.64),
+            (HOUSE_OCR_REGION[1], HOUSE_OCR_REGION[3]),
+            (0.39, 0.57),
+            (0.42, 0.60),
         )
         candidates: list[str] = []
         for y0_ratio, y1_ratio in bands:
             house = image[
                 int(height * y0_ratio):int(height * y1_ratio),
-                int(width * 0.01):int(width * 0.78),
+                int(width * HOUSE_OCR_REGION[0]):int(width * HOUSE_OCR_REGION[2]),
             ]
             house = cv2.resize(
                 house, None, fx=4 / 3, fy=4 / 3,
@@ -507,11 +515,11 @@ def _extract_tesseract_age(img_bytes: bytes) -> str:
         if image is None:
             return ""
         height, width = image.shape
-        # Start below the house line.  This avoids treating the house number
+        # Start below the house line. This avoids treating the house number
         # as an age when the primary OCR lost the age label.
         bands = (
-            (0.62, 0.80),
-            (0.58, 0.76),
+            (AGE_OCR_REGION[1], AGE_OCR_REGION[3]),
+            (0.57, 0.74),
         )
         candidates: list[str] = []
         for y0_ratio, y1_ratio in bands:
@@ -791,8 +799,14 @@ def _extract_paddle_card_metadata(img_bytes: bytes) -> dict[str, Any]:
         height, width = image.shape[:2]
         serial_base = image[int(height * .04):int(height * .22), int(width * .03):int(width * .38)]
         epic_base = image[int(height * .06):int(height * .20), int(width * .72):int(width * .99)]
-        house_base = image[int(height * .34):int(height * .64), int(width * .01):int(width * .74)]
-        age_base = image[int(height * .62):int(height * .91), int(width * .01):int(width * .55)]
+        house_base = image[
+            int(height * HOUSE_VALUE_REGION[1]):int(height * HOUSE_VALUE_REGION[3]),
+            int(width * HOUSE_VALUE_REGION[0]):int(width * HOUSE_VALUE_REGION[2]),
+        ]
+        age_base = image[
+            int(height * AGE_OCR_REGION[1]):int(height * AGE_OCR_REGION[3]),
+            int(width * AGE_OCR_REGION[0]):int(width * AGE_OCR_REGION[2]),
+        ]
 
         # One full-card Paddle pass can return all English/numeric regions at
         # once. The previous implementation invoked Paddle separately for
@@ -818,13 +832,25 @@ def _extract_paddle_card_metadata(img_bytes: bytes) -> dict[str, Any]:
                 match = re.search(r"[A-Z]{2,4}\d{6,8}", compact)
                 if match:
                     full_epic.append((match.group(0), score))
-            if 0.30 <= cy <= 0.65 and 0.01 <= cx <= 0.76:
-                slash = re.findall(r"\d{1,3}/\d+", text)
-                if slash:
-                    full_house.extend((value, score, False) for value in slash)
-                elif digits and len(digits) <= 6:
-                    full_house.append((digits, score, False))
-            if 0.55 <= cy <= 0.91 and 0.01 <= cx <= 0.55:
+            if (
+                HOUSE_VALUE_REGION[1] <= cy <= HOUSE_VALUE_REGION[3]
+                and HOUSE_VALUE_REGION[0] <= cx <= HOUSE_VALUE_REGION[2]
+            ):
+                structured = _normalize_paddle_house_token(text)
+                structured_match = re.search(
+                    r"\d{1,4}/इ-\d{1,6}", structured)
+                if structured_match:
+                    full_house.append((structured_match.group(0), score, True))
+                else:
+                    slash = re.findall(r"\d{1,3}/\d+", text)
+                    if slash:
+                        full_house.extend((value, score, False) for value in slash)
+                    elif digits and len(digits) <= 6:
+                        full_house.append((digits, score, False))
+            if (
+                AGE_OCR_REGION[1] <= cy <= AGE_OCR_REGION[3]
+                and AGE_OCR_REGION[0] <= cx <= AGE_OCR_REGION[2]
+            ):
                 for value in re.findall(r"\d{1,3}", text):
                     if 18 <= int(value) <= 120:
                         full_age.append((value, score))
@@ -886,31 +912,37 @@ def _extract_paddle_card_metadata(img_bytes: bytes) -> dict[str, Any]:
                     epic_candidates.append((match.group(0), score))
         id_card_no = max(epic_candidates, key=lambda item: item[1])[0] if epic_candidates else ""
 
-        house_candidates: list[tuple[str, float, bool]] = list(full_house)
-        if not house_candidates:
-            for scale in (3,):
-                house_image = cv2.resize(
-                    house_base, None, fx=scale, fy=scale,
-                    interpolation=cv2.INTER_CUBIC)
-                for text, score in _paddle_text(house_image):
-                    slash_matches = re.findall(r"\d{1,3}/\d+", text)
-                    if slash_matches:
-                        house_candidates.extend(
-                            (value, score, False) for value in slash_matches)
-                        continue
-                    digit_groups = [
-                        value for value in re.findall(r"\d+", text)
-                        if len(value) <= 6
-                    ]
-                    if digit_groups:
-                        value = max(digit_groups, key=len)
-                        # A malformed colon/dash is commonly how Paddle renders
-                        # the printed "मकान संख्या:" label immediately before a
-                        # real value. Retain this only as supporting evidence.
-                        strong_format = bool(re.search(
-                            rf"(?:^|[.:])\s*-\s*{re.escape(value)}(?!\d)", text,
-                        ))
-                        house_candidates.append((value, score, strong_format))
+        # Always run a field-bounded Paddle pass. Full-card detections can
+        # attach a neighbouring label/border digit to the house value (for
+        # example H410/968), even when the narrow crop reads 10/968.
+        focused_house_candidates: list[tuple[str, float, bool]] = []
+        for scale in (3, 4):
+            house_image = cv2.resize(
+                house_base, None, fx=scale, fy=scale,
+                interpolation=cv2.INTER_CUBIC)
+            for text, score in _paddle_text(house_image):
+                structured = _normalize_paddle_house_token(text)
+                structured_match = re.search(
+                    r"\d{1,4}/इ-\d{1,6}", structured)
+                if structured_match:
+                    focused_house_candidates.append(
+                        (structured_match.group(0), score, True))
+                    continue
+                slash_matches = re.findall(r"\d{1,3}/\d+", text)
+                if slash_matches:
+                    focused_house_candidates.extend(
+                        (value, score, True) for value in slash_matches)
+                    continue
+                digit_groups = [
+                    value for value in re.findall(r"\d+", text)
+                    if len(value) <= 6
+                ]
+                if digit_groups:
+                    value = max(digit_groups, key=len)
+                    focused_house_candidates.append((value, score, True))
+        house_candidates: list[tuple[str, float, bool]] = (
+            focused_house_candidates or list(full_house)
+        )
         if house_candidates:
             # A single malformed Paddle read can contain extra digits from the
             # adjacent label/border (for example ``41194``), while repeated
@@ -972,6 +1004,23 @@ _HOUSE_SUFFIX_CORRECTIONS = {'भी': 'बी', 'भ': 'ब', 'थी': 'बी
 _HOUSE_FUSED_CORRECTIONS = {'डइ': 'इ'}
 _HOUSE_SUFFIX_RE = re.compile('^(\\d+(?:/\\d+)?)\\s+(भी|भ|थी|थ|फी|वी)$')
 _HOUSE_FUSED_RE = re.compile('^(\\d+)([\\u0900-\\u097F]+)((?:-\\d+)?)$')
+
+
+def _normalize_paddle_house_token(value: str) -> str:
+    """Normalize Paddle's numeric/slash rendering of a structured address."""
+    text = " ".join(str(value or "").strip().split())
+    match = re.search(
+        r"(?<!\\d)(\\d{1,4})\\s*/\\s*([\\dA-Za-zऀ-ॿ])\\s*[-–—]\\s*(\\d{1,6})(?!\\d)",
+        text,
+    )
+    if match:
+        prefix = match.group(2)
+        if prefix in {
+            "3", "4", "5", "8", "g", "G", "s", "S", "t", "T",
+            "j", "J", "इ", "ई",
+        }:
+            return f"{match.group(1)}/इ-{match.group(3)}"
+    return text
 
 
 def _normalize_house_suffix(value: str) -> str:
@@ -1463,8 +1512,15 @@ def parse_voter_box_from_ocr_lines(lines: list[str]) -> dict[str, Any]:
                 # Preserve slash-form house values exactly. This is important
                 # when Paddle sees 449/8 while focused OCR returns only 449.
                 # The slash is meaningful address data, not OCR punctuation.
-                slash_match = re.search(r"(?<!\d)(\d{1,4}/\d{1,6})(?!\d)", structured)
+                slash_match = re.search(
+                    r"(?<!\d)(\d{1,4}/\d{1,6}(?:\s+\d{1,6})?)(?!\d)",
+                    structured,
+                )
                 if slash_match:
+                    # Some printed house fields contain a second numeric
+                    # component separated by whitespace (for example
+                    # ``5/8 486``). Keep that component; reducing the field to
+                    # ``5/8`` silently discards printed address data.
                     structured = slash_match.group(1)
                 # In this roll template Tesseract sometimes renders the printed
                 # ``गली नं.8`` token as ``गली 4.8`` or ``गली A.8``.  Keep the
@@ -1499,6 +1555,7 @@ def parse_voter_box_from_ocr_lines(lines: list[str]) -> dict[str, Any]:
                 else:
                     house_match = re.search(
                         r"(?:[A-Za-z\u0900-\u097F]+-|\d+[\u0900-\u097F]+-)?\d+(?:/\d+)?"
+                        r"(?:\s+(?:\d{1,6}))?"
                         r"(?:\s*[A-Za-z\u0900-\u097F]+(?:-\d+)?)?",
                         after,
                     )
@@ -2272,7 +2329,9 @@ def _choose_house_number(
         return _normalize_short_i_slash_house(cleaned)
 
     tesseract_house = normalize_arbitration_house(tesseract_house)
-    paddle_house = normalize_arbitration_house(metadata.get("house_no", ""))
+    paddle_house = normalize_arbitration_house(
+        _normalize_paddle_house_token(metadata.get("house_no", ""))
+    )
     confidence = float(metadata.get("house_confidence", 0.0))
     votes = int(metadata.get("house_votes", 0))
     strong_format = bool(metadata.get("house_strong_format", False))
@@ -2283,7 +2342,9 @@ def _choose_house_number(
     ]
     focused_values = [
         value if re.fullmatch(r"315/245", value)
-        else _normalize_short_i_slash_house(value)
+        else _normalize_short_i_slash_house(
+            _normalize_paddle_house_token(value)
+        )
         for value in focused_values
     ]
     focused_counts = Counter(focused_values)
@@ -2340,6 +2401,19 @@ def _choose_house_number(
     paddle_is_slash = bool(re.fullmatch(
         r"\d{1,3}/\d+[A-Za-z\u0900-\u097F]*", paddle_house))
     tesseract_is_slash = "/" in tesseract_house
+    # A separated trailing component is part of the printed address, not a
+    # Paddle digit-joining error. Preserve it when the primary field contains
+    # ``numerator/denominator suffix`` and Paddle has collapsed the whitespace.
+    separated_structured = re.fullmatch(
+        r"(\d{1,4})/(\d{1,6})\s+(\d{1,6})", tesseract_house)
+    if separated_structured:
+        _, denominator, trailing = separated_structured.groups()
+        if paddle_house in {
+            f"{separated_structured.group(1)}/{denominator}{trailing}",
+            f"{separated_structured.group(1)}/{trailing}",
+        } or paddle_house.endswith(denominator + trailing):
+            reasons = ["structured_house_spacing_preserved"]
+            return tesseract_house, "tesseract", reasons
     if fused_short_i_house and paddle_is_slash:
         reasons.append("fused_short_i_prefix_recovered")
         return fused_short_i_house, "focused_tesseract+paddle", reasons
@@ -2351,6 +2425,46 @@ def _choose_house_number(
     if focused_short_i:
         reasons.append("short_i_prefix_recovered")
         return "इ-15/245", "focused_tesseract", reasons
+
+    # Paddle owns numeric house values. A bounded Paddle read can still absorb
+    # the leading digit from the Hindi house label (for example ``410/1168``
+    # when the value is ``10/1168``), so use repeated focused evidence only to
+    # remove that exact field-boundary artifact. The broad Hindi OCR value is
+    # never used as authority for this decision.
+    if (
+        paddle_is_slash
+        and confidence >= 0.70
+        and (strong_format or votes >= 2)
+    ):
+        paddle_num, paddle_denom = paddle_house.split("/", 1)
+        repaired_focused = [
+            (value, count)
+            for value, count in focused_slash_counts.items()
+            if count >= 3
+            and value != paddle_house
+            and value.split("/", 1)[1] == paddle_denom
+            and paddle_num.startswith("4")
+            and len(paddle_num) == len(value.split("/", 1)[0]) + 1
+            and paddle_num.endswith(value.split("/", 1)[0])
+        ]
+        if repaired_focused:
+            focused_house, _ = max(repaired_focused, key=lambda item: item[1])
+            reasons.append("focused_house_label_digit_removed")
+            return add_focused_prefix(focused_house), "paddle+focused_tesseract", reasons
+
+        if focused_counts[paddle_house] >= 3:
+            reasons.append("focused_house_numeric_consensus")
+            return add_focused_prefix(paddle_house), "paddle+focused_tesseract", reasons
+
+        # If the narrow Paddle crop produced a structured slash value with
+        # strong format evidence, accept it even when focused Hindi OCR found
+        # no usable digits. This keeps the engine boundary explicit.
+        if strong_format and votes >= 1:
+            return add_focused_prefix(paddle_house), "paddle", reasons
+
+    # The primary Tesseract line is retained below only for structured Hindi
+    # addresses/prefixes and for the direct unit-test fallback path. Ordinary
+    # numeric/slash values are resolved by the bounded Paddle branch above.
 
     if (
         paddle_is_slash
@@ -2817,6 +2931,17 @@ def _choose_age(
         current
         and _is_valid_age(focused)
         and focused != current
+        and not candidates
+    ):
+        # The focused crop is a field-specific Hindi/Tesseract read. When
+        # Paddle produced no age candidate, a valid focused value is stronger
+        # evidence than the broad primary line (for example 60 vs 50).
+        reasons.append("age_focused_correction")
+        return focused, "focused_tesseract", reasons
+    if (
+        current
+        and _is_valid_age(focused)
+        and focused != current
         and focused_count >= 2
         and not any(value == current for value, _ in candidates)
     ):
@@ -2940,7 +3065,14 @@ def _extract_card(
             record["house_no"] = focused_address
     # Read a printed prefix independently for every slash-form candidate.
     # The engines can agree on ``15/245`` while both omit the short-i ``इ``.
-    if "/" in primary_house_candidate or "/" in paddle_house_candidate:
+    if (
+        "/" in primary_house_candidate
+        or "/" in paddle_house_candidate
+        or any(
+            "/" in str(value)
+            for value in metadata.get("focused_house_candidates", [])
+        )
+    ):
         metadata["focused_house_prefix"] = (
             _extract_tesseract_house_prefix(metadata_bytes))
     if (
@@ -4164,6 +4296,18 @@ def _run_self_tests() -> None:
 
     check(_choose_age("9", [("19", 0.90)])[0] == "19", "age leading one")
     check(_choose_age("47", [("41", 0.90)])[0] == "47", "age conflict")
+    check(
+        _choose_age("50", [], "60")[0] == "60",
+        "focused age wins when Paddle has no candidate",
+    )
+    focused_house_label_artifact = house_meta("410/1168", 0.90, 1, strong=True)
+    focused_house_label_artifact["focused_house_candidates"] = (
+        ["10/1168"] * 8 + ["410/1168"] * 3
+    )
+    check(
+        _choose_house_number("70/7768", focused_house_label_artifact)[0] == "10/1168",
+        "focused house removes bounded label digit",
+    )
     check(_choose_age("", [("41", 0.90), ("41", 0.80)])[0] == "41",
           "unanimous age fallback")
     check(_choose_age("", [("41", 0.90), ("47", 0.90)])[0] == "",
