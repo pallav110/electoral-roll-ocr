@@ -62,7 +62,7 @@ def _get_paddle():
         return _paddle_singleton
     with _PADDLE_LOCK:
         if _paddle_singleton is None:
-            _paddle_singleton = PaddleOCR(use_angle_cls=False, lang="en", show_log=False)
+            _paddle_singleton = PaddleOCR(use_angle_cls=False, lang="en", show_log=False) # type: ignore
     return _paddle_singleton
 
 
@@ -99,6 +99,16 @@ _OCR_NAME_VARIANTS: dict[str, str] = {
     "सनन्तोष":  "सन्तोष",
     "प्राण्डेय": "पाण्डेय",
     "राजदेद":   "राजदेव",
+    # Page 4 additions — confirmed systematic glyph substitutions
+    "ग्रदीप":   "प्रदीप",    # ग्र↔प्र cluster confusion
+    "प्रस्राद":  "प्रसाद",    # स्र↔स cluster confusion
+    "सुनिल":    "सुनील",     # missing ी (vowel sign)
+    "राहूल":    "राहुल",     # ू↔ु (long/short u confusion)
+    "चंद्रा":   "चंदा",      # त्रा↔दा cluster confusion
+    "श्रीचन्द": "श्रीचन्द्र", # missing ्र conjunct
+    "त्ीमर":    "तोमर",      # त्ी↔तो glyph confusion
+    "तौमर":     "तोमर",      # ौ↔ो vowel confusion
+    "सतेन्दर":  "सतेंद्र",   # न्दर↔ंद्र conjunct variant
 }
 
 
@@ -1008,58 +1018,39 @@ def _english_line_score(lines: list[str]) -> int:
 
 
 def _detect_deleted_watermark(card_img: Any, serial_png: Optional[bytes] = None) -> bool:
-    """Detect DELETED watermark via two signals:
+    """Detect DELETED watermark via Q prefix in the serial box.
 
-    1. Serial box contains a 'Q' prefix — the printed marker for a deleted entry.
-    2. PaddleOCR on the photo region returns text that fuzzy-matches 'DELETED'
-       (catches readings like 'ELETED', 'ETED', 'iELETED', 'DELET').
-
-    Either signal alone is sufficient to mark the card deleted.
+    Fast path: Tesseract checks for letters in the serial box first.
+    Only falls through to PaddleOCR when letters are present (Q marker).
     """
     try:
-        # ── Signal 1: Q in the serial box via PaddleOCR ─────────────────
-        # Tesseract misses the Q reliably; PaddleOCR reads it at >0.99 conf.
-        if serial_png is not None and PaddleOCR is not None:
+        if serial_png is None:
+            return False
+        nparr = np.frombuffer(serial_png, np.uint8)
+        serial_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if serial_img is None:
+            return False
+
+        # Fast Tesseract pre-check — normal serials are digits only.
+        # Run PaddleOCR when: letters present (possible Q) OR Tesseract empty
+        # (Tesseract misses Q on some cards like card 1 of page 3).
+        gray = cv2.cvtColor(serial_img, cv2.COLOR_BGR2GRAY)
+        quick_txt = pytesseract.image_to_string(
+            Image.fromarray(gray), lang="eng", config="--oem 3 --psm 7"
+        ).strip().upper()
+        digits_only = bool(re.fullmatch(r"[\d\s]*", quick_txt))
+        if digits_only and quick_txt:
+            return False  # confident it's just digits — not deleted
+
+        # Letters found — confirm with PaddleOCR (much more reliable on Q)
+        if PaddleOCR is not None:
             try:
-                nparr = np.frombuffer(serial_png, np.uint8)
-                serial_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if serial_img is not None:
-                    paddle = _get_paddle()
-                    with _PADDLE_LOCK:
-                        result = paddle.ocr(serial_img, cls=False)
-                    texts = [line[1][0].upper() for line in (result[0] or []) if line[1][0]]
-                    if any("Q" in t for t in texts):
-                        return True
+                result = _get_paddle().ocr(serial_img, cls=False)
+                texts = [line[1][0].upper() for line in (result[0] or []) if line[1][0]]
+                if any("Q" in t for t in texts):
+                    return True
             except Exception:
                 pass
-
-        # ── Signal 2: PaddleOCR on the photo box region ──────────────────
-        if card_img is not None and card_img.size > 0 and PaddleOCR is not None:
-            try:
-                h, w = card_img.shape[:2]
-                x0 = int(PHOTO_BOX_REGION[0] * w)
-                y0 = int(PHOTO_BOX_REGION[1] * h)
-                x1 = int(PHOTO_BOX_REGION[2] * w)
-                y1 = int(PHOTO_BOX_REGION[3] * h)
-                photo_crop = card_img[y0:y1, x0:x1]
-                if photo_crop.size > 0:
-                    paddle = _get_paddle()
-                    with _PADDLE_LOCK:
-                        result = paddle.ocr(photo_crop, cls=False)
-                    texts = [
-                        line[1][0].upper().replace(" ", "")
-                        for line in (result[0] or [])
-                        if line[1][0]
-                    ]
-                    target = "DELETED"
-                    for t in texts:
-                        # fuzzy: target is a substring of read, or read is a
-                        # suffix/substring of target (catches ELETED, ETED, etc.)
-                        if target in t or t in target and len(t) >= 4:
-                            return True
-            except Exception as exc:
-                log.debug("Paddle deleted check failed: %s", exc)
-
         return False
     except Exception as exc:
         log.debug("Deleted-watermark detection failed: %s", exc)
@@ -1120,6 +1111,8 @@ def parse_voter_box_from_ocr_lines(
         text = value.translate(_DIGITS_MAP)
         text = re.sub(r"[\u200b-\u200f\u00ad]", "", text)
         text = re.sub(r"\u094d{2,}", "\u094d", text)
+        # Strip leading OCR punctuation noise (quotes, pipes, commas, visarga)
+        text = re.sub(r"^['\",;|\u0964\u0965\u0903\s]+", "", text)
         return " ".join(text.split())
 
     def after_colon(line: str) -> str:
@@ -1186,9 +1179,14 @@ def parse_voter_box_from_ocr_lines(
 
         # Age and gender can appear on the same line: आयु : 58 लिंग : पुरुष
         if "आयु" in line:
-            m = re.search(r"आयु\s*[:：]?\s*(\d{1,3})", line)
+            # Match ASCII or Devanagari digits (e.g. ३6, ३६)
+            m = re.search(r"आयु\s*[:：]?\s*([\d०-९]{1,3})", line)
             if m:
-                record["age"] = m.group(1)
+                age_val = m.group(1).translate(str.maketrans("०१२३४५६७८९", "0123456789"))
+                # Voters must be >= 18; single/double digit values below 18
+                # are almost always Tesseract dropping a leading '1'.
+                if int(age_val) >= 18:
+                    record["age"] = age_val
         if "लिंग" in line:
             if "पुरुष" in line:
                 record["gender"] = "पुरुष"
@@ -1237,7 +1235,7 @@ def _extract_card(
         if rendered_images is not None:
             hindi_bytes = rendered_images
         else:
-            hindi_bytes = page.get_pixmap(dpi=200, clip=card_rect, alpha=False).tobytes("png")
+            hindi_bytes = page.get_pixmap(dpi=200, clip=card_rect, alpha=False).tobytes("png") # type: ignore
         _t("page.get_pixmap → PNG", f"<{len(hindi_bytes)} bytes>")
 
         card_img = cv2.imdecode(np.frombuffer(hindi_bytes, np.uint8), cv2.IMREAD_COLOR)
@@ -1311,6 +1309,7 @@ def _extract_card(
             hv_lines = None
             e_digit = None
             e_raw = None
+            paddle_house = None  # PaddleOCR house value (trusted primary)
             hv_png = _crop_png(cl, HOUSE_VALUE_REGION, "HOUSE_VAL")
             if hv_png:
                 hv_lines = _extract_text_with_tesseract(hv_png)
@@ -1319,36 +1318,7 @@ def _extract_card(
                 _t("_extract_house_number_with_tesseract (digits)", e_digit)
                 e_raw = _extract_house_number_with_tesseract(hv_png, raw=True)
                 _t("_extract_house_number_with_tesseract (raw)", e_raw)
-                # PaddleOCR reads numeric values reliably where Tesseract LSTM
-                # drops narrow '1' glyphs. Use it as primary for the HV region.
-                # See: https://github.com/tesseract-ocr/tesseract/issues/4285
-                if PaddleOCR is not None and (not e_digit or "/" not in (e_digit or "")):
-                    try:
-                        nparr = np.frombuffer(hv_png, np.uint8)
-                        hv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        if hv_img is not None:
-                            scale = max(3, -(-TESSERACT_MIN_HEIGHT_PX // max(1, hv_img.shape[0])))
-                            hv_big = cv2.resize(hv_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-                            paddle = _get_paddle()
-                            with _PADDLE_LOCK:
-                                paddle_result = paddle.ocr(hv_big, cls=False)
-                            paddle_texts = [line[1][0] for line in (paddle_result[0] or []) if line[1][0]]
-                            for pt in paddle_texts:
-                                # Prefer full fraction over bare digits
-                                mf = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", pt)
-                                if mf:
-                                    e_digit = f"{mf.group(1)}/{mf.group(2)}"
-                                    _t("PaddleOCR HV fraction", e_digit)
-                                    break
-                            if not e_digit:
-                                for pt in paddle_texts:
-                                    runs = re.findall(r"\d+", pt)
-                                    if runs:
-                                        e_digit = max(runs, key=len)
-                                        _t("PaddleOCR HV digits", e_digit)
-                                        break
-                    except Exception as _pe:
-                        log.debug("PaddleOCR HV pass failed: %s", _pe)
+                # PaddleOCR for house deferred to main thread (not thread-safe)
             # If HV returned nothing, try PaddleOCR on the wider HOUSE crop,
             # then fall back to Tesseract — catches single-digit values like
             # '1' that Tesseract LSTM misses on narrow glyphs.
@@ -1386,34 +1356,47 @@ def _extract_card(
             if combined:
                 # Strip leading Devanagari label that leaked in
                 cleaned = re.sub(r"^[^A-Za-z0-9]+", "", combined).strip()
-                # Arbitration:
-                # - cleaned has a proper slash (not starting with /) AND
-                #   parser is empty or starts with / → prefer cleaned
-                #   (recovers leading-1: combined='1/1044', parser='/044')
-                # - otherwise parser is authoritative (correctly handles
-                #   mixed values like '8इ-526', '7 बी')
-                if ("/" in cleaned and not cleaned.startswith("/")
+                # Arbitration priority:
+                # 1. PaddleOCR (paddle_house) — most reliable for digits
+                # 2. cleaned from _combine_house_read — good for fractions/prefixes
+                # 3. parser_house — fallback (Tesseract drops leading 1s)
+                # Exception: parser wins for mixed Hindi+digit values like '8इ-526', '7 बी'
+                has_devanagari = bool(re.search(r"[ऀ-ॿ]", parser_house))
+                if paddle_house and not has_devanagari:
+                    # PaddleOCR is primary for pure numeric/slash values
+                    if "/" in cleaned and not cleaned.startswith("/") and len(cleaned) > len(paddle_house):
+                        best = cleaned  # combined fraction is longer/richer
+                    else:
+                        best = paddle_house
+                elif ("/" in cleaned and not cleaned.startswith("/")
                         and (not parser_house or parser_house.startswith("/"))):
                     best = cleaned
+                elif has_devanagari:
+                    best = parser_house  # mixed Hindi value, keep parser
                 elif parser_house:
                     best = parser_house
                 else:
                     best = cleaned if cleaned else combined
-                # Replace ] and [ lookalikes for 1 (e.g. '8/8]' -> '8/81')
-                best = re.sub(r"(?<!\d)[|\[\]](?=\d|/|$)|(?<=\d)[|\[\]](?=\d|/|$)|(?<=/)[\[\]]", "1", best)
+                # Replace ] [ | । ॥ lookalikes for 1
+                # ।  = Devanagari danda (U+0964), ॥ = double danda (U+0965)
+                best = re.sub(r"(?<!\d)[|\[\]।॥](?=\d|/|$)|(?<=\d)[|\[\]।॥](?=\d|/|$)|(?<=/)[\[\]।॥]", "1", best)
                 record["house_no"] = best
+            elif paddle_house and not re.search(r"[ऀ-ॿ]", record.get("house_no", "")):
+                record["house_no"] = paddle_house
             elif parser_house:
-                # _combine_house_read found nothing but parser did
                 record["house_no"] = parser_house
         except Exception as exc:
             log.debug("House number extraction failed: %s", exc)
 
-        # ── 8. Deleted watermark ─────────────────────────────────────────
-        # Store card image and serial crop for sequential deleted detection
-        # after the thread pool — PaddleOCR is not reliably thread-safe even
-        # with a lock, so we defer this check to the main thread.
+        # Defer ALL PaddleOCR calls to the main thread — not thread-safe even
+        # with a lock. Store crops AND current Tesseract values so the
+        # sequential pass can skip PaddleOCR when Tesseract is already good.
         record["_cl_for_deleted"] = cl
         record["_serial_png_for_deleted"] = serial_png
+        record["_hv_png_for_paddle"] = hv_png
+        record["_age_png_for_paddle"] = _crop_png(cl, AGE_REGION, "AGE_DEFER") if PaddleOCR is not None else None
+        record["_tess_house"] = record.get("house_no", "")
+        record["_tess_age"] = record.get("age", "")
         record["is_deleted"] = False  # filled in after thread pool
 
         # ── 9. Final record ──────────────────────────────────────────────
@@ -1747,7 +1730,7 @@ def _extract_pdf_ocr_unlocked(
                 # Render the full page once at 200 DPI and slice card crops from
                 # the resulting NumPy array. This replaces ~30 individual
                 # page.get_pixmap() calls (one per card) with a single render.
-                full_pix = page.get_pixmap(dpi=200, alpha=False)
+                full_pix = page.get_pixmap(dpi=200, alpha=False) # type: ignore
                 full_arr = np.frombuffer(full_pix.samples, np.uint8).reshape(
                     full_pix.height, full_pix.width, full_pix.n
                 )
@@ -1780,15 +1763,85 @@ def _extract_pdf_ocr_unlocked(
             else:
                 extracted_records = [extract_card_at(item) for item in indexed_rects]
 
-            # ── Sequential deleted detection (PaddleOCR not thread-safe) ──
-            del_started = time.perf_counter()
+            # ── Sequential PaddleOCR pass (not thread-safe) ──────────────
+            # Per-card paddle calls for house+age. Deleted uses Q-in-serial only.
+            paddle_started = time.perf_counter()
+            paddle_inst = _get_paddle() if PaddleOCR is not None else None
+
             for rec in extracted_records:
                 if rec is None:
                     continue
                 cl_img = rec.pop("_cl_for_deleted", None)
                 ser_png = rec.pop("_serial_png_for_deleted", None)
+                hv_png_deferred = rec.pop("_hv_png_for_paddle", None)
+                age_png_deferred = rec.pop("_age_png_for_paddle", None)
+                tess_house = rec.pop("_tess_house", "")
+                tess_age = rec.pop("_tess_age", "")
+
                 rec["is_deleted"] = _detect_deleted_watermark(cl_img, serial_png=ser_png)
-            print(f"[OCR] page={page_number} deleted_detection={time.perf_counter()-del_started:.2f}s", flush=True)
+
+                if paddle_inst is None:
+                    continue
+
+                tess_house_ok = bool(tess_house and re.search(r"\d{2,}", tess_house)
+                                     and not tess_house.startswith("/"))
+                tess_age_ok = bool(tess_age and tess_age.isdigit()
+                                   and len(tess_age) >= 2 and int(tess_age) >= 18)
+
+                if hv_png_deferred:
+                    try:
+                        nparr = np.frombuffer(hv_png_deferred, np.uint8)
+                        hv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if hv_img is not None:
+                            s = min(4, max(3, -(-80 // max(1, hv_img.shape[0]))))
+                            hv_big = cv2.resize(hv_img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+                            res = paddle_inst.ocr(hv_big, cls=False)
+                            texts = [ln[1][0] for ln in (res[0] or []) if ln[1][0]]
+                            paddle_house = None
+                            for pt in texts:
+                                mf = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", pt)
+                                if mf:
+                                    paddle_house = f"{mf.group(1)}/{mf.group(2)}"
+                                    break
+                            if not paddle_house:
+                                for pt in texts:
+                                    runs = re.findall(r"\d+", pt)
+                                    if runs:
+                                        paddle_house = max(runs, key=len)
+                                        break
+                            if paddle_house:
+                                cur = rec.get("house_no", "")
+                                if not re.search(r"[ऀ-ॿ]", cur):
+                                    rec["house_no"] = paddle_house
+                    except Exception as _pe:
+                        log.debug("PaddleOCR house failed: %s", _pe)
+
+                if age_png_deferred and not tess_age_ok:
+                    try:
+                        nparr = np.frombuffer(age_png_deferred, np.uint8)
+                        age_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if age_img is not None:
+                            s = min(4, max(3, -(-80 // max(1, age_img.shape[0]))))
+                            age_big = cv2.resize(age_img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+                            res = paddle_inst.ocr(age_big, cls=False)
+                            paddle_ages = []
+                            for ln in (res[0] or []):
+                                for digits in re.findall(r"\d{1,3}", ln[1][0]):
+                                    if 18 <= int(digits) <= 120:
+                                        paddle_ages.append(digits)
+                            if paddle_ages:
+                                rec["age"] = max(paddle_ages, key=lambda x: (len(x), int(x)))
+                    except Exception as _pe:
+                        log.debug("PaddleOCR age failed: %s", _pe)
+
+                # Danda/double-danda lookalike fix
+                house_val = rec.get("house_no", "")
+                if house_val:
+                    house_val = re.sub(r"^[।॥|]+(?=\d)", "1", house_val)
+                    house_val = re.sub(r"(?<=\d)[।॥|]+(?=\d)", "1", house_val)
+                    rec["house_no"] = house_val
+
+            print(f"[OCR] page={page_number} paddle_sequential={time.perf_counter()-paddle_started:.2f}s", flush=True)
 
             for (card_index, _), record in zip(indexed_rects, extracted_records):
                 if record is None:
