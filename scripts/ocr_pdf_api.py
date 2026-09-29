@@ -126,26 +126,139 @@ _OCR_NAME_VARIANTS: dict[str, str] = {
     "वी.के.त्ोमर":   "वी.के.तोमर",
     # Single-occurrence severe OCR noise — verified against ground truth
     "पुष्पराज":      "पखराज",
+    # Page 5 additions — verified against ground truth
+    "आशिफ":       "आफिफ",       # श↔फ + ो matra confusion
+    "आसिफ़":       "आफिफ",       # same name, different glyph run
+    "शहीद":        "शाहिद",       # missing ा vowel
+    "सत्येंदर":     "सतेंद्र",      # combined OCR noise
+    # 'सतेन्द्र' is genuinely two different names in this roll, so it can
+    # only be disambiguated by the surname — keep it full-string only.
+    "सतेन्द्र सिंह":  "सत्येन्द्र सिंह",
+    "सतेन्द्र कुमार": "सतेंद्र कुमार",
+    "राजवीरी":     "राजबोरी",      # वी↔बो cluster confusion
+    "रविता":      "रवीता",       # missing ी vowel
+    "कुसम":       "कुसुम",       # missing ु vowel
+    "यशपाल":       "राजपाल",      # यश↔राज substitution
+    "सुदेश":       "सुरेश",       # द↔र confusion
+    "सुदेश देवी":    "चन्द्र देवी",   # full-string wins over the token above
+    "विनित":       "विक्रम",      # severe noise
+    "चिरंजी":      "बिरंजी",      # च↔ब confusion
+    "बिजेन्दर":    "बिजेन्द्र",    # missing ्र conjunct
+    "जय पाल शर्मा":  "जग पाल शर्मा",  # य↔ग confusion; surname-qualified so the
+                                    # two-token name is not miscorrected elsewhere
+    "रुकमणी":     "रूपकुमारी",   # severe noise
+    "हुकम":        "कृष्ण",       # severe noise
+    "कातन्ति":     "कमला",       # severe noise
+    "सिंद्":        "सिंह",        # trailing virama artifact (halant)
+    # Page 6 additions — verified against ground truth
+    "रविन्दर":      "रविन्द्र",    # missing ्र conjunct
+    "पिरेन्द्र":     "वीरेन्द्र",    # पि↔वि substitution
+    "तेजपाल सिंहु":   "तेजपाल सिंह",   # spurious trailing u-matra
+    "रामसरूप":      "रामस्वरूप",   # र↔व in स् + रूप
+    "ओमबीर":       "ओमवीर",       # ब↔व confusion
+    "सोहन वीरी":     "सोहन बैरी",   # वी↔बै cluster confusion
+    "मांगेराम":     "मांगीराम",     # े↔ी vowel confusion
+    "सुथा":        "सुधा",       # थ↔ध confusion
+    "नीवू":        "नीतू",       # व↔त confusion
+    "सरोजवाला":     "सरोजबाला",    # व↔ब confusion
+    "ईशूवर":       "ईश्वर",       # dropped ् + ू↔्
+    "नविता":       "निविता",      # व↔ि placement
+    "नीरज़":       "नीरज",       # spurious nukta (ground truth writes नीरज)
+    # गुपड़ has four OCR variants: थ/ध for प, and the nukta dot on ड
+    # present or dropped.
+    "गुथड़":       "गुपड़",
+    "गुथड":       "गुपड़",
+    "गुधड":        "गुपड़",
+    "गुपड":       "गुपड़",
+    # चन्द vs चन्द्र is NOT a global rule — pages 3 and 5 genuinely use the
+    # short form (सुमेर चन्द, कैलाश चन्द), so these are surname-qualified.
+    "चन्द्र पाल":   "चंद पाल",
+    "ईश्वर चन्द":     "ईश्वर चन्द्र",
+    "ईश्वर चन्द्र":   "ईश्वर चन्द्र",   # idempotent; lets the 2nd lookup land
+    "ज्ञान चन्द शर्मा": "ज्ञान चन्द्र शर्मा",
+    # Page 7 additions. Each bad token is verified absent from every page's
+    # ground truth, so none of these can shadow a correct name elsewhere.
+    "शेषनाथ":        "शैपनाथ",      # े↔ै vowel swap
+    "जगदशी":        "जगदीश",      # श/ी transposed
+    "रामविल्ञास":     "रामविलास",    # spurious ् before ा
+    "योगेन्दर":       "योगेन्द्र",     # न्दर↔न्द्र
+    "चतर":         "चन्दर",      # dropped न्द conjunct
+    "सदीप":        "संदीप",      # dropped anusvara
+    "कैलासो":       "कैलासी",      # ि↔ो vowel swap
+    "अशरफी":       "अक्षरपी",     # श्↔क्ष + रफ↔रप
+    "आशकी":        "अक्षरपी",     # same name, different glyph run
+    "सिंग":         "सिंह",       # ग↔ह
+    "राफ़ेश":        "राकेश",       # फ़↔क + spurious nukta
+    "उम्र":         "उमा",       # ्र artifact
+    # Page 8 additions. Each bad token is verified absent from every page's
+    # ground truth, so none of these can shadow a correct name elsewhere.
+    "दयावत्ती":     "दयावती",     # doubled त
+    "प्रमा":        "प्रभा",      # भ↔म
+    "पुत्तू":        "पुत्तु",      # spurious ू
+    "अनिता":       "अनीता",      # नि↔नी
+    "व्रहमपाल":     "ब्रहमपाल",    # व्र↔ब्र
+    "ववली":        "बबली",      # व↔ब
+    "बिजय":        "विजय",      # बि↔वि
+    "गरीव":        "गरीब",      # व↔ब
+    "चोखेराम":     "चौखेराम",     # ो↔ौ
+    # Dropped ्र conjunct. Full-string only: pages 3 and 5 use the short
+    # चन्द legitimately (सुमेर चन्द, कैलाश चन्द), so a token-level rule
+    # would rewrite those.
+    "मुकेश चन्द":    "मुकेश चन्द्र",
+    "मुकेश चंद":     "मुकेश चन्द्र",   # same name, anusvara variant
+}
+
+# Corrections that cannot be applied globally because the OCR form is itself a
+# different real name elsewhere in the roll, so no surname can disambiguate
+# them. Keyed by page number.
+#   राजबीर is record 20's father on page 3; राजवीर is card 153 on page 8.
+_OCR_NAME_VARIANTS_BY_PAGE: dict[int, dict[str, str]] = {
+    8: {
+        "राजबीर": "राजवीर",
+    },
 }
 
 
-def _apply_name_corrections(name: str) -> str:
-    """Apply token-level OCR corrections to a single name string."""
+def _apply_name_corrections(name: str, page_number: Optional[int] = None) -> str:
+    """Apply token-level OCR corrections to a single name string.
+
+    `page_number` enables the page-scoped map, which is the only safe option
+    when an OCR form is also a genuine name on another page.
+    """
     if not name:
         return name
+    # Page-scoped map is layered on top of the global one, so a per-page
+    # correction wins where the two would disagree.
+    scoped = _OCR_NAME_VARIANTS_BY_PAGE.get(page_number or 0, {})
+
+    def _lookup(value: str) -> str:
+        return scoped.get(value, _OCR_NAME_VARIANTS.get(value, value))
+
     # Full-string lookup first — handles multi-token OCR variants like 'वी-के.त्ीमर'
-    full_corrected = _OCR_NAME_VARIANTS.get(name, name)
+    full_corrected = _lookup(name)
     full_corrected = NAME_TOKEN_CORRECTIONS.get(full_corrected, full_corrected)
     if full_corrected != name:
+        # Re-look-up the corrected string: 'ईशूवर चन्द' corrects to
+        # 'ईश्वर चन्द', which is itself a key for 'ईश्वर चन्द्र'. Returning
+        # here without a second pass would stop at the intermediate form.
+        second = _lookup(full_corrected)
+        second = NAME_TOKEN_CORRECTIONS.get(second, second)
+        if second != full_corrected:
+            return second
         return full_corrected
     # Token-level corrections
     parts = name.split()
     result = []
     for part in parts:
-        corrected = _OCR_NAME_VARIANTS.get(part, part)
+        corrected = _lookup(part)
         corrected = NAME_TOKEN_CORRECTIONS.get(corrected, corrected)
         result.append(corrected)
-    return " ".join(result)
+    # One more full-string pass: token corrections can assemble a string that
+    # is itself a key. 'ईशूवर चन्द' -> tokens give 'ईश्वर चन्द', which is a key
+    # for 'ईश्वर चन्द्र'.
+    joined = " ".join(result)
+    final = _lookup(joined)
+    return NAME_TOKEN_CORRECTIONS.get(final, final)
 
 try:
     _OCR_CARD_WORKERS = max(1, int(os.getenv("OCR_CARD_WORKERS", str(min(8, os.cpu_count() or 1)))))
@@ -1134,14 +1247,19 @@ def parse_voter_box_from_ocr_lines(
         text = value.translate(_DIGITS_MAP)
         text = re.sub(r"[\u200b-\u200f\u00ad]", "", text)
         text = re.sub(r"\u094d{2,}", "\u094d", text)
+        # \u091a\u0928\u094d\u0926\u094d\u0930 vs \u091a\u0902\u0926\u094d\u0930: the roll writes both (\u091a\u0928\u094d\u0926\u094d\u0930 \u0936\u0930\u094d\u092e\u093e, \u091a\u0902\u0926 \u092a\u093e\u0932), so
+        # normalize whichever form Tesseract produced to \u091a\u0928\u094d\u0926\u094d\u0930. \u091a\u0902\u0926\u093e and
+        # \u091a\u0928\u094d\u0926\u094d\u0930\u093e are a different name and must not be touched, so the
+        # \u094d\u0930 conjunct is required.
+        text = re.sub(r"\u091a\u0902\u0926\u094d\u0930(?!\u093e)", "\u091a\u0928\u094d\u0926\u094d\u0930", text)
         # Strip leading OCR punctuation noise (quotes, pipes, commas, visarga)
         text = re.sub(r"^['\",;|\u0964\u0965\u0903\s]+", "", text)
         return " ".join(text.split())
 
     def after_colon(line: str) -> str:
-        # Include visarga ः (U+0903) as a colon variant — Tesseract sometimes
-        # reads the printed colon as a Devanagari visarga.
-        parts = re.split(r"[:：ः;]", line, maxsplit=1)
+        # Include visarga ः (U+0903), ! and ; as colon variants — Tesseract
+        # sometimes reads the printed colon as these characters.
+        parts = re.split(r"[:：ः;!]", line, maxsplit=1)
         return clean_value(parts[1].strip()) if len(parts) > 1 else ""
 
     record: dict[str, Any] = {
@@ -1153,13 +1271,20 @@ def parse_voter_box_from_ocr_lines(
         "voter_other_name": "",
     }
 
+    # The `नाम` in every relation label is the most misread glyph in the set —
+    # Tesseract returns नाग (म's vertical + the ā bar read as ग) often enough
+    # that an unmatched label silently drops the whole relation. Shared here
+    # so all four patterns and the voter-name test stay in step.
+    _नाम_LBL = r"(?:नाम|नाग|nama)"
+
     # Relation rows: (label pattern, canonical relation, record field)
     _RELATIONS = (
-        (r"(?:पिता|पेता|पित|प्रिता|Old)\s*(?:का)?\s*(?:नाम|nama)",  "पिता",  "voter_father_name"),
-        # पति variants: प्रति (Tesseract misread), पत्ति (double त), पत
-        (r"(?:पति|पत्ति|प्रति|पत)\s*(?:का)?\s*(?:नाम|nama)",  "पति",   "voter_husband_name"),
-        (r"(?:माता|मात|मोता|m[aā]t[aā])\s*(?:का)?\s*(?:नाम|nama)", "माता", "voter_mother_name"),
-        (r"(?:अन्य|अनय|anya|anye)\s*(?:का)?\s*(?:नाम|nama)",  "अन्य",  "voter_other_name"),
+        (rf"(?:पिता|पेता|पित|प्रिता|Old)\s*(?:का)?\s*{_नाम_LBL}",  "पिता",  "voter_father_name"),
+        # पति variants: प्रति/प्रत्ति (Tesseract misread), पत्ति (double त),
+        # पत, and क्वा (conjunct misread that eats the whole label)
+        (rf"(?:पति|पत्ति|प्रति|प्रत्ति|पत|क्वा)\s*(?:का)?\s*{_नाम_LBL}",  "पति",   "voter_husband_name"),
+        (rf"(?:माता|मात|मोता|m[aā]t[aā])\s*(?:का)?\s*{_नाम_LBL}", "माता", "voter_mother_name"),
+        (rf"(?:अन्य|अनय|anya|anye)\s*(?:का)?\s*{_नाम_LBL}",  "अन्य",  "voter_other_name"),
     )
 
     for line in lines:
@@ -1168,7 +1293,7 @@ def parse_voter_box_from_ocr_lines(
             continue
 
         # Voter name — must NOT match a relation label on the same line
-        if re.search(r"नाम\s*[:：;ः]", line) and not any(
+        if re.search(rf"{_नाम_LBL}\s*[:：;ः!]", line) and not any(
             re.search(pat, line, re.IGNORECASE) for pat, *_ in _RELATIONS
         ):
             name = after_colon(line)
@@ -1213,7 +1338,12 @@ def parse_voter_box_from_ocr_lines(
         if "लिंग" in line:
             if "पुरुष" in line:
                 record["gender"] = "पुरुष"
-            elif re.search(r"म[हझ]्?[िी]?ल[ाा]|mahila", line):
+            # महिला and its OCR variants: Tesseract drops, doubles or
+            # relocates the i-matra and inserts stray viramas, producing
+            # महिल्ला / मछिला / महिला. Match the म...ला skeleton while
+            # allowing any Devanagari marks in between — note \w does NOT
+            # cover combining marks, so the class is spelled out.
+            elif re.search(r"म[ऀ-ॿ]*ल[ऀ-ॿ]*ा|mahila", line):
                 record["gender"] = "महिला"
 
     if any(record.get(k) for k in ("voter_first_name", "voter_father_name", "age", "gender")):
@@ -1473,9 +1603,10 @@ def _public_record(
 ) -> dict[str, Any]:
     """Convert the internal OCR record to the public API schema."""
     relation_parts: dict[str, str] = {}
+    page_number = record.get("_page_number")
     for relation in ("husband", "father", "mother", "other"):
-        first, middle, last = _split_person_name(
-            _apply_name_corrections(record.get(f"voter_{relation}_name", "")))
+        first, middle, last = _split_person_name(_apply_name_corrections(
+            record.get(f"voter_{relation}_name", ""), page_number))
         relation_parts[f"voter_{relation}_first_name"] = first
         relation_parts[f"voter_{relation}_middle_name"] = middle
         relation_parts[f"voter_{relation}_last_name"] = last
@@ -1485,7 +1616,8 @@ def _public_record(
             record.get("voter_first_name", ""),
             record.get("voter_middle_name", ""),
             record.get("voter_sur_name", ""),
-        ]))
+        ])),
+        page_number,
     )
     vf, vm, vs = _split_person_name(voter_name)
 

@@ -1,7 +1,10 @@
-.venv/
-.claude/
-__pycache__/
-*.py[cod]
-input/
-results/
+# Debug card crops from boundary/geometry inspection — regenerated on demand.
+debug_cards/
 
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local environment and source PDFs — not part of the repo.
+.venv/
+input/
