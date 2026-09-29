@@ -93,22 +93,39 @@ NAME_TOKEN_CORRECTIONS = _load_name_token_corrections()
 # Conservative recurring glyph substitutions observed in Hindi roll OCR.
 # These are language-level OCR confusions, not page-specific voter mappings.
 _OCR_NAME_VARIANTS: dict[str, str] = {
-    "मेता":      "मेहता",
-    "ब्रहम":    "ब्रह्म",
-    "ब्रहमपाल": "ब्रह्मपाल",
-    "सनन्तोष":  "सन्तोष",
-    "प्राण्डेय": "पाण्डेय",
-    "राजदेद":   "राजदेव",
-    # Page 4 additions — confirmed systematic glyph substitutions
-    "ग्रदीप":   "प्रदीप",    # ग्र↔प्र cluster confusion
-    "प्रस्राद":  "प्रसाद",    # स्र↔स cluster confusion
-    "सुनिल":    "सुनील",     # missing ी (vowel sign)
-    "राहूल":    "राहुल",     # ू↔ु (long/short u confusion)
-    "चंद्रा":   "चंदा",      # त्रा↔दा cluster confusion
-    "श्रीचन्द": "श्रीचन्द्र", # missing ्र conjunct
-    "त्ीमर":    "तोमर",      # त्ी↔तो glyph confusion
-    "तौमर":     "तोमर",      # ौ↔ो vowel confusion
-    "सतेन्दर":  "सतेंद्र",   # न्दर↔ंद्र conjunct variant
+    "मेता":       "मेहता",
+    "ब्रहम":     "ब्रह्म",
+    "ब्रहमपाल":  "ब्रह्मपाल",
+    "सनन्तोष":   "सन्तोष",
+    "प्राण्डेय":  "पाण्डेय",
+    "राजदेद":    "राजदेव",
+    # Page 4 confirmed systematic glyph substitutions
+    "ग्रदीप":    "प्रदीप",     # ग्र↔प्र cluster confusion
+    "प्रस्राद":   "प्रसाद",     # स्र↔स cluster confusion
+    "सुनिल":     "सुनील",      # missing ी (vowel sign)
+    "राहूल":     "राहुल",      # ू↔ु (long/short u confusion)
+    "चंद्रा":    "चंदा",       # त्रा↔दा cluster confusion
+    "श्रीचन्द":  "श्रीचन्द्र",  # missing ्र conjunct
+    "त्ीमर":     "तोमर",       # त्ी↔तो glyph confusion
+    "तौमर":      "तोमर",       # ौ↔ो vowel confusion
+    "सतेन्दर":   "सतेंद्र",    # न्दर↔ंद्र conjunct variant
+    "बबिता":     "बबीता",      # short i ↔ long i
+    "सन्नी":     "सन्ती",      # न्न↔न्त confusion
+    "गुड़ी":     "गुड्डी",     # ड़↔ड्ड cluster confusion
+    "सत्तों":    "सन्तो",      # त्तों↔न्तो cluster confusion
+    "अरबधिन्द":  "अरविन्द",    # ब↔व + ध↔व confusion
+    "चन्द्रमान": "चन्द्रभान",  # म↔भ confusion
+    "ईसम":       "ईश्वर",      # severe OCR noise (single token)
+    "बीरपाल":   "तीरपाल",     # ब↔त confusion
+    "बवी":       "वी",          # ब prefix noise on वी.के.तोमर
+    "कैं":       "के",          # ै↔े + ं noise
+    # Full-string multi-token OCR variants of 'वी.के.तोमर'
+    "वी-के.त्ीमर":   "वी.के.तोमर",
+    "बवी.कैं.तौमर":  "वी.के.तोमर",
+    "वी.के,तौमर":    "वी.के.तोमर",
+    "वी.के.त्ोमर":   "वी.के.तोमर",
+    # Single-occurrence severe OCR noise — verified against ground truth
+    "पुष्पराज":      "पखराज",
 }
 
 
@@ -116,6 +133,12 @@ def _apply_name_corrections(name: str) -> str:
     """Apply token-level OCR corrections to a single name string."""
     if not name:
         return name
+    # Full-string lookup first — handles multi-token OCR variants like 'वी-के.त्ीमर'
+    full_corrected = _OCR_NAME_VARIANTS.get(name, name)
+    full_corrected = NAME_TOKEN_CORRECTIONS.get(full_corrected, full_corrected)
+    if full_corrected != name:
+        return full_corrected
+    # Token-level corrections
     parts = name.split()
     result = []
     for part in parts:
@@ -1132,7 +1155,7 @@ def parse_voter_box_from_ocr_lines(
 
     # Relation rows: (label pattern, canonical relation, record field)
     _RELATIONS = (
-        (r"(?:पिता|पेता|पित|Old)\s*(?:का)?\s*(?:नाम|nama)",  "पिता",  "voter_father_name"),
+        (r"(?:पिता|पेता|पित|प्रिता|Old)\s*(?:का)?\s*(?:नाम|nama)",  "पिता",  "voter_father_name"),
         # पति variants: प्रति (Tesseract misread), पत्ति (double त), पत
         (r"(?:पति|पत्ति|प्रति|पत)\s*(?:का)?\s*(?:नाम|nama)",  "पति",   "voter_husband_name"),
         (r"(?:माता|मात|मोता|m[aā]t[aā])\s*(?:का)?\s*(?:नाम|nama)", "माता", "voter_mother_name"),
@@ -1322,29 +1345,6 @@ def _extract_card(
             # If HV returned nothing, try PaddleOCR on the wider HOUSE crop,
             # then fall back to Tesseract — catches single-digit values like
             # '1' that Tesseract LSTM misses on narrow glyphs.
-            if not e_digit and house_png and PaddleOCR is not None:
-                try:
-                    nparr = np.frombuffer(house_png, np.uint8)
-                    house_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    if house_img is not None:
-                        scale = max(3, -(-TESSERACT_MIN_HEIGHT_PX // max(1, house_img.shape[0])))
-                        house_big = cv2.resize(house_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-                        paddle = _get_paddle()
-                        with _PADDLE_LOCK:
-                            paddle_result = paddle.ocr(house_big, cls=False)
-                        for line in (paddle_result[0] or []):
-                            pt = line[1][0]
-                            mf = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", pt)
-                            if mf:
-                                e_digit = f"{mf.group(1)}/{mf.group(2)}"
-                                break
-                            runs = re.findall(r"\d+", pt)
-                            if runs:
-                                e_digit = max(runs, key=len)
-                                break
-                        _t("PaddleOCR HOUSE fallback", e_digit)
-                except Exception as _pe:
-                    log.debug("PaddleOCR HOUSE fallback failed: %s", _pe)
             if not e_digit and house_png:
                 e_digit = _extract_house_number_with_tesseract(house_png)
                 _t("_extract_house_number_with_tesseract (HOUSE fallback)", e_digit)
@@ -1356,33 +1356,29 @@ def _extract_card(
             if combined:
                 # Strip leading Devanagari label that leaked in
                 cleaned = re.sub(r"^[^A-Za-z0-9]+", "", combined).strip()
-                # Arbitration priority:
-                # 1. PaddleOCR (paddle_house) — most reliable for digits
-                # 2. cleaned from _combine_house_read — good for fractions/prefixes
-                # 3. parser_house — fallback (Tesseract drops leading 1s)
-                # Exception: parser wins for mixed Hindi+digit values like '8इ-526', '7 बी'
                 has_devanagari = bool(re.search(r"[ऀ-ॿ]", parser_house))
-                if paddle_house and not has_devanagari:
-                    # PaddleOCR is primary for pure numeric/slash values
-                    if "/" in cleaned and not cleaned.startswith("/") and len(cleaned) > len(paddle_house):
-                        best = cleaned  # combined fraction is longer/richer
+                # paddle_house or e_digit (from raw pass) is primary for pure digits
+                best_numeric = paddle_house or (e_digit if e_digit and not has_devanagari else None)
+                if best_numeric and not has_devanagari:
+                    if "/" in cleaned and not cleaned.startswith("/") and len(cleaned) > len(best_numeric):
+                        best = cleaned
                     else:
-                        best = paddle_house
+                        best = best_numeric
                 elif ("/" in cleaned and not cleaned.startswith("/")
                         and (not parser_house or parser_house.startswith("/"))):
                     best = cleaned
                 elif has_devanagari:
-                    best = parser_house  # mixed Hindi value, keep parser
+                    best = parser_house
                 elif parser_house:
                     best = parser_house
                 else:
                     best = cleaned if cleaned else combined
-                # Replace ] [ | । ॥ lookalikes for 1
-                # ।  = Devanagari danda (U+0964), ॥ = double danda (U+0965)
                 best = re.sub(r"(?<!\d)[|\[\]।॥](?=\d|/|$)|(?<=\d)[|\[\]।॥](?=\d|/|$)|(?<=/)[\[\]।॥]", "1", best)
                 record["house_no"] = best
             elif paddle_house and not re.search(r"[ऀ-ॿ]", record.get("house_no", "")):
                 record["house_no"] = paddle_house
+            elif e_digit and not re.search(r"[ऀ-ॿ]", record.get("house_no", "")):
+                record["house_no"] = e_digit
             elif parser_house:
                 record["house_no"] = parser_house
         except Exception as exc:
@@ -1778,61 +1774,106 @@ def _extract_pdf_ocr_unlocked(
                 tess_house = rec.pop("_tess_house", "")
                 tess_age = rec.pop("_tess_age", "")
 
-                rec["is_deleted"] = _detect_deleted_watermark(cl_img, serial_png=ser_png)
-
                 if paddle_inst is None:
+                    rec["is_deleted"] = False
                     continue
 
-                tess_house_ok = bool(tess_house and re.search(r"\d{2,}", tess_house)
-                                     and not tess_house.startswith("/"))
                 tess_age_ok = bool(tess_age and tess_age.isdigit()
                                    and len(tess_age) >= 2 and int(tess_age) >= 18)
 
-                if hv_png_deferred:
-                    try:
-                        nparr = np.frombuffer(hv_png_deferred, np.uint8)
-                        hv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        if hv_img is not None:
-                            s = min(4, max(3, -(-80 // max(1, hv_img.shape[0]))))
-                            hv_big = cv2.resize(hv_img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
-                            res = paddle_inst.ocr(hv_big, cls=False)
-                            texts = [ln[1][0] for ln in (res[0] or []) if ln[1][0]]
-                            paddle_house = None
-                            for pt in texts:
-                                mf = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", pt)
-                                if mf:
-                                    paddle_house = f"{mf.group(1)}/{mf.group(2)}"
-                                    break
-                            if not paddle_house:
-                                for pt in texts:
-                                    runs = re.findall(r"\d+", pt)
-                                    if runs:
-                                        paddle_house = max(runs, key=len)
-                                        break
-                            if paddle_house:
-                                cur = rec.get("house_no", "")
-                                if not re.search(r"[ऀ-ॿ]", cur):
-                                    rec["house_no"] = paddle_house
-                    except Exception as _pe:
-                        log.debug("PaddleOCR house failed: %s", _pe)
+                # One combined paddle call: serial (for Q/deleted) + house + age
+                # Stacked vertically with known pixel offsets for result routing.
+                try:
+                    crops_info = []  # (field, scaled_img)
 
-                if age_png_deferred and not tess_age_ok:
-                    try:
+                    if ser_png:
+                        nparr = np.frombuffer(ser_png, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            s = min(6, max(2, 80 // max(1, img.shape[0])))
+                            crops_info.append(("serial", cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)))
+
+                    if hv_png_deferred:
+                        nparr = np.frombuffer(hv_png_deferred, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            s = min(6, max(2, 80 // max(1, img.shape[0])))
+                            crops_info.append(("house", cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)))
+
+                    if age_png_deferred and not tess_age_ok:
                         nparr = np.frombuffer(age_png_deferred, np.uint8)
-                        age_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        if age_img is not None:
-                            s = min(4, max(3, -(-80 // max(1, age_img.shape[0]))))
-                            age_big = cv2.resize(age_img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
-                            res = paddle_inst.ocr(age_big, cls=False)
-                            paddle_ages = []
-                            for ln in (res[0] or []):
-                                for digits in re.findall(r"\d{1,3}", ln[1][0]):
-                                    if 18 <= int(digits) <= 120:
-                                        paddle_ages.append(digits)
-                            if paddle_ages:
-                                rec["age"] = max(paddle_ages, key=lambda x: (len(x), int(x)))
-                    except Exception as _pe:
-                        log.debug("PaddleOCR age failed: %s", _pe)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            s = min(6, max(2, 80 // max(1, img.shape[0])))
+                            crops_info.append(("age", cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)))
+
+                    rec["is_deleted"] = False
+                    if crops_info:
+                        max_w = max(c.shape[1] for _, c in crops_info)
+                        padded = []
+                        h_offsets = {}
+                        y = 0
+                        for field, c in crops_info:
+                            pad = cv2.copyMakeBorder(c, 4, 4, 4, max_w - c.shape[1] + 4,
+                                                      cv2.BORDER_CONSTANT, value=(255,255,255))
+                            h_offsets[field] = (y, y + pad.shape[0])
+                            y += pad.shape[0]
+                            padded.append(pad)
+                        stacked = np.vstack(padded) if len(padded) > 1 else padded[0]
+                        total_h = stacked.shape[0]
+
+                        res = paddle_inst.ocr(stacked, cls=False)
+                        hits = res[0] or []
+
+                        for field, (fy0, fy1) in h_offsets.items():
+                            field_texts = [
+                                ln[1][0] for ln in hits
+                                if fy0 <= sum(pt[1] for pt in ln[0]) / 4 <= fy1
+                            ]
+
+                            if field == "serial":
+                                if any("Q" in t.upper() for t in field_texts):
+                                    rec["is_deleted"] = True
+
+                            elif field == "house" and field_texts:
+                                paddle_house = None
+                                for pt in field_texts:
+                                    mf = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", pt)
+                                    if mf:
+                                        paddle_house = f"{mf.group(1)}/{mf.group(2)}"
+                                        break
+                                if not paddle_house:
+                                    all_runs = []
+                                    for pt in field_texts:
+                                        all_runs.extend(re.findall(r"\d+", pt))
+                                    if all_runs:
+                                        paddle_house = max(all_runs, key=len)
+                                if paddle_house:
+                                    cur = rec.get("house_no", "")
+                                    has_deva = re.search(r"[ऀ-ॿ]", cur)
+                                    if not has_deva:
+                                        rec["house_no"] = paddle_house
+                                    elif has_deva:
+                                        # Mixed value like '5 ए' — if paddle got a
+                                        # leading-1 fix (15 vs 5), prepend 1 to cur
+                                        cur_digits = re.sub(r"[^\d]", "", cur.split()[0]) if cur else ""
+                                        if cur_digits and paddle_house == "1" + cur_digits:
+                                            rec["house_no"] = "1" + cur
+
+                            elif field == "age" and field_texts:
+                                paddle_ages = []
+                                for pt in field_texts:
+                                    for digits in re.findall(r"\d{1,3}", pt):
+                                        if 18 <= int(digits) <= 120:
+                                            paddle_ages.append(digits)
+                                if paddle_ages:
+                                    rec["age"] = max(paddle_ages, key=lambda x: (len(x), int(x)))
+                    else:
+                        rec["is_deleted"] = False
+
+                except Exception as _pe:
+                    log.debug("PaddleOCR combined pass failed: %s", _pe)
+                    rec["is_deleted"] = _detect_deleted_watermark(cl_img, serial_png=ser_png)
 
                 # Danda/double-danda lookalike fix
                 house_val = rec.get("house_no", "")
