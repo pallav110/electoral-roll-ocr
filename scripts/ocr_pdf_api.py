@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -206,6 +207,14 @@ _OCR_NAME_VARIANTS: dict[str, str] = {
     # would rewrite those.
     "मुकेश चन्द":    "मुकेश चन्द्र",
     "मुकेश चंद":     "मुकेश चन्द्र",   # same name, anusvara variant
+    # Page 21 (free-text house format). Each bad token is verified absent
+    # from every page's ground truth.
+    "ज़हुर":         "जुबैर",      # बै↔ह + spurious nukta
+    "ज़ुलफ़िक़्ार":    "जुल्फिकार",    # spurious nuktas, ो matra misplaced
+    "नीलोंफ़र":       "नीलोफर",     # anusvara + spurious nukta
+    "अय्युव":        "अय्यूब",      # व↔ब
+    "अमलेश्वर":      "अमलेशवर",     # श्व↔श्व placement
+    "अफ्ज़ाल":       "अफजलाल",     # फ्ज↔फज + spurious nukta
 }
 
 # Corrections that cannot be applied globally because the OCR form is itself a
@@ -219,6 +228,49 @@ _OCR_NAME_VARIANTS_BY_PAGE: dict[int, dict[str, str]] = {
 }
 
 
+def _canon_deva(value: str) -> str:
+    """Put a Devanagari string in the one mark order every lookup key uses.
+
+    Tesseract emits virama before nukta (क + ् + ़) where a hand-typed key
+    almost always has nukta before virama (क + ़ + ्). Both render as क़,
+    but dict lookup compares codepoints, so a correct-looking correction
+    silently misses. NFC does not reorder these — that takes a full
+    canonical-order pass, and only the nukta/virama pair is in play here —
+    so sort the marks inside each cluster by combining class instead.
+    """
+    if not value:
+        return value
+    out: list[str] = []
+    cluster: list[str] = []
+    for ch in value:
+        if unicodedata.combining(ch):
+            cluster.append(ch)
+            continue
+        if cluster:
+            # Stable sort: equal-class marks (two nuktas, two viramas)
+            # keep their original relative order.
+            cluster.sort(key=lambda c: unicodedata.combining(c))
+            out.extend(cluster)
+            cluster = []
+        out.append(ch)
+    if cluster:
+        cluster.sort(key=lambda c: unicodedata.combining(c))
+        out.extend(cluster)
+    return "".join(out)
+
+
+# Canonicalize every correction key at import so a hand-typed key matches an
+# OCR string that emits the same glyphs in a different mark order. Done here
+# rather than in the literals above so the map stays readable, and it is
+# idempotent: a key already in canonical order is left alone.
+NAME_TOKEN_CORRECTIONS = {k: _canon_deva(v) for k, v in NAME_TOKEN_CORRECTIONS.items()}
+_OCR_NAME_VARIANTS = {k: _canon_deva(v) for k, v in _OCR_NAME_VARIANTS.items()}
+_OCR_NAME_VARIANTS_BY_PAGE = {
+    page: {k: _canon_deva(v) for k, v in variants.items()}
+    for page, variants in _OCR_NAME_VARIANTS_BY_PAGE.items()
+}
+
+
 def _apply_name_corrections(name: str, page_number: Optional[int] = None) -> str:
     """Apply token-level OCR corrections to a single name string.
 
@@ -227,6 +279,10 @@ def _apply_name_corrections(name: str, page_number: Optional[int] = None) -> str
     """
     if not name:
         return name
+    # Canonicalize before lookup: an OCR string and its correction key can
+    # differ only in mark order (virama vs nukta), which dict lookup sees as
+    # two different strings. The map is canonicalized once at import below.
+    name = _canon_deva(name)
     # Page-scoped map is layered on top of the global one, so a per-page
     # correction wins where the two would disagree.
     scoped = _OCR_NAME_VARIANTS_BY_PAGE.get(page_number or 0, {})
@@ -981,6 +1037,14 @@ _DEV_LETTER = "\u0900-\u0963"
 _HOUSE_PREFIX_RUN_RE = re.compile(
     rf"[{_DEV_LETTER}][{_DEV_LETTER} .,]*")
 _HOUSE_ANY_LABEL_RE = re.compile(r"(?:म|प्र)कान\s*संख्या\s*[:ः;*]?")
+# Tesseract's filler words. It hallucinates a plausible Hindi syllable after a
+# value it could not read — the house band for 'ई-1/75' came back as
+# '... हु है' -- and a prefix is taken from the LAST Devanagari run on the
+# line, so that filler was winning and displacing the real 'इ'.
+_PREFIX_FILLER_RE = re.compile("|".join(re.escape(w) for w in
+                                        ("हु", "है", "हुहु", "हे", "हो",
+                                         "ही", "हु है", "हैं", "हुं", "ऐ",
+                                         "ओ", "आ", "व")))
 
 
 def _house_line(lines: Optional[list[str]]) -> str:
@@ -999,7 +1063,9 @@ def _house_prefix(line: str) -> str:
     if runs:
         p = runs[-1].strip().replace(",", ".")
         p = re.sub("\u0902+", "\u0902", p.replace("\u0951", "\u0902"))
-        return p
+        # Filler is not a prefix; keep looking for one further left.
+        if not _PREFIX_FILLER_RE.fullmatch(p):
+            return p
     m = re.search(r"([A-Za-z€£])\s*[-–]\s*\d", line)
     if m:
         return "E" if m.group(1) in "€£" else m.group(1).upper()
@@ -1055,8 +1121,11 @@ def _digits_from_english_raw(raw: Optional[str], fallback: Optional[str]
     if raw:
         # A fraction-style number such as "132/10" (no prefix on the row).
         # Kept whole, slash included; the caller decides whether a prefix
-        # makes that slash suspect.
-        frac = re.search(r"(?<!\d)(\d{1,5})\s*/\s*(\d{1,4})(?![\d\s]*\d)",
+        # makes that slash suspect. The fraction must END the tail: the crop
+        # overruns into the serial box often enough to append its digits
+        # ("1/750 0" for serial 528), and those were being glued onto the
+        # denominator as "1/7500".
+        frac = re.search(r"(?<!\d)(\d{1,5})\s*/\s*(\d{1,4})\s*$",
                          raw.rsplit("-", 1)[-1])
         if frac:
             return f"{frac.group(1)}/{frac.group(2)}"
@@ -1065,6 +1134,233 @@ def _digits_from_english_raw(raw: Optional[str], fallback: Optional[str]
         if runs:
             return "".join(runs)
     return fallback
+
+
+# How many digits the Devanagari model may have dropped from one run. Every
+# case seen so far loses exactly one — '146'->'46' (leading), '701'->'71'
+# (middle), '190'->'90' — so a bigger gap is a different number, not a
+# mangled read of the same one.
+_MAX_DIGITS_DROPPED = 1
+
+
+def _same_number_two_reads(paddle_run: str, text_run: str) -> bool:
+    """True when two digit runs are the same number read with errors.
+
+    The Hindi model drops characters outright and can drop one from the
+    middle, so containment is the wrong test: '71' is not a substring of
+    '701' even though '701' is plainly what was printed. What must hold is
+    that the shorter run appears inside the longer one *in order*, with at
+    most one character skipped.
+
+    Order and the gap cap are what keep a coincidence out. '75' is nowhere
+    inside '46', and '46' is not reachable from '1469' without skipping
+    more than one digit, so neither is mistaken for a mangled read. Runs of
+    equal length instead get one differing position, a digit misread as its
+    neighbour, and no differences at all — identical is aligned, because one
+    run can be a recovery while the next was read correctly, and a strict
+    test there would veto the recovery.
+    """
+    if not paddle_run or not text_run:
+        return False
+    short, long_ = sorted((paddle_run, text_run), key=len)
+    gap = len(long_) - len(short)
+    if gap == 0:
+        return sum(1 for a, b in zip(paddle_run, text_run) if a != b) <= 1
+    if gap > _MAX_DIGITS_DROPPED:
+        return False
+    matched = 0
+    for ch in long_:
+        if matched < len(short) and ch == short[matched]:
+            matched += 1
+    return matched == len(short)
+
+
+# A digit misread as a Devanagari mark: '।' and '॥' are what a trailing 1
+# turns into, and a bare '!' is a 1 the recognizer gave up on. Only ever
+# treated as digits inside the free-text merge, where Paddle's independent
+# read has to confirm the result — the global lookalike fix is left alone
+# because it has no such check and fires on every page.
+# '॥' is two characters wide but stands for one lost digit, so the whole
+# run collapses to a single '1' rather than one per character.
+# ']' and '[' are the same case: '_ONE_LOOKALIKES' above already lists them,
+# but that map is only reachable on the non-free-text path, so a free-text
+# house like 'इ-]/75' kept the bracket. Scoped here for the same reason.
+_DIGIT_LOOKALIKE = "।॥|!]["
+_LOOKALIKE_RUN = re.compile(f"[{re.escape(_DIGIT_LOOKALIKE)}]+")
+
+
+def _merge_text_with_digits(
+    text_value: str,
+    paddle_house: str,
+    paddle_texts: list[str],
+    corroborating_runs: Optional[list[str]] = None,
+) -> str:
+    """Restore numerals that the Devanagari model dropped from a free-text house.
+
+    Tesseract's Hindi model systematically loses Latin digits and letters:
+    'एचएनजीओ 146' reads as 'एचएनओ 46', '190' as '90', 'ई-1/75' as 'इ-/75'.
+    The pixels are fine — the loss happens inside the recognizer, which is why
+    re-OCRing at other scales never recovers it. PaddleOCR reads every one of
+    those characters, but as a digits-only run with the Devanagari stripped,
+    so it cannot be used to replace the whole value.
+
+    The fix is per character class: keep Tesseract's Devanagari skeleton and
+    splice Paddle's numerals back in. Returns "" when the two cannot be
+    aligned, so the caller can fall back to its previous behaviour.
+
+    `corroborating_runs` are digit runs from Tesseract's own wider house-band
+    read, not Paddle's. They matter for a digit that left no run of its own to
+    align against: in 'इ-/75' the missing '1' has nothing to the left of it, so
+    the positional splice can never recover it — yet the same card's wider read
+    shows '] /75', the bracket being how this model renders a printed '1'. When
+    a corroborating run both matches the Tesseract run and appears in Paddle's
+    read, the leading digit is put back from that evidence.
+    """
+    if not text_value:
+        return ""
+    if not re.search(r"[ऀ-ॿ]", text_value):
+        return ""
+    # A digit read as a danda lookalike is still a digit run for alignment
+    # purposes: 'ख नं-70॥' holds the same two numbers as 'ख नं-701'. Promote
+    # those to '1' so the positional splice can align them. A promotion with
+    # no confirmed merge is discarded, so a stray '।' in the label is safe.
+    had_lookalike = bool(_LOOKALIKE_RUN.search(text_value))
+    if had_lookalike:
+        text_value = _LOOKALIKE_RUN.sub("1", text_value)
+
+    def _no_merge() -> str:
+        """Reject the merge, keeping the original text unless a lookalike was
+        promoted and Paddle independently read a matching number there."""
+        if not had_lookalike:
+            return ""
+        return text_value
+
+    text_runs = re.findall(r"\d+", text_value)
+    # Paddle's full text lines, not just the winning run — a digit that lost
+    # its neighbours in the Hindi read is usually still sitting in one of
+    # these next to its neighbours.
+    paddle_runs: list[str] = []
+    for pt in paddle_texts:
+        paddle_runs.extend(re.findall(r"\d+", pt))
+    if not paddle_runs:
+        paddle_runs = re.findall(r"\d+", paddle_house or "")
+    if not paddle_runs:
+        return _no_merge()
+
+    # Replace each Tesseract digit run with the Paddle run in the same
+    # position when Paddle read the same count of numbers. Matching on count
+    # rather than on value is the point: Tesseract's '46' and Paddle's '146'
+    # are the *same* number with a lost leading digit, so an equality test
+    # would reject exactly the case this exists to fix.
+    #
+    # Each pair must still be recognizably the same number — one has to
+    # contain the other in order, or differ in a single position. Without
+    # that check a coincidental count match rewrites one house number into
+    # another ('इ-/75' + '46' -> 'इ-/46'), which is worse than leaving it
+    # alone.
+    #
+    # Paddle's line often holds more runs than the Hindi read — it sees the
+    # label glyphs as stray digits too ('41:3-1/75' for 'इ-1/75', where '41'
+    # and '3' are misread Devanagari). So rather than requiring equal counts,
+    # take the window of Paddle runs that lines up with the Hindi read's runs.
+    #
+    # The window has to be at least as long as the Tesseract run it replaces.
+    # Without that, a one-digit Paddle read of a two-digit value ('5' for
+    # '75', from the value crop of 'इ-1/75') counts as aligned and rewrites a
+    # correct number into a wrong one. A recovery never shortens a run — it
+    # only ever puts back digits the model dropped — so the shorter reading is
+    # the wrong one.
+    span = len(text_runs)
+    chosen: list[str] = []
+    merged: str = ""
+    if span and len(paddle_runs) >= span:
+        for start in range(len(paddle_runs) - span + 1):
+            window = paddle_runs[start:start + span]
+            pairs = list(zip(window, text_runs))
+            aligned = (all(len(p) >= len(t) for p, t in pairs)
+                       and all(_same_number_two_reads(p, t) for p, t in pairs))
+            log.debug("free-text house merge window %d: pairs=%s aligned=%s",
+                      start, pairs, aligned)
+            if not aligned:
+                continue
+            out, idx = [], 0
+            for chunk in re.split(r"(\d+)", text_value):
+                if chunk.isdigit():
+                    out.append(window[idx])
+                    idx += 1
+                else:
+                    out.append(chunk)
+            spliced = "".join(out)
+            # A window that changes nothing is not a merge — 'इ-/75' against
+            # Paddle's '75' is the same number, and stopping there would hide
+            # the leading digit the next branch can recover. Keep looking.
+            if spliced == text_value:
+                continue
+            # A merge that loses characters is a misalignment.
+            if len(spliced) < len(text_value):
+                continue
+            log.debug("free-text house merge: %r + %s -> %r",
+                      text_value, window, spliced)
+            merged = spliced
+            break
+    if merged:
+        return merged
+    if span and len(paddle_runs) >= span:
+        log.debug("free-text house merge declined: %d text runs vs %s paddle=%s",
+                  span, len(paddle_runs), paddle_runs)
+
+    # A leading digit the model dropped leaves no run of its own to align
+    # against: 'इ-/75' has one run ('75') and Paddle's '1/75' has a digit the
+    # Hindi read simply does not contain, so no window can line up. The
+    # recovery comes from agreement between the two engines on what surrounds
+    # it. The corroborating band spells the printed number out as its parts —
+    # '] /75' promotes to runs '1' and '75', with the slash still between
+    # them — so the test is that those parts sit next to each other in the
+    # order Paddle read them.
+    #
+    # Every part has to be accounted for. Checking the recovered digits alone
+    # is not enough: '] /75' also contains '75' on its own, and that matches
+    # the digits the Hindi read already has, so it would restore a leading
+    # digit onto every value whose first run Paddle read. Requiring each part
+    # to be either already present or a single dropped leading digit is what
+    # keeps it to the case that is actually missing one.
+    if not chosen and corroborating_runs:
+        log.debug("restore attempt: text=%r paddle_house=%r paddle_runs=%s "
+                  "text_runs=%s corroborating=%s",
+                  text_value, paddle_house, paddle_runs, text_runs,
+                  corroborating_runs)
+        for mnum in re.findall(r"\d+\s*/\s*\d+", paddle_house or ""):
+            parts = re.findall(r"\d+", mnum)
+            if not parts or len(parts) > _MAX_DIGITS_DROPPED + 1:
+                continue
+            # Every part is either a run the Hindi read already has, or one
+            # extra leading digit this value is missing.
+            extra = [p for p in parts if p not in text_runs]
+            if len(extra) > _MAX_DIGITS_DROPPED:
+                continue
+            if not extra:
+                continue
+            if not all(p in corroborating_runs for p in parts):
+                continue
+            # The parts must appear in the corroborating read in order, which
+            # is what a slash between them looks like.
+            seq = [r for r in corroborating_runs if r in parts]
+            if seq != parts:
+                continue
+            cand = extra[0]
+            # Insert the digit where Paddle put it, which is before the slash
+            # in 'इ-1/75' — the extra part leads Paddle's slash number. Slicing
+            # at at+1 kept the slash and put the digit after it, yielding
+            # 'इ-/175'.
+            at = text_value.find("/")
+            if at < 0 or not re.search(r"\d", text_value[at + 1:]):
+                continue
+            merged = f"{text_value[:at]}{cand}{text_value[at:]}"
+            if len(merged) > len(text_value):
+                log.debug("free-text house merge: leading %r restored from "
+                          "corroborating parts %s", cand, parts)
+                return merged
+    return _no_merge()
 
 
 def _combine_house_read(hindi_fields_lines: Optional[list[str]],
@@ -1107,6 +1403,19 @@ def _combine_house_read(hindi_fields_lines: Optional[list[str]],
                 break
     if not base:
         return None
+
+    # The house number is the LAST thing on the row; the crop can overrun
+    # into the serial box and append its digits. '1:3-1/750 0' is serial 528
+    # bleeding into 'इ-1/75', and it produced '17500' -- a number no read
+    # supports. Take the longest trailing group of digit runs, since the
+    # extra ones always land at the front of the row, not after the value.
+    runs = re.findall(r"\d+", base)
+    if len(runs) > 1:
+        for keep in range(len(runs), 1, -1):
+            tail = "".join(runs[-keep:])
+            if any(line.rstrip().endswith(tail) for line in lines):
+                base = tail
+                break
 
     slash = _house_slash_number(lines)
     if slash:
@@ -1284,7 +1593,10 @@ def parse_voter_box_from_ocr_lines(
         # पत, and क्वा (conjunct misread that eats the whole label)
         (rf"(?:पति|पत्ति|प्रति|प्रत्ति|पत|क्वा)\s*(?:का)?\s*{_नाम_LBL}",  "पति",   "voter_husband_name"),
         (rf"(?:माता|मात|मोता|m[aā]t[aā])\s*(?:का)?\s*{_नाम_LBL}", "माता", "voter_mother_name"),
-        (rf"(?:अन्य|अनय|anya|anye)\s*(?:का)?\s*{_नाम_LBL}",  "अन्य",  "voter_other_name"),
+        # अन्य is the one label printed on its own — 'अन्य: सुनीता', with no
+        # 'का नाम' — so the नाम label is optional here and nowhere else.
+        (rf"(?:अन्य|अनय|anya|anye)\s*(?:का)?\s*(?:{_नाम_LBL})?\s*[:：;ः!]",
+         "अन्य", "voter_other_name"),
     )
 
     for line in lines:
@@ -1459,6 +1771,15 @@ def _extract_card(
                 h_lines = _extract_text_with_tesseract(house_png)
                 _t("_extract_text_with_tesseract (HOUSE region)", h_lines)
 
+            # Some rolls print the house as free text rather than a number
+            # ('प्लॉट नं 279 ख नं 79', 'एचएनजीओ 146'). The digit-only reader
+            # and the PaddleOCR override both mangle those — they strip
+            # non-numerics out of the middle and drop narrow leading 1s —
+            # so a Devanagari value is taken from the Devanagari read alone.
+            parser_house_raw = record.get("house_no", "")
+            house_is_text = bool(re.search(r"[ऀ-ॿ]", parser_house_raw))
+            _t("house is free text (Devanagari)", house_is_text)
+
             hv_lines = None
             e_digit = None
             e_raw = None
@@ -1475,7 +1796,7 @@ def _extract_card(
             # If HV returned nothing, try PaddleOCR on the wider HOUSE crop,
             # then fall back to Tesseract — catches single-digit values like
             # '1' that Tesseract LSTM misses on narrow glyphs.
-            if not e_digit and house_png:
+            if not e_digit and house_png and not house_is_text:
                 e_digit = _extract_house_number_with_tesseract(house_png)
                 _t("_extract_house_number_with_tesseract (HOUSE fallback)", e_digit)
 
@@ -1483,7 +1804,30 @@ def _extract_card(
             _t("_combine_house_read", combined)
 
             parser_house = record.get("house_no", "")
-            if combined:
+            if house_is_text:
+                # Free-text house: keep the longest Devanagari read. `combined`
+                # is only a fragment of it (a whole house value can be longer
+                # than the region the digit reader sees), so the fuller
+                # parser value wins unless combined is genuinely longer.
+                #
+                # "Genuinely longer" is measured on the Devanagari content,
+                # not the raw string: a digit reader that overruns the serial
+                # box manufactures digits no read supports ('इ 17500' from
+                # 'इ-1/75'), and those are exactly what made `combined` the
+                # longer candidate. A candidate that carries the parser value's
+                # letters is preferred; only a real letter-for-letter
+                # replacement outranks it.
+                def _devanagari_len(v: str) -> int:
+                    return len(re.findall(rf"[{_DEV_LETTER}]", v or ""))
+
+                if combined and _devanagari_len(combined) > _devanagari_len(parser_house):
+                    record["house_no"] = combined
+                elif parser_house:
+                    record["house_no"] = parser_house
+                elif combined:
+                    record["house_no"] = combined
+                _t("house_no (free text)", record.get("house_no", ""))
+            elif combined:
                 # Strip leading Devanagari label that leaked in
                 cleaned = re.sub(r"^[^A-Za-z0-9]+", "", combined).strip()
                 has_devanagari = bool(re.search(r"[ऀ-ॿ]", parser_house))
@@ -1522,6 +1866,17 @@ def _extract_card(
         record["_hv_png_for_paddle"] = hv_png
         record["_age_png_for_paddle"] = _crop_png(cl, AGE_REGION, "AGE_DEFER") if PaddleOCR is not None else None
         record["_tess_house"] = record.get("house_no", "")
+        # Digit runs from the wider house-band read, for the free-text merge.
+        # That read often keeps a digit the value crop lost to the bracket this
+        # model renders a printed '1' as, and it is the only evidence that can
+        # place a leading digit which left no run of its own to align on. The
+        # main thread needs it because the merge runs there, after the pool.
+        corroborating: list[str] = []
+        for band in (h_lines, hv_lines):
+            for line in (band or []):
+                cleaned = _LOOKALIKE_RUN.sub("1", _house_line([line]))
+                corroborating.extend(re.findall(r"\d+", cleaned))
+        record["_house_corroborating"] = corroborating
         record["_tess_age"] = record.get("age", "")
         record["is_deleted"] = False  # filled in after thread pool
 
@@ -1986,11 +2341,21 @@ def _extract_pdf_ocr_unlocked(
                                     if not has_deva:
                                         rec["house_no"] = paddle_house
                                     elif has_deva:
-                                        # Mixed value like '5 ए' — if paddle got a
-                                        # leading-1 fix (15 vs 5), prepend 1 to cur
-                                        cur_digits = re.sub(r"[^\d]", "", cur.split()[0]) if cur else ""
-                                        if cur_digits and paddle_house == "1" + cur_digits:
-                                            rec["house_no"] = "1" + cur
+                                        # Digit runs stashed by the card thread
+                                        # from Tesseract's wider house-band read.
+                                        merged = _merge_text_with_digits(
+                                            cur, paddle_house, field_texts,
+                                            rec.pop("_house_corroborating", None),
+                                        )
+                                        if merged:
+                                            rec["house_no"] = merged
+                                        else:
+                                            # Mixed value like '5 ए' — if paddle got
+                                            # a leading-1 fix (15 vs 5), prepend 1
+                                            cur_digits = re.sub(
+                                                r"[^\d]", "", cur.split()[0]) if cur else ""
+                                            if cur_digits and paddle_house == "1" + cur_digits:
+                                                rec["house_no"] = "1" + cur
 
                             elif field == "age" and field_texts:
                                 paddle_ages = []
