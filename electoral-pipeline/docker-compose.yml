@@ -32,7 +32,11 @@ services:
       - OCR_CARD_WORKERS=12
     volumes:
       - ./sample-pdfs:/data/pdfs
-      - ocr-results:/home/spxlpt133/Desktop/OCR/results
+      # Mounted where ocr_pdf_api.py actually writes. OCR_OUTPUT_DIR defaults to
+      # <parent of the module's dir>/results, which inside the container is
+      # /results -- mounting it under the office path instead left every saved
+      # extraction JSON in an unnamed directory that a container restart erased.
+      - ocr-results:/results
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 10s

@@ -31,8 +31,9 @@ COPY ocr_api_requirements.txt .
 # "ValueError: Unknown argument: show_log" because the code uses the 2.x API.
 RUN pip install --no-cache-dir -r ocr_api_requirements.txt
 
-# Create output directory
-RUN mkdir -p /home/spxlpt133/Desktop/OCR/results
+# No output directory is created here. ocr_pdf_api.py writes to
+# OCR_OUTPUT_DIR, which defaults to /results, and compose mounts the
+# ocr-results volume at exactly that path.
 
 # Expose port
 EXPOSE 8082
