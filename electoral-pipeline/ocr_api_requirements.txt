@@ -1,0 +1,47 @@
+# Requirements for the OCR service image (Dockerfile.ocr).
+#
+# This file lives inside electoral-pipeline on purpose: the OCR folder itself
+# is personal and is NOT pushed to GitLab, so a copy is kept here where CI and
+# other developers can actually get it.
+#
+# Versions are pinned to match /home/spxlpt133/Desktop/OCR/ocr_api_requirements.txt.
+# paddleocr MUST stay on 2.x -- ocr_pdf_api.py calls the 2.x API
+# (PaddleOCR(use_angle_cls=..., show_log=...) and .ocr(img, cls=False)).
+# PaddleOCR 3.x removes show_log/use_angle_cls and returns a different result
+# structure, so a 3.x install raises ValueError at first use while still
+# reporting paddleocr_available=true.
+
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+SQLAlchemy==2.0.40
+psycopg[binary]==3.2.6
+celery[redis]==5.5.2
+pypdf==5.4.0
+httpx==0.28.1
+jinja2==3.1.6
+python-multipart==0.0.20
+pytest==8.3.5
+
+# OCR engine
+pymupdf==1.24.10
+pytesseract==0.3.13
+Pillow==10.4.0
+numpy==2.2.6
+opencv-python-headless==4.10.0.84
+opencv-contrib-python-headless==4.10.0.84
+
+# MUST remain on the 2.x line -- see note above.
+paddleocr==2.10.0
+paddlepaddle==3.0.0
+
+# paddle imports setuptools at module load time (paddle/utils/cpp_extension).
+# Without this, `import paddleocr` raises ModuleNotFoundError, which the
+# service swallows into paddleocr_available=false -- the service still starts
+# and still reports status "ok", it just quietly loses house numbers and ages.
+setuptools
+
+# For Excel import
+openpyxl==3.1.5
+
+# For name translation (optional)
+deep-translator>=1.11.4

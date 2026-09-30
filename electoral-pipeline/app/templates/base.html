@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Electoral Roll Processing{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Fallback styles in case Tailwind CDN fails */
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f9fafb; color: #111827; }
+    header { background: #1e293b; color: white; padding: 0 1rem; }
+    header .bar { max-width: 80rem; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; height: 4rem; }
+    header nav { display: flex; gap: 1.5rem; }
+    header nav a { color: #cbd5e1; text-decoration: none; padding: 0.5rem 0.75rem; }
+    header nav a:hover { color: white; }
+    main { max-width: 80rem; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.875rem; font-weight: 700; margin: 0 0 0.5rem 0; }
+    h2 { font-size: 1.125rem; font-weight: 600; margin: 0 0 1rem 0; }
+    p { margin: 0 0 0.75rem 0; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .bg-white { background: white; }
+    .border { border: 1px solid #e5e7eb; }
+    .rounded-xl { border-radius: 0.75rem; }
+    .shadow-sm { box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05); }
+    .p-6 { padding: 1.5rem; }
+    .mb-6 { margin-bottom: 1.5rem; }
+    .grid { display: grid; }
+    .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+    .gap-4 { gap: 1rem; }
+    @media (min-width: 640px) { .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (min-width: 1024px) { .lg\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    .text-xs { font-size: 0.75rem; }
+    .text-sm { font-size: 0.875rem; }
+    .text-lg { font-size: 1.125rem; }
+    .text-xl { font-size: 1.25rem; }
+    .text-2xl { font-size: 1.5rem; }
+    .text-3xl { font-size: 1.875rem; }
+    .font-semibold { font-weight: 600; }
+    .font-bold { font-weight: 700; }
+    .text-gray-500 { color: #6b7280; }
+    .text-gray-600 { color: #4b5563; }
+    .text-gray-700 { color: #374151; }
+    .text-gray-900 { color: #111827; }
+    .uppercase { text-transform: uppercase; }
+    .tracking-wider { letter-spacing: 0.05em; }
+    .mt-1 { margin-top: 0.25rem; }
+    .mt-2 { margin-top: 0.5rem; }
+    .mt-4 { margin-top: 1rem; }
+    .mb-4 { margin-bottom: 1rem; }
+    .mb-8 { margin-bottom: 2rem; }
+    .flex { display: flex; }
+    .flex-col { flex-direction: column; }
+    .items-center { align-items: center; }
+    .justify-between { justify-content: space-between; }
+    .gap-3 { gap: 0.75rem; }
+    .gap-4 { gap: 1rem; }
+    .gap-6 { gap: 1.5rem; }
+    .gap-8 { gap: 2rem; }
+    .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+    .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+    .px-4 { padding-left: 1rem; padding-right: 1rem; }
+    .px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+    .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+    .py-3 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+    .py-8 { padding-top: 2rem; padding-bottom: 2rem; }
+    .rounded-lg { border-radius: 0.5rem; }
+    .rounded-full { border-radius: 9999px; }
+    .inline-flex { display: inline-flex; }
+    .items-center { align-items: center; }
+    .bg-slate-800 { background-color: #1e293b; }
+    .bg-white { background-color: white; }
+    .bg-gray-50 { background-color: #f9fafb; }
+    .bg-green-100 { background-color: #dcfce7; }
+    .bg-green-800 { background-color: #166534; }
+    .bg-red-100 { background-color: #fee2e2; }
+    .bg-red-800 { background-color: #991b1b; }
+    .bg-blue-100 { background-color: #dbeafe; }
+    .bg-blue-800 { background-color: #1e40af; }
+    .bg-yellow-100 { background-color: #fef9c3; }
+    .bg-yellow-800 { background-color: #a16207; }
+    .bg-gray-100 { background-color: #f3f4f6; }
+    .text-white { color: white; }
+    .text-slate-300 { color: #cbd5e1; }
+    .text-slate-400 { color: #94a3b8; }
+    .hover\:bg-slate-700:hover { background-color: #334155; }
+    .hover\:bg-gray-50:hover { background-color: #f9fafb; }
+    .hover\:text-white:hover { color: white; }
+    .hover\:text-blue-700:hover { color: #1d4ed8; }
+    .transition-colors { transition-property: color, background-color, border-color; transition-duration: 0.15s; }
+    .overflow-x-auto { overflow-x: auto; }
+    .w-full { width: 100%; }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background-color: #f9fafb; }
+    th { text-align: left; padding: 0.75rem 1rem; font-size: 0.75rem; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { padding: 0.75rem 1rem; border-bottom: 1px solid #e5e7eb; }
+    tbody tr:hover { background-color: #f9fafb; }
+    .divide-y > * + * { border-top: 1px solid #e5e7eb; }
+    .divide-gray-200 > * + * { border-top-color: #e5e7eb; }
+    .text-right { text-align: right; }
+    .text-left { text-align: left; }
+    .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    @media (min-width: 640px) {
+      .sm\:flex-row { flex-direction: row; }
+      .sm\:items-start { align-items: flex-start; }
+      .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (min-width: 768px) {
+      .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (min-width: 1024px) {
+      .lg\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    /* Language switch for the voter table. */
+    body[data-lang="hi"] .lang-hi{display:revert}
+    body[data-lang="hi"] .lang-en{display:none}
+    body[data-lang="en"] .lang-hi{display:none}
+    body[data-lang="en"] .lang-en{display:revert}
+    html[data-lang="en"] .lang-hi{display:none}
+    html[data-lang="en"] .lang-en{display:revert}
+    html[data-lang="hi"] .lang-hi{display:revert}
+    html[data-lang="hi"] .lang-en{display:none}
+    table .lang-hi,table .lang-en{display:none}
+    html[data-lang="en"] table .lang-hi{display:none}
+    html[data-lang="en"] table .lang-en{display:revert}
+    html[data-lang="hi"] table .lang-hi{display:revert}
+    html[data-lang="hi"] table .lang-en{display:none}
+  </style>
+</head>
+<body data-lang="en" class="bg-gray-50 text-gray-900 font-sans antialiased">
+  <header class="bg-slate-800 text-white shadow-md">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        <div class="flex items-center gap-8">
+          <strong class="text-xl font-semibold tracking-tight">Electoral Pipeline</strong>
+          <nav class="flex gap-6">
+            <a href="/" class="text-slate-300 hover:text-white transition-colors px-3 py-2 text-sm font-medium">Dashboard</a>
+            <a href="/documents" class="text-slate-300 hover:text-white transition-colors px-3 py-2 text-sm font-medium">Documents</a>
+            <a href="/browse" class="text-slate-300 hover:text-white transition-colors px-3 py-2 text-sm font-medium">Database Browser</a>
+          </nav>
+        </div>
+        <span class="text-slate-400 text-sm">Admin Monitor</span>
+      </div>
+    </div>
+  </header>
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    // Language switch for the voter table. Kept in the browser so flipping
+    // between Hindi and English is instant and does not re-run the extraction.
+    (function () {
+      var KEY = 'roll-lang';
+      var root = document.documentElement;
+      function set(lang) {
+        root.setAttribute('data-lang', lang);
+        document.body.setAttribute('data-lang', lang);
+        document.querySelectorAll('.switch button').forEach(function (b) {
+          b.setAttribute('aria-pressed', String(b.dataset.lang === lang));
+          if (b.dataset.lang === lang) {
+            b.style.background = '#1e293b';
+            b.style.color = 'white';
+          } else {
+            b.style.background = 'white';
+            b.style.color = '#4b5563';
+          }
+        });
+        try { localStorage.setItem(KEY, lang); } catch (e) {}
+      }
+      document.addEventListener('click', function (ev) {
+        var b = ev.target.closest('.switch button');
+        if (b) set(b.dataset.lang);
+      });
+      var saved = 'en';
+      try { saved = localStorage.getItem(KEY) || 'en'; } catch (e) {}
+      set(saved === 'hi' ? 'hi' : 'en');
+    })();
+  </script>
+</body>
+</html>

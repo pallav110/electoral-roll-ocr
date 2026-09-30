@@ -1,0 +1,96 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: electoral
+      POSTGRES_USER: electoral
+      POSTGRES_PASSWORD: electoral
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U electoral"]
+      interval: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+  ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile.ocr
+    ports: ["127.0.0.1:8082:8082"]
+    environment:
+      # 12 of the 16 cores the WSL2 VM exposes. The code defaults to
+      # min(8, cpu_count), which would leave half the box idle. Each worker
+      # runs one card through Tesseract subprocesses, and OMP_THREAD_LIMIT=1
+      # keeps those from nesting threads, so one core per worker is the unit.
+      - OCR_CARD_WORKERS=12
+    volumes:
+      - ./sample-pdfs:/data/pdfs
+      - ocr-results:/home/spxlpt133/Desktop/OCR/results
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 10s
+      retries: 20
+  init:
+    build: .
+    # Exec form, not the string "python -m app.init_db && python -m app.migrate".
+    # Compose resolves the string form to ["python", "-m", "app.init_db"] and
+    # silently discards everything from "&&" onward, so the migration never ran
+    # and the bilingual columns were never added -- while the container still
+    # exited 0, looking like a clean success.
+    command: ["sh", "-c", "python -m app.init_db && python -m app.migrate"]
+    env_file: .env
+    depends_on:
+      db: {condition: service_healthy}
+  web:
+    build: .
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+    ports: ["127.0.0.1:${WEB_PORT:-8088}:8000"]
+    volumes:
+      - ./sample-pdfs:/data/pdfs
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      ocr: {condition: service_healthy}
+  worker:
+    build: .
+    # Concurrency 1 on purpose. Each unit is a 3-page OCR request, and the OCR
+    # service already runs its 30 cards in parallel. Two units at once put this
+    # 8-core box at load 40 (5x oversubscribed) and every unit slowed to a crawl,
+    # which is what made the earlier runs time out rather than finish.
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+    volumes:
+      - ./sample-pdfs:/data/pdfs
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      ocr: {condition: service_healthy}
+  beat:
+    build: .
+    command: celery -A app.tasks.celery_app beat --loglevel=INFO
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+    volumes:
+      - ./sample-pdfs:/data/pdfs
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+volumes:
+  pgdata:
+  redisdata:
+  ocr-results:

@@ -1,0 +1,319 @@
+{% extends "base.html" %}{% block title %}Working on {{ doc.file_name if doc else 'a PDF' }} · Electoral Roll Processing{% endblock %}{% block content %}
+
+{% if doc %}<p class="mb-6"><a href="/documents/{{ doc.id }}" class="text-blue-600 hover:text-blue-700 font-medium">← {{ doc.file_name }}</a></p>{% else %}<p class="mb-6"><a href="/documents" class="text-blue-600 hover:text-blue-700 font-medium">← All PDF files</a></p>{% endif %}
+
+<h1 class="text-3xl font-bold text-gray-900 tracking-tight mb-4">Working on this PDF</h1>
+<p class="text-gray-600 mb-6">
+  Try number {{ session.attempt_number }} ·
+  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+    {% if session.status == 'completed' %}bg-green-100 text-green-800
+    {% elif session.status == 'failed' %}bg-red-100 text-red-800
+    {% elif session.status == 'processing' %}bg-blue-100 text-blue-800
+    {% elif session.status == 'queued' %}bg-yellow-100 text-yellow-800
+    {% else %}bg-gray-100 text-gray-800{% endif %}" id="session-status">
+    {{ status_label(session.status) }}
+  </span>
+  {% if session.status == 'processing' %}
+    <span class="spinner ml-2" aria-hidden="true"></span>
+    <span class="text-sm text-gray-500 ml-2" id="live-indicator">Live updates enabled — refreshes every 5s</span>
+  {% endif %}
+</p>
+
+{% set headline, advice = describe_error(session.error_code, session.error_message) %}
+{% if session.error_message %}
+  <div class="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-lg mb-6">
+    <h3 class="text-red-800 font-semibold">{{ headline }}</h3>
+    {% if advice %}<p class="text-red-700 mt-1">{{ advice }}</p>{% endif %}
+    <details class="mt-3">
+      <summary class="cursor-pointer text-sm text-red-600 hover:text-red-800">Show technical error</summary>
+      <div class="mt-2 text-sm font-mono bg-red-100 p-2 rounded text-red-800">{{ session.error_code }}<br>{{ session.error_message }}</div>
+    </details>
+  </div>
+{% endif %}
+
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
+  <h2 class="text-lg font-semibold text-gray-900 mb-4">How far it got</h2>
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+    <div>
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Pages done</dt>
+      <dd class="mt-1 text-2xl font-bold text-gray-900" id="pages-done">{{ progress_summary(session.pages_processed, session.pages_total) }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Voter records saved</dt>
+      <dd class="mt-1 text-2xl font-bold text-gray-900" id="records-saved">{{ records_summary(session.records_extracted) }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Batches that failed</dt>
+      <dd class="mt-1 text-2xl font-bold text-gray-900" id="batches-failed">{{ session.records_failed }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">How long it took</dt>
+      <dd class="mt-1 text-gray-900" id="time-elapsed">{{ duration_summary(session.processing_time_ms) or 'Still running' }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Started</dt>
+      <dd class="mt-1 text-gray-900">{{ short_time(session.started_at) or '—' }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Finished</dt>
+      <dd class="mt-1 text-gray-900" id="finished-at">{{ short_time(session.completed_at) or 'Not finished' }}</dd>
+    </div>
+  </div>
+  {% if session.pages_total %}
+    <div class="mt-6">
+      <progress max="{{ session.pages_total }}" value="{{ session.pages_processed }}" aria-label="Pages done" id="progress-bar" class="w-full h-2 bg-gray-200 rounded-lg overflow-hidden"></progress>
+    </div>
+  {% endif %}
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+  <h2 class="text-lg font-semibold text-gray-900 mb-2">Batches of pages</h2>
+  <p class="text-sm text-gray-500 mb-4">The PDF is split into batches so each one can be read on its own. A failed batch can be retried by itself.</p>
+  <div class="overflow-x-auto">
+    <table id="units-table" class="w-full">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Batch</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Pages</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">What is happening</th>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Voter records</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">How long</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">What went wrong</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-200">
+        {% for u in units %}
+          <tr id="unit-{{ u.id }}" data-unit-id="{{ u.id }}" class="hover:bg-gray-50 transition-colors">
+            <td class="px-4 py-3 text-right font-mono text-sm">
+              <a href="/units/{{ u.id }}" class="text-blue-600 hover:text-blue-700">{{ u.unit_number }}</a>
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-600">{{ u.page_from }}–{{ u.page_to }}</td>
+            <td class="px-4 py-3">
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                {% if u.status == 'completed' %}bg-green-100 text-green-800
+                {% elif u.status == 'failed' %}bg-red-100 text-red-800
+                {% elif u.status == 'processing' %}bg-blue-100 text-blue-800
+                {% elif u.status == 'queued' %}bg-yellow-100 text-yellow-800
+                {% else %}bg-gray-100 text-gray-800{% endif %}">
+                {{ status_label(u.status) }}
+              </span>
+            </td>
+            <td class="px-4 py-3 text-right font-mono text-sm text-gray-900">{{ u.records_extracted }}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">{{ duration_summary(u.processing_time_ms) or '—' }}</td>
+            <td class="px-4 py-3 text-sm">
+              {% if u.error_message %}
+                <span class="text-red-600" title="Technical detail: {{ u.error_code }} — {{ u.error_message }}">{{ friendly_error(u.error_code, u.error_message) }}</span>
+              {% else %}
+                <span class="text-gray-400">Nothing</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3">
+              {% if u.status == 'failed' %}
+                <form method="post" action="/units/{{ u.id }}/retry"><button type="submit" class="px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors text-sm font-medium">Retry</button></form>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" class="px-4 py-8 text-center text-gray-500 text-sm">No batches yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if session.status == 'processing' %}
+<script>
+// Live updates for processing session
+(function() {
+  var sessionId = '{{ session.id }}';
+  var intervalId = null;
+  var lastRecordCount = {{ session.records_extracted or 0 }};
+  var lastPageCount = {{ session.pages_processed or 0 }};
+
+  function updateFromServer(data) {
+    // Update session-level stats
+    if (data.pages_processed !== undefined) {
+      document.getElementById('pages-done').textContent =
+        (data.pages_processed + '/' + data.pages_total) + (data.pages_total ? ' (' + Math.round(data.pages_processed/data.pages_total*100) + '%)' : '');
+      document.getElementById('progress-bar').value = data.pages_processed;
+      document.getElementById('progress-bar').max = data.pages_total;
+    }
+    if (data.records_extracted !== undefined) {
+      // Only update display if count is multiple of 5 or changed significantly
+      if (data.records_extracted % 5 === 0 || data.records_extracted !== lastRecordCount) {
+        document.getElementById('records-saved').textContent = data.records_extracted;
+        if (data.records_extracted > lastRecordCount) {
+          lastRecordCount = data.records_extracted;
+          // Flash the element
+          var el = document.getElementById('records-saved');
+          el.style.background = '#dff5e8';
+          setTimeout(function() { el.style.background = ''; }, 1000);
+        }
+      }
+    }
+    if (data.records_failed !== undefined) {
+      document.getElementById('batches-failed').textContent = data.records_failed;
+    }
+    if (data.processing_time_ms !== undefined) {
+      // Only update time every 5 seconds (already handled by polling interval)
+      document.getElementById('time-elapsed').textContent = durationSummary(data.processing_time_ms) || 'Still running';
+    }
+    if (data.completed_at) {
+      document.getElementById('finished-at').textContent = shortTime(data.completed_at);
+    }
+    if (data.status) {
+      var statusEl = document.getElementById('session-status');
+      statusEl.textContent = statusLabel(data.status);
+      statusEl.className = 'status ' + statusTone(data.status);
+      if (data.status !== 'processing') {
+        stopLiveUpdates();
+        document.getElementById('live-indicator').style.display = 'none';
+        document.querySelector('.spinner').style.display = 'none';
+      }
+    }
+
+    // Update unit rows
+    if (data.units) {
+      data.units.forEach(function(unit) {
+        var row = document.getElementById('unit-' + unit.id);
+        if (row) {
+          // Update status badge
+          var statusCell = row.querySelector('td:nth-child(3) .status');
+          if (statusCell) {
+            statusCell.textContent = statusLabel(unit.status);
+            statusCell.className = 'status ' + statusTone(unit.status);
+          }
+          // Update records count
+          var recordsCell = row.querySelector('td:nth-child(4)');
+          if (recordsCell && unit.records_extracted !== undefined) {
+            recordsCell.textContent = unit.records_extracted;
+            if (unit.records_extracted > 0) {
+              recordsCell.style.background = '#dff5e8';
+              setTimeout(function() { recordsCell.style.background = ''; }, 1000);
+            }
+          }
+          // Update duration
+          var durationCell = row.querySelector('td:nth-child(5)');
+          if (durationCell && unit.processing_time_ms !== undefined) {
+            durationCell.textContent = durationSummary(unit.processing_time_ms) || '—';
+          }
+          // Update error
+          var errorCell = row.querySelector('td:nth-child(6)');
+          if (errorCell && unit.error_message) {
+            errorCell.innerHTML = '<span class="hint" title="Technical detail: ' + unit.error_code + ' — ' + unit.error_message + '">' + friendlyError(unit.error_code, unit.error_message) + '</span>';
+          }
+        }
+      });
+    }
+  }
+
+  function fetchUpdates() {
+    fetch('/sessions/' + sessionId + '/status')
+      .then(function(response) { return response.json(); })
+      .then(function(data) { updateFromServer(data); })
+      .catch(function(err) { console.warn('Live update failed:', err); });
+  }
+
+  function startLiveUpdates() {
+    if (intervalId) return;
+    fetchUpdates(); // Initial fetch
+    intervalId = setInterval(fetchUpdates, 5000);
+    console.log('Live updates started for session', sessionId);
+  }
+
+  function stopLiveUpdates() {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+      console.log('Live updates stopped for session', sessionId);
+    }
+  }
+
+  // Helper functions (copied from presentation.py logic)
+  function durationSummary(ms) {
+    if (!ms || ms < 0) return null;
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    var r = s % 60;
+    if (m < 60) return m + 'm ' + r + 's';
+    var h = Math.floor(m / 60);
+    return h + 'h ' + (m % 60) + 'm';
+  }
+
+  function statusLabel(code) {
+    var map = {
+      'created': 'Created',
+      'queued': 'Queued',
+      'processing': 'Being processed',
+      'completed': 'Finished',
+      'partial': 'Partially done',
+      'failed': 'Failed',
+      'retry': 'Will retry',
+      'cancelled': 'Cancelled',
+      'abandoned': 'Abandoned'
+    };
+    return map[code] || code;
+  }
+
+  function statusTone(code) {
+    var map = {
+      'created': 'wait',
+      'queued': 'wait',
+      'processing': 'busy',
+      'completed': 'good',
+      'partial': 'warn',
+      'failed': 'bad',
+      'retry': 'warn',
+      'cancelled': 'muted',
+      'abandoned': 'bad'
+    };
+    return map[code] || 'muted';
+  }
+
+  function shortTime(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    return d.toLocaleDateString(undefined, {month:'short', day:'numeric'}) + ', ' + d.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+  }
+
+  function friendlyError(code, message) {
+    var map = {
+      'INVALID_PDF': 'Unreadable PDF',
+      'EXTRACTION_TIMEOUT': 'Timed out reading',
+      'EXTRACTION_SERVICE_UNAVAILABLE': 'OCR service down',
+      'EXTRACTION_FAILED': 'Extraction failed',
+      'MODEL_TIMEOUT': 'Model timed out',
+      'NORMALIZATION_FAILED': 'Data mapping failed',
+      'DATABASE_ERROR': 'Database error',
+      'WORKER_LOST': 'Worker disconnected',
+    };
+    return map[code] || code;
+  }
+
+  // Start live updates
+  startLiveUpdates();
+
+  // Clean up on page unload
+  window.addEventListener('beforeunload', stopLiveUpdates);
+})();
+</script>
+
+<style>
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+{% endif %}
+
+{% endblock %}

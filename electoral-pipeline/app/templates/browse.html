@@ -1,0 +1,78 @@
+{% extends "base.html" %}{% from "_records_table.html" import records_table %}{% block title %}Database Browser · Electoral Roll Processing{% endblock %}{% block content %}
+
+<div class="mb-6 flex items-center justify-between flex-wrap gap-4">
+  <div>
+    <h1>Database Browser</h1>
+    <p class="text-gray-600 mt-1">Browse all voter records across all documents</p>
+  </div>
+  <div class="flex gap-2">
+    <a href="/documents" class="button secondary">← Back to Documents</a>
+  </div>
+</div>
+
+<!-- Filter bar -->
+<div class="panel mb-6">
+  <form method="get" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4 items-end">
+    <div class="lg:col-span-2">
+      <label class="block text-sm font-medium text-gray-700 mb-1">Search</label>
+      <input type="text" name="q" value="{{ query or '' }}" placeholder="Search names, EPIC, house number..." class="w-full border rounded-lg px-3 py-2 text-sm">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Gender</label>
+      <select name="gender" class="w-full border rounded-lg px-3 py-2 text-sm">
+        <option value="">All</option>
+        <option value="Male" {% if gender == 'Male' %}selected{% endif %}>Male</option>
+        <option value="Female" {% if gender == 'Female' %}selected{% endif %}>Female</option>
+        <option value="Third Gender" {% if gender == 'Third Gender' %}selected{% endif %}>Third Gender</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Age Range</label>
+      <input type="text" name="age" value="{{ age or '' }}" placeholder="e.g., 25-35" class="w-full border rounded-lg px-3 py-2 text-sm">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Language</label>
+      <select name="lang" class="w-full border rounded-lg px-3 py-2 text-sm">
+        <option value="en" {% if lang == 'en' %}selected{% endif %}>English</option>
+        <option value="hi" {% if lang == 'hi' %}selected{% endif %}>Hindi</option>
+      </select>
+    </div>
+    <div class="flex gap-2">
+      <button type="submit" class="button flex-1">Filter</button>
+      <a href="/browse" class="button secondary flex-1">Clear</a>
+    </div>
+  </form>
+</div>
+
+<!-- Results table -->
+<section class="panel">
+  <div class="flex items-center justify-between mb-4">
+    <h2>Voter Records ({{ total }} total)</h2>
+    <a href="/browse/export{{ '?q=' + query if query else '' }}{{ '&gender=' + gender if gender else '' }}{{ '&age=' + age if age else '' }}{{ '&lang=' + lang if lang else '' }}" class="button">Export All as CSV</a>
+  </div>
+
+  {% if records %}
+    {{ records_table(records, total, lang=lang) }}
+  {% else %}
+    <div class="text-center py-8 text-gray-500">
+      <p>No records found matching your filters.</p>
+    </div>
+  {% endif %}
+
+  <!-- Pagination -->
+  {% if total > 100 %}
+  <div class="mt-6 flex items-center justify-between">
+    <p class="text-sm text-gray-600">Showing {{ records|length }} of {{ total }} records</p>
+    <div class="flex gap-2">
+      {% if page > 1 %}
+        <a href="?page={{ page - 1 }}{{ '&q=' + query if query else '' }}{{ '&gender=' + gender if gender else '' }}{{ '&age=' + age if age else '' }}{{ '&lang=' + lang if lang else '' }}" class="button secondary text-sm">Previous</a>
+      {% endif %}
+      {% if records|length == 100 %}
+        <a href="?page={{ page + 1 }}{{ '&q=' + query if query else '' }}{{ '&gender=' + gender if gender else '' }}{{ '&age=' + age if age else '' }}{{ '&lang=' + lang if lang else '' }}" class="button text-sm">Next</a>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+{% endblock %}

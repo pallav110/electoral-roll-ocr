@@ -1,0 +1,41 @@
+FROM python:3.12-slim
+
+# Install system dependencies for OCR
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-hin \
+    tesseract-ocr-eng \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy OCR API script and its pinned dependencies
+COPY ocr_pdf_api.py .
+COPY ocr_api_requirements.txt .
+
+# Install Python dependencies.
+# paddleocr is REQUIRED, not optional: without it the service still starts and
+# reports status "ok", but house numbers and ages silently come back empty
+# because the PaddleOCR fallback in _extract_pdf_ocr_unlocked is skipped.
+#
+# Versions are pinned in ocr_api_requirements.txt rather than left floating.
+# An unpinned build pulled PaddleOCR 3.7, which the /health endpoint still
+# reported as paddleocr_available=true -- but the first real call raised
+# "ValueError: Unknown argument: show_log" because the code uses the 2.x API.
+RUN pip install --no-cache-dir -r ocr_api_requirements.txt
+
+# Create output directory
+RUN mkdir -p /home/spxlpt133/Desktop/OCR/results
+
+# Expose port
+EXPOSE 8082
+
+# Run the API
+CMD ["uvicorn", "ocr_pdf_api:app", "--host", "0.0.0.0", "--port", "8082"]

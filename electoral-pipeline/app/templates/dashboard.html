@@ -1,0 +1,126 @@
+{% extends "base.html" %}{% block title %}Overview · Electoral Roll Processing{% endblock %}{% block content %}
+
+<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
+  <div>
+    <h1 class="text-3xl font-bold text-gray-900 tracking-tight">Dashboard</h1>
+    <p class="text-gray-600 mt-1">Monitor voter roll PDF processing status</p>
+  </div>
+  <form method="post" action="/actions/discover">
+    <button type="submit" class="inline-flex items-center px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors font-medium text-sm shadow-sm">
+      <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+      </svg>
+      Discover PDFs
+    </button>
+  </form>
+</div>
+
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">Total PDFs</span>
+    <p class="text-3xl font-bold text-gray-900 mt-2">{{ total }}</p>
+  </div>
+  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">Completed</span>
+    <p class="text-3xl font-bold text-green-600 mt-2">{{ counts.get('completed', 0) }}</p>
+  </div>
+  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">In Progress</span>
+    <p class="text-3xl font-bold text-blue-600 mt-2">{{ counts.get('processing', 0) + counts.get('queued', 0) + counts.get('retry', 0) }}</p>
+  </div>
+  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">Failed</span>
+    <p class="text-3xl font-bold text-red-600 mt-2">{{ counts.get('failed', 0) }}</p>
+  </div>
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-8">
+  <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+    <h2 class="text-lg font-semibold text-gray-900">Recent PDF Files</h2>
+    <a href="/documents" class="text-sm text-blue-600 hover:text-blue-700 font-medium">View all →</a>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">File</th>
+          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">When Found</th>
+          <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Attempts</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-200">
+        {% for d in recent %}
+          <tr class="hover:bg-gray-50 transition-colors">
+            <td class="px-6 py-4">
+              <a href="/documents/{{ d.id }}" class="text-blue-600 hover:text-blue-700 font-medium">{{ d.file_name }}</a>
+            </td>
+            <td class="px-6 py-4">
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                {% if d.status == 'completed' %}bg-green-100 text-green-800
+                {% elif d.status == 'failed' %}bg-red-100 text-red-800
+                {% elif d.status == 'processing' %}bg-blue-100 text-blue-800
+                {% elif d.status == 'queued' %}bg-yellow-100 text-yellow-800
+                {% else %}bg-gray-100 text-gray-800{% endif %}">
+                {{ status_label(d.status) }}
+              </span>
+              {% if d.last_error %}
+                <div class="text-xs text-gray-500 mt-1">{{ friendly_error(d.last_error_code, d.last_error) }}</div>
+              {% endif %}
+            </td>
+            <td class="px-6 py-4 text-sm text-gray-600">{{ time_ago(d.discovered_at) }}</td>
+            <td class="px-6 py-4 text-sm text-gray-900 text-right font-mono">{{ d.attempt_count }} / {{ d.max_attempts }}</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="4" class="px-6 py-12 text-center text-gray-500">
+              <div class="flex flex-col items-center">
+                <svg class="w-12 h-12 text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+                <p class="text-sm">No PDFs found yet. Place PDF files in the <code class="bg-gray-100 px-2 py-1 rounded text-xs">sample-pdfs</code> folder and click "Discover PDFs".</p>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+  <details class="group">
+    <summary class="px-6 py-4 border-b border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors flex items-center justify-between">
+      <h2 class="text-lg font-semibold text-gray-900">Recent Activity (Technical Detail)</h2>
+      <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+      </svg>
+    </summary>
+    <div class="overflow-x-auto">
+      <table class="w-full">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">When</th>
+            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Event</th>
+            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Details</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-200">
+          {% for e in events %}
+            <tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-6 py-3 text-sm text-gray-600">{{ short_time(e.created_at) }}</td>
+              <td class="px-6 py-3 text-sm font-medium text-gray-900">{{ event_label(e.event_type) }}</td>
+              <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ e.details or '—' }}{% if e.message %} · {{ e.message }}{% endif %}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="3" class="px-6 py-8 text-center text-gray-500 text-sm">No activity recorded yet.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+</div>
+
+{% endblock %}

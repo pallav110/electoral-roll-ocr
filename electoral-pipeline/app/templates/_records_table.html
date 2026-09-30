@@ -1,0 +1,102 @@
+{# Voter records table, shared by the document and unit pages.
+
+   Renders BOTH languages side by side by default; a toggle lets the user
+   scan a long list in one language at a time. The switch is client-side only
+   (localStorage) so it persists across page loads.
+
+   Expects: records (list), total_records (int, optional), lang (str, 'en' or 'hi'). #}
+{% macro records_table(records, total_records=none, caption=none, lang='en') %}
+{% set shown = records | length %}
+<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+  <h2 class="text-xl font-semibold text-gray-900">{{ caption or 'Voter records' }}</h2>
+  <div class="flex items-center gap-4">
+    <div class="inline-flex border border-gray-300 rounded-lg overflow-hidden bg-white">
+      <button type="button" data-lang="hi" class="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">हिन्दी</button>
+      <button type="button" data-lang="en" class="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors border-l border-gray-300">English</button>
+    </div>
+    <span class="text-sm text-gray-500">
+      {% if total_records is none %}
+        {{ shown }} record{{ '' if shown == 1 else 's' }}
+      {% elif total_records > shown %}
+        Showing {{ shown }} of {{ total_records }}
+      {% else %}
+        All {{ total_records }} record{{ '' if total_records == 1 else 's' }}
+      {% endif %}
+    </span>
+  </div>
+</div>
+
+{% if records %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Page</th>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">No.</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Voter name<br><span class="text-gray-400 font-normal normal-case">हिन्दी / English</span></th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">First / Middle / Last<br><span class="text-gray-400 font-normal normal-case">हिन्दी / English</span></th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Relative's name<br><span class="text-gray-400 font-normal normal-case">हिन्दी / English</span></th>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Age</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Gender<br><span class="text-gray-400 font-normal normal-case">हिन्दी / English</span></th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">House</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Voter ID</th>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">S.No</th>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Card</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">State/AC/Booth</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">PDF</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-200">
+        {% for r in records %}
+          <tr class="hover:bg-gray-50 transition-colors">
+            <td class="px-4 py-3 text-sm text-gray-900 text-right font-mono">{{ r.page_number }}</td>
+            <td class="px-4 py-3 text-sm text-gray-500 text-right font-mono">{{ r.source_row_number }}</td>
+            <td class="px-4 py-3">
+              <span class="lang-hi text-sm text-gray-900">{{ r.name_hi or '—' }}</span>
+              <span class="lang-en text-sm text-gray-900">{{ r.name_en or '—' }}</span>
+            </td>
+            <td class="px-4 py-3">
+              <span class="lang-hi text-sm text-gray-900">
+                {{ r.voter_first_name_hi or '' }}{% if r.voter_middle_name_hi %} {{ r.voter_middle_name_hi }}{% endif %}{% if r.voter_sur_name_hi %} {{ r.voter_sur_name_hi }}{% endif %}
+              </span>
+              <span class="lang-en text-sm text-gray-900">
+                {{ r.voter_first_name_en or '' }}{% if r.voter_middle_name_en %} {{ r.voter_middle_name_en }}{% endif %}{% if r.voter_sur_name_en %} {{ r.voter_sur_name_en }}{% endif %}
+              </span>
+            </td>
+            <td class="px-4 py-3">
+              <span class="lang-hi text-sm text-gray-900">{{ r.relative_name_hi or '—' }}</span>
+              <span class="lang-en text-sm text-gray-900">{{ r.relative_name_en or '—' }}</span>
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-900 text-right font-mono">{{ r.age if r.age is not none else '—' }}</td>
+            <td class="px-4 py-3">
+              <span class="lang-hi text-sm text-gray-900">{{ r.gender_hi or '—' }}</span>
+              <span class="lang-en text-sm text-gray-900">{{ r.gender_en or '—' }}</span>
+            </td>
+            <td class="px-4 py-3">
+              <span class="lang-hi text-sm text-gray-900">{{ r.house_number_hi or '—' }}</span>
+              <span class="lang-en text-sm text-gray-900">{{ r.house_number_en or '—' }}</span>
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-900 font-mono">{{ r.epic_number or '—' }}</td>
+            <td class="px-4 py-3 text-sm text-gray-900 text-right font-mono">{{ r.sno or '—' }}</td>
+            <td class="px-4 py-3 text-sm text-gray-900 text-right font-mono">{{ r.card_index or '—' }}</td>
+            <td class="px-4 py-3 text-xs text-gray-600">{{ r.state_code or '' }}/{{ r.ac_code or '' }}/{{ r.booth_code or '' }}</td>
+            <td class="px-4 py-3 text-xs text-gray-600">{{ r.pdf_name or '—' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<p class="text-sm text-gray-500 mt-4">
+  Every name is stored in both languages. Hindi is what the roll prints; English is transliterated from it, so the two can be checked against each other.
+</p>
+{% else %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
+  <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+  </svg>
+  <p class="text-gray-500 text-sm">No voter records have been saved for this yet. They appear once a batch of pages finishes reading.</p>
+</div>
+{% endif %}
+{% endmacro %}
