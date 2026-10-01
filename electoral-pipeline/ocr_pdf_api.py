@@ -495,13 +495,24 @@ CARD_FRAME_MARGIN_COLS_PX = 24
 # Tesseract language for every Hindi field read. Pure `hin`, not `hin+eng`:
 # these bands hold names, relations, house numbers, gender and age, and the
 # English model contributes only misread Latin garbage on Devanagari strokes
-# while slowing each pass. The serial and EPIC numbers are read by PaddleOCR
-# at 300 DPI, which is where digit accuracy comes from.
+# while slowing each pass.
 TESSERACT_HINDI_LANG = "hin"
 # Serial and EPIC are Latin digits only, so the Hindi model is the wrong one
 # for them -- it has no digit classes and returns what it can from the
-# shapes. Pure `eng` reads them directly. PaddleOCR at 300 DPI remains the
-# authority on these two fields; this is the Tesseract-side read.
+# shapes. Pure `eng` reads them directly.
+#
+# Both are read by Tesseract only. PaddleOCR never touches the EPIC: the
+# combined serial/house/age pass does not stack it. And Paddle must not be
+# moved onto the EPIC -- a 300 DPI crop fed to _read_line_variants is
+# downscaled back to its fixed 60/80/100/120px targets, which destroys the
+# thin digit strokes. Measured on this roll: 300 DPI matched the stored value
+# on 0 of 10 EPICs where 200 DPI matched 5 of 10.
+#
+# The mirror image applies to the Q deleted-marker, which IS Paddle's: giving
+# it a 300 DPI crop does not help either, because that crop is then upscaled
+# by `min(6, max(2, 80 // height))` to ~80px, and p16/sno410 read as '410' at
+# both DPIs on that path. Do not re-attempt a DPI fix for it without a probe
+# that reproduces through _extract_card itself.
 TESSERACT_ENGLISH_LANG = "eng"
 # --oem 3 is the LSTM engine, which is the only one that reads Devanagari
 # well. --psm 6 treats the crop as one uniform block, which is what a
@@ -836,9 +847,26 @@ def _extract_serial_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
 # and voted on; reads that don't match are only used as a fallback.
 EPIC_SHAPE_RE = re.compile(r"^[A-Z]{3}\d{7}$")
 
+# Scratch slot for the last EPIC vote's disagreement, consumed by the caller
+# immediately after the read. A bare return value would force both call sites
+# to re-run the 8 readers to recover the split. Thread-local, not global:
+# _extract_card runs in a ThreadPoolExecutor, so a shared slot would let one
+# card's clear() erase another's split mid-read.
+_EPIC_VOTE_SPLIT = threading.local()
+
 
 def _extract_epic_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
-    """Extract EPIC (3 letters + 7 digits) across scales/thresholds. Votes on correctly-shaped reads; returns most common cleaned read as fallback."""
+    """Extract EPIC (3 letters + 7 digits) across scales/thresholds.
+
+    Votes on correctly-shaped reads and returns the most common one. A wrong
+    digit is still shape-valid, so validation cannot catch it -- the only
+    in-band evidence is that the 8 readers disagree with each other. That
+    split is recorded on the module-level scratch slot so the caller can flag
+    the record for review. The winner is never changed on its account: a
+    disagreement means "a human should check this", not "pick a different
+    voter's ID", and the alternative candidate may well belong to the reader
+    that was wrong rather than to the record.
+    """
     try:
         img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
         if img is None or img.size == 0:
@@ -858,7 +886,14 @@ def _extract_epic_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
         valid = [r for r in reads if EPIC_SHAPE_RE.match(r)]
         pool = valid or reads
         votes = Counter(pool)
+        # Ties break on length, then on insertion order. The insertion-order
+        # step is arbitrary, which is exactly why a split is worth flagging.
         best = max(votes, key=lambda r: (votes[r], len(r)))
+        if len(votes) > 1:
+            _EPIC_VOTE_SPLIT.data = [
+                {"value": value, "votes": count}
+                for value, count in votes.most_common()
+            ]
         return [best]
     except Exception as exc:
         log.debug("EPIC OCR failed: %s", exc)
@@ -1586,6 +1621,168 @@ def _english_line_score(lines: list[str]) -> int:
 
 
 
+# Reader set for the deleted-mark vote. A single Paddle read of the serial
+# box is not reliable: on page 16 card 20 (serial 410, AWX4756151) the same
+# crop read as ['410'] in the stacked pass and ['Q', '410'] in isolation, so
+# one read can lose a marker that is plainly legible. Scaling to fixed pixel
+# heights and thresholding gives several genuinely different views of the
+# same glyph instead of several copies of one view.
+#
+# 200 DPI on purpose. The Q is a thin enclosing loop; at 300 DPI two of the
+# five known-deleted cards dropped to 3/8 and would have been lost by any
+# majority bar. This matches the rest of the pipeline, which reads Hindi at
+# 200 for the same reason.
+DELETED_VOTE_HEIGHTS_PX = (40, 60, 80, 120)
+# Thresholding AFTER the upscale, not before. Order matters more than it
+# looks: Otsu-then-upscale yields a blurred, grey-edged binary (the upscale
+# interpolates across the threshold), and a blurred threshold is exactly what
+# erases the thin loop of a Q. Upscale-then-Otsu thresholds at the resolution
+# the recogniser actually sees. Measured on the same crop, same 8 readers,
+# the two orders differ: page 16 cards 11 and 20 scored 4/8 before and 8/8
+# after, which is the whole reason those two cards were being missed.
+#
+# 8 readers = 4 pixel heights x {plain, otsu}. Bar set from the full 600-card
+# roll rather than from the cases that motivated it: every known-deleted card
+# scores 8/8 and the other 595 cards score 0/8, so any bar in 1..8 is safe.
+# 5 was chosen from six samples and rejected two real deletions for nothing.
+DELETED_VOTE_MIN_HITS = 5
+
+
+def _serial_deleted_vote(serial_img: Any) -> tuple[bool, int, int]:
+    """Decide is_deleted by voting across several reads of the serial box.
+
+    Returns (is_deleted, hits, total_readers). Every reader is a different
+    rendering of the same crop -- fixed pixel height, then plain and Otsu --
+    and the mark counts as present only if a majority of them see it.
+
+    Voting rather than trusting one read is the fix for a marker that is
+    legible but inconsistently detected; it makes the decision robust to a
+    single bad read without needing that read to be impossible.
+
+    Note the limit of this method: every reader is the SAME engine, so the
+    vote buys tolerance to a bad render, not to a bad model. When Paddle is
+    systematically blind to a given glyph the vote cannot rescue it -- that
+    is what _serial_deleted_tesseract_crosscheck is for.
+    """
+    if serial_img is None or getattr(serial_img, "size", 0) == 0:
+        return False, 0, 0
+    height = serial_img.shape[0]
+    if not height:
+        return False, 0, 0
+    hits = 0
+    total = 0
+    for target in DELETED_VOTE_HEIGHTS_PX:
+        scale = target / float(height)
+        if scale <= 0:
+            continue
+        upscaled = cv2.resize(
+            serial_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
+        )
+        variants = [upscaled]
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY) if upscaled.ndim == 3 else upscaled
+        otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        variants.append(
+            cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR)
+            if otsu.ndim == 2
+            else otsu
+        )
+        for variant in variants:
+            total += 1
+            try:
+                result = _get_paddle().ocr(variant, cls=False)
+            except Exception as exc:
+                log.debug("deleted vote reader failed: %s", exc)
+                continue
+            texts = [ln[1][0].strip() for ln in (result[0] or []) if ln[1][0]]
+            if any("Q" in t.upper() for t in texts):
+                hits += 1
+    if not total:
+        return False, 0, 0
+    return hits >= DELETED_VOTE_MIN_HITS, hits, total
+
+
+# The second engine for the deleted mark. Paddle and Tesseract fail on
+# different cards -- on the ground truth Paddle reads the Q on all five while
+# Tesseract reads nothing at all on page 15 card 30 -- so neither alone is
+# sufficient and the two are combined with OR.
+#
+# The rule needs no OCR intelligence: THE SERIAL BOX CONTAINS ONLY DIGITS, so
+# any alphabetic character in it is a misread Q. Nothing else can legitimately
+# appear there, which makes this a strict rule rather than a heuristic. On the
+# ground truth it reads the literal string 'Q 410' on page 16 card 20 and
+# '[a 422]' / '[aor]' on two others.
+DELETED_TESSERACT_MIN_HITS = 4
+
+
+def _serial_deleted_tesseract_crosscheck(serial_img: Any) -> tuple[int, int]:
+    """Look for the deleted marker with a different engine than Paddle.
+
+    Returns (hits, total_readers) counting readers whose text contains any
+    letter. The serial box holds a number, so a letter in it is a Q candidate.
+
+    This exists because the Paddle vote is eight renders of ONE recogniser: it
+    buys tolerance to a bad render, not to a bad model. When Paddle is
+    systematically blind to a glyph, no amount of re-rendering recovers it, and
+    a second engine is the only thing that can.
+    """
+    if serial_img is None or getattr(serial_img, "size", 0) == 0:
+        return 0, 0
+    height = serial_img.shape[0]
+    if not height:
+        return 0, 0
+    hits = 0
+    total = 0
+    for target in DELETED_VOTE_HEIGHTS_PX:
+        scale = target / float(height)
+        if scale <= 0:
+            continue
+        upscaled = cv2.resize(
+            serial_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
+        )
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY) if upscaled.ndim == 3 else upscaled
+        variants = [gray]
+        otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        variants.append(otsu)
+        for variant in variants:
+            total += 1
+            try:
+                text = pytesseract.image_to_string(
+                    Image.fromarray(variant), lang="eng",
+                    config="--oem 3 --psm 7",
+                )
+            except Exception as exc:
+                log.debug("deleted tesseract crosscheck reader failed: %s", exc)
+                continue
+            if re.search(r"[A-Za-z]", text):
+                hits += 1
+    return hits, total
+
+
+def _decide_deleted(serial_img: Any) -> tuple[bool, int, int]:
+    """Decide is_deleted, escalating to a second engine only when unsure.
+
+    Returns (is_deleted, hits, total_readers) from whichever arm decided.
+
+    The cheap path is the Paddle vote, which runs on every record. Tesseract
+    is a subprocess per reader, so it is consulted ONLY when the Paddle vote is
+    genuinely inconclusive -- a clear majority, or a clear zero, is not worth a
+    second opinion, and no card in the 600-card roll landed in the band. The
+    crosscheck is a safety net for marks this roll happens not to contain, not
+    a routine cost on every card.
+    """
+    marked, hits, total = _serial_deleted_vote(serial_img)
+    if not total:
+        return False, 0, 0
+    if hits == 0 or hits >= DELETED_VOTE_MIN_HITS:
+        return marked, hits, total
+
+    # Inconclusive band: ask the other engine.
+    t_hits, t_total = _serial_deleted_tesseract_crosscheck(serial_img)
+    if t_total and t_hits >= DELETED_TESSERACT_MIN_HITS:
+        return True, hits, total
+    return marked, hits, total
+
+
 def _detect_deleted_watermark(card_img: Any, serial_png: Optional[bytes] = None) -> bool:
     """Detect DELETED watermark via Q prefix in the serial box.
 
@@ -1853,6 +2050,9 @@ def _extract_card(
         # ── 4. EPIC / Voter ID ───────────────────────────────────────────
         id_card_no = ""
         epic_png = _crop_png(cl, TESSERACT_CARD_CONTENT_REGIONS[EPIC_REGION_INDEX], "EPIC")
+        # Clear the scratch slot before the read so a stale split from a prior
+        # card on this thread cannot attach itself to this one.
+        _EPIC_VOTE_SPLIT.data = None
         if epic_png:
             e_reads = _extract_epic_with_tesseract(epic_png)
             _t("_extract_epic_with_tesseract", e_reads)
@@ -1862,6 +2062,9 @@ def _extract_card(
             if e_reads and e_reads[0]:
                 id_card_no = e_reads[0]
         _t("EPIC → id_card_no", id_card_no)
+        # Stash the split here; `record` does not exist until the Hindi parse
+        # below, so it cannot be applied yet.
+        epic_split = _EPIC_VOTE_SPLIT.data
 
         # ── 5. Hindi fields ──────────────────────────────────────────────
         hindi_fields_lines = None
@@ -1886,6 +2089,19 @@ def _extract_card(
             record["sno"] = sno
         if id_card_no:
             record["id_card_no"] = id_card_no
+
+        # Apply the EPIC split now that `record` exists. The chosen value is
+        # left untouched -- a disagreement asks for a human check, it does not
+        # authorise substituting a different voter's ID.
+        if epic_split:
+            record["_needs_review"] = True
+            record.setdefault("_review_reasons", []).append(
+                "epic_readers_disagree: "
+                + ", ".join(f"{c['value']}x{c['votes']}" for c in epic_split)
+            )
+            record.setdefault("_field_sources", {})["id_card_no"] = (
+                "tesseract_split_vote"
+            )
 
         # ── 7. House number ──────────────────────────────────────────────
         try:
@@ -2005,8 +2221,28 @@ def _extract_card(
         record["is_deleted"] = False  # filled in after thread pool
 
         # ── 9. Final record ──────────────────────────────────────────────
-        if not any(record.get(k) for k in ("sno", "id_card_no", "voter_first_name", "age", "is_deleted")):
-            _t("FINAL RECORD", "→ discarded (no usable fields)")
+        # A card is a real voter if it has a name OR a well-formed EPIC.
+        #
+        # The old test was truthiness over five fields, which blank boxes
+        # defeated: an empty box still OCRs its grid-rule fragments into short
+        # junk ("BS" serial, "OS" voter id), and a non-empty string is truthy.
+        # 68 such boxes were saved as if they were people.
+        #
+        # "Name OR valid EPIC" cannot drop a genuine voter. Every named card in
+        # the reference run carries a shape-valid EPIC, and a card whose name
+        # failed still keeps its ID -- the two failure modes are disjoint. A
+        # deleted card ("Q" prefix, struck through) is the clearest case: the
+        # horizontal rules cut the Devanagari name to pieces while leaving the
+        # 3-letter + 7-digit ID legible, because that text has wide gaps between
+        # glyphs and no continuous shirorekha. Both kept. Blank boxes have
+        # neither, and fail the format test by a wide margin.
+        has_name = any(
+            str(record.get(k) or "").strip()
+            for k in ("voter_first_name", "voter_middle_name", "voter_sur_name")
+        )
+        epic = str(record.get("id_card_no") or "").strip().upper()
+        if not has_name and not EPIC_SHAPE_RE.match(epic):
+            _t("FINAL RECORD", "→ discarded (blank box: no name, no valid EPIC)")
             return None
 
         _t("FINAL RECORD", record)
@@ -2420,6 +2656,15 @@ def _extract_pdf_ocr_unlocked(
                     continue
                 cl_img = rec.pop("_cl_for_deleted", None)
                 ser_png = rec.pop("_serial_png_for_deleted", None)
+                # Keep the decoded serial crop for the deleted-mark vote. The
+                # stacked pass re-scales and re-pads this same crop before
+                # reading it, and one read of the stacked image can lose a
+                # legible Q (page 16 card 20 came back ['410']).
+                ser_img = None
+                if ser_png:
+                    ser_img = cv2.imdecode(
+                        np.frombuffer(ser_png, np.uint8), cv2.IMREAD_COLOR
+                    )
                 hv_png_deferred = rec.pop("_hv_png_for_paddle", None)
                 age_png_deferred = rec.pop("_age_png_for_paddle", None)
                 tess_house = rec.pop("_tess_house", "")
@@ -2484,8 +2729,18 @@ def _extract_pdf_ocr_unlocked(
                             ]
 
                             if field == "serial":
-                                if any("Q" in t.upper() for t in field_texts):
-                                    rec["is_deleted"] = True
+                                # A single Paddle read can drop a Q that is
+                                # plainly legible: page 16 card 20 came back
+                                # ['410'] from the stacked image but ['Q','410']
+                                # from the same crop read alone. Re-decide from
+                                # the original crop, escalating to a second
+                                # engine when the Paddle vote is inconclusive.
+                                marked, vote_hits, vote_total = _decide_deleted(ser_img)
+                                if vote_total:
+                                    rec["is_deleted"] = marked
+                                    rec.setdefault("_field_sources", {})[
+                                        "is_deleted"
+                                    ] = f"serial_vote_{vote_hits}/{vote_total}"
 
                             elif field == "house" and field_texts:
                                 paddle_house = None
@@ -2535,7 +2790,11 @@ def _extract_pdf_ocr_unlocked(
 
                 except Exception as _pe:
                     log.debug("PaddleOCR combined pass failed: %s", _pe)
-                    rec["is_deleted"] = _detect_deleted_watermark(cl_img, serial_png=ser_png)
+                    # Same decision as the normal path. The two used to differ
+                    # -- this one accepted a single Paddle Q while the vote
+                    # required 5/8 -- so a card could be marked deleted on the
+                    # exception path and not deleted on the normal one.
+                    rec["is_deleted"] = _decide_deleted(ser_img)[0]
 
                 # Danda/double-danda lookalike fix
                 house_val = rec.get("house_no", "")

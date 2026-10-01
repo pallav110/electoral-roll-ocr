@@ -31,6 +31,12 @@ services:
       # keeps those from nesting threads, so one core per worker is the unit.
       - OCR_CARD_WORKERS=12
     volumes:
+      # The service module is bind-mounted so a `docker compose up` can never
+      # silently revert to an older copy baked into the image. Previously the
+      # code lived only in the image, so restarting the stack discarded every
+      # edit made with `docker compose cp` and the container ran stale logic
+      # while looking perfectly healthy.
+      - ./ocr_pdf_api.py:/app/ocr_pdf_api.py:ro
       - ./sample-pdfs:/data/pdfs
       # Mounted where ocr_pdf_api.py actually writes. OCR_OUTPUT_DIR defaults to
       # <parent of the module's dir>/results, which inside the container is

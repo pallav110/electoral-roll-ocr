@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-API_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ocr_pdf_api.py"
+API_PATH = Path(__file__).resolve().parents[1] / "ocr_pdf_api.py"
 SPEC = importlib.util.spec_from_file_location("ocr_pdf_api", API_PATH)
 assert SPEC is not None and SPEC.loader is not None
 ocr_pdf_api = importlib.util.module_from_spec(SPEC)

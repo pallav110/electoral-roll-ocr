@@ -5,8 +5,14 @@ from typing import Any
 import httpx
 
 from app import config
+from app.humanlog import configure_logging
 
 log = logging.getLogger(__name__)
+# One writer, plain-English lines. The old code called print() and log.info()
+# with identical text, so every line appeared twice in `docker compose logs`.
+say = configure_logging("extractor")
+log = say.logger
+
 
 # The OCR service returns the relation type in Hindi and the relative's name
 # under one of four parallel field groups. Map the Hindi type to the group
@@ -59,102 +65,86 @@ class ExtractionError(Exception):
 
 
 def validate_response(data: Any, page_from: int, page_to: int) -> dict:
-    log.info(f"[VALIDATION] Starting response validation for page range {page_from} to {page_to}")
-    print(f"[VALIDATION] Starting response validation for page range {page_from} to {page_to}")
-    
+    say.info("Checking the reading we got back", pages=f"{page_from}-{page_to}")
+
     if not isinstance(data, dict):
-        log.error(f"[VALIDATION] FAILED: Response is not a dictionary, got type {type(data)}")
-        print(f"[VALIDATION] FAILED: Response is not a dictionary, got type {type(data)}")
+        say.error("The reading service sent back something that is not a result",
+                  pages=f"{page_from}-{page_to}")
         raise ExtractionError("INVALID_RESPONSE", "Extractor returned a non-object response", False)
-    
-    log.info(f"[VALIDATION] Response is a valid dictionary, checking success flag")
-    print(f"[VALIDATION] Response is a valid dictionary, checking success flag")
-    
+
     if data.get("success") is False:
         error = data.get("error") if isinstance(data.get("error"), dict) else {}
         code = str(error.get("code", "EXTRACTION_FAILED"))
         message = str(error.get("message", "Extraction failed"))
-        log.error(f"[VALIDATION] FAILED: Extraction service returned success=False with code={code}, message={message}")
-        print(f"[VALIDATION] FAILED: Extraction service returned success=False with code={code}, message={message}")
+        say.error("The reading service could not read these pages",
+                  pages=f"{page_from}-{page_to}", reason=message)
         raise ExtractionError(code, message, code in {"MODEL_TIMEOUT", "EXTRACTION_FAILED", "INTERNAL_ERROR", "EXTRACTION_SERVICE_UNAVAILABLE"})
-    
+
     http_status = data.get("http_status", 200)
-    log.info(f"[VALIDATION] HTTP status from response: {http_status}")
-    print(f"[VALIDATION] HTTP status from response: {http_status}")
-    
+
     if http_status >= 500:
-        log.error(f"[VALIDATION] FAILED: HTTP 5xx error - {http_status}")
-        print(f"[VALIDATION] FAILED: HTTP 5xx error - {http_status}")
+        say.error("The reading service had a server-side problem",
+                  pages=f"{page_from}-{page_to}", status=http_status)
         raise ExtractionError("EXTRACTION_SERVICE_UNAVAILABLE", f"Extractor returned HTTP {http_status}")
-    
+
     if http_status >= 400:
-        log.error(f"[VALIDATION] FAILED: HTTP 4xx error without structured error - {http_status}")
-        print(f"[VALIDATION] FAILED: HTTP 4xx error without structured error - {http_status}")
+        say.error("The reading service rejected the request",
+                  pages=f"{page_from}-{page_to}", status=http_status)
         raise ExtractionError("INVALID_RESPONSE", f"Extractor returned HTTP {http_status} without a structured error", False)
-    
+
     resp_page_from = data.get("page_from")
     resp_page_to = data.get("page_to")
-    log.info(f"[VALIDATION] Response page range: {resp_page_from} to {resp_page_to}, expected: {page_from} to {page_to}")
-    print(f"[VALIDATION] Response page range: {resp_page_from} to {resp_page_to}, expected: {page_from} to {page_to}")
-    
+
     if resp_page_from != page_from or resp_page_to != page_to:
-        log.error(f"[VALIDATION] FAILED: Page range mismatch")
-        print(f"[VALIDATION] FAILED: Page range mismatch")
+        # This one matters: the pages read are not the pages asked for, so
+        # everything downstream would be filed against the wrong page.
+        say.error("The reading service read different pages than we asked for",
+                  asked=f"{page_from}-{page_to}", got=f"{resp_page_from}-{resp_page_to}")
         raise ExtractionError("INVALID_RESPONSE", "Extractor returned a different page range", False)
-    
+
     extractor_version = data.get("extractor_version")
     records = data.get("records")
-    log.info(f"[VALIDATION] Extractor version: {extractor_version}, records count: {len(records) if isinstance(records, list) else 'N/A'}")
-    print(f"[VALIDATION] Extractor version: {extractor_version}, records count: {len(records) if isinstance(records, list) else 'N/A'}")
-    
+
     if not isinstance(extractor_version, str) or not isinstance(records, list):
-        log.error(f"[VALIDATION] FAILED: Missing or invalid extractor_version or records")
-        print(f"[VALIDATION] FAILED: Missing or invalid extractor_version or records")
+        say.error("The reading service left out information we need",
+                  pages=f"{page_from}-{page_to}")
         raise ExtractionError("INVALID_RESPONSE", "Missing extractor_version or records", False)
-    
+
+    say.info("The reading looks usable", pages=f"{page_from}-{page_to}",
+             voters=len(records), version=extractor_version)
+
     document_metadata = data.get("document_metadata", {})
-    log.info(f"[VALIDATION] Extraction successful, response keys: {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
-    print(f"   ✅ Extraction successful - received {len(data.get('records', []))} voter records")
-    
+
     if not isinstance(document_metadata, dict):
-        log.error(f"[VALIDATION] FAILED: Invalid document_metadata type")
-        print(f"[VALIDATION] FAILED: Invalid document_metadata type")
+        say.error("The roll details came back in an unusable form",
+                  pages=f"{page_from}-{page_to}")
         raise ExtractionError("INVALID_RESPONSE", "Invalid document_metadata", False)
-    
-    log.info(f"[VALIDATION] Document metadata keys: {list(document_metadata.keys()) if isinstance(document_metadata, dict) else 'N/A'}")
-    print(f"[VALIDATION] Document metadata keys: {list(document_metadata.keys()) if isinstance(document_metadata, dict) else 'N/A'}")
-    
-    log.info(f"[VALIDATION] Validating {len(records)} records")
-    print(f"[VALIDATION] Validating {len(records)} records")
-    
+
     for idx, item in enumerate(records, 1):
         if not isinstance(item, dict) or not isinstance(item.get("source"), dict):
-            log.error(f"[VALIDATION] FAILED: Record {idx} missing source or not a dict")
-            print(f"[VALIDATION] FAILED: Record {idx} missing source or not a dict")
+            say.error("A voter entry is missing the page it came from",
+                      voter=idx, pages=f"{page_from}-{page_to}")
             raise ExtractionError("INVALID_RESPONSE", "Record missing source", False)
-        
+
         page = item["source"].get("page_number")
         if not isinstance(page, int) or isinstance(page, bool) or not page_from <= page <= page_to:
-            log.error(f"[VALIDATION] FAILED: Record {idx} page {page} outside range {page_from}-{page_to}")
-            print(f"[VALIDATION] FAILED: Record {idx} page {page} outside range {page_from}-{page_to}")
+            # A record filed against a page outside the unit would corrupt the
+            # row mapping, so this is a hard stop rather than a warning.
+            say.error("A voter was filed against a page we did not read",
+                      voter=idx, page=page, pages=f"{page_from}-{page_to}")
             raise ExtractionError("INVALID_RESPONSE", "Record page outside requested range", False)
-        
-        log.debug(f"[VALIDATION] Record {idx} valid: page={page}, row={item['source'].get('row_number')}")
-    
-    log.info(f"[VALIDATION] SUCCESS: All {len(records)} records validated")
-    print(f"[VALIDATION] SUCCESS: All {len(records)} records validated")
+
+    say.info("Every voter was checked and looks right", voters=len(records))
     return data
 
 
 def mock_extract(request: dict) -> dict:
     """Deterministic shape only; these are synthetic voters, never PDF-derived data."""
-    log.info(f"[MOCK_EXTRACT] Starting mock extraction for document_id={request.get('document_id')}")
-    print(f"[MOCK_EXTRACT] Starting mock extraction for document_id={request.get('document_id')}")
-    
+    say.info("Making up sample voters (no real PDF is read)",
+             document=request.get("document_id"))
+
     start, end = request["page_from"], request["page_to"]
-    log.info(f"[MOCK_EXTRACT] Page range: {start} to {end}")
-    print(f"[MOCK_EXTRACT] Page range: {start} to {end}")
-    
+
     rows = []
     for page in range(start, end + 1):
         for row in range(1, 3):
@@ -166,10 +156,9 @@ def mock_extract(request: dict) -> dict:
                 "common": {"serial_number": serial, "epic_number": f"MOCK{serial:07d}", "age": 25, "relationship_type": "father", "section_number": 1},
                 "confidence": 0.99,
             })
-    
-    log.info(f"[MOCK_EXTRACT] Generated {len(rows)} synthetic records")
-    print(f"[MOCK_EXTRACT] Generated {len(rows)} synthetic records")
-    
+
+    say.info("Sample voters made up", voters=len(rows))
+
     result = {
         "extractor_version": "mock-1.0.0",
         "page_from": start, "page_to": end,
@@ -177,43 +166,28 @@ def mock_extract(request: dict) -> dict:
         "records": rows,
     }
     
-    log.info(f"[MOCK_EXTRACT] Mock extraction complete, returning {len(result['records'])} records")
-    print(f"[MOCK_EXTRACT] Mock extraction complete, returning {len(result['records'])} records")
+    say.info("Sample reading finished", voters=len(result["records"]))
     return result
 
 
 def extract(document_id: str, document_location: str, page_from: int, page_to: int) -> dict:
-    log.info(f"[EXTRACT] Starting extraction for document_id={document_id}, location={document_location}, pages={page_from}-{page_to}")
-    print(f"   Extracting text from PDF pages {page_from} to {page_to}...")
-    
+    say.info("Reading a document", pages=f"{page_from}-{page_to}",
+             file=document_location.split("/")[-1])
+
     request = {"document_id": document_id, "document_location": document_location, "page_from": page_from, "page_to": page_to, "schema_version": config.SCHEMA_VERSION}
-    log.info(f"[EXTRACT] Extractor mode: {config.EXTRACTOR_MODE}")
-    print(f"   Using extraction mode: {config.EXTRACTOR_MODE}")
-    
+
     if config.EXTRACTOR_MODE == "mock":
-        log.info(f"[EXTRACT] Using mock extractor")
-        print(f"   Using mock data for testing")
         return mock_extract(request)
-    
+
     if config.EXTRACTOR_MODE != "http":
-        log.error(f"[EXTRACT] Unknown EXTRACTOR_MODE: {config.EXTRACTOR_MODE}")
-        print(f"   ❌ Error: Unknown extraction mode")
+        say.error("The reading mode is set to something this service does not know",
+                  mode=config.EXTRACTOR_MODE)
         raise ExtractionError("INVALID_CONFIGURATION", f"Unknown EXTRACTOR_MODE: {config.EXTRACTOR_MODE}", False)
-    
-    # Integration with OCR PDF API service
-    # The OCR service expects multipart/form-data with the PDF file and page range
-    log.info(f"[EXTRACT] Using HTTP OCR service at: {config.EXTRACTOR_URL}")
-    print(f"   Connecting to OCR service...")
-    
+
+    # The OCR service expects multipart/form-data with the PDF file and page range.
     headers = {"Authorization": f"Bearer {config.EXTRACTOR_API_KEY}"} if config.EXTRACTOR_API_KEY else {}
-    log.info(f"[EXTRACT] Authorization header present: {bool(config.EXTRACTOR_API_KEY)}")
-    print(f"   Using authentication: {'Yes' if config.EXTRACTOR_API_KEY else 'No'}")
-    
+
     try:
-        # Read PDF file from document_location
-        log.info(f"[EXTRACT] Reading PDF file from: {document_location}")
-        print(f"   Loading PDF file...")
-        
         with open(document_location, "rb") as pdf_file:
             files = {"pdf_file": (document_location.split("/")[-1], pdf_file, "application/pdf")}
             data = {
@@ -222,10 +196,9 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
                 "whole_pdf": False,
                 "skip_non_voter_pages": True,
             }
-            
-            log.info(f"[EXTRACT] Sending request to OCR service with data: {data}")
-            print(f"   Sending pages {page_from}-{page_to} to OCR service...")
-            
+
+            say.info("Sending the pages to the reader", pages=f"{page_from}-{page_to}")
+
             response = httpx.post(
                 config.EXTRACTOR_URL,
                 files=files,
@@ -233,26 +206,19 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
                 headers=headers,
                 timeout=config.EXTRACTOR_TIMEOUT_SECONDS
             )
-        
-        log.info(f"[EXTRACT] OCR service returned status {response.status_code}")
-        print(f"   OCR service responded with status {response.status_code}")
-        
+
         ocr_data = response.json()
-        log.info(f"[EXTRACT] OCR response parsed successfully, ok={ocr_data.get('ok')}")
-        print(f"[EXTRACT] OCR response parsed successfully, ok={ocr_data.get('ok')}")
-        
+
         # Transform OCR API response to pipeline format
         if not ocr_data.get("ok"):
             error_msg = ocr_data.get("error", "Unknown OCR error")
-            log.error(f"[EXTRACT] OCR service returned error: {error_msg}")
-            print(f"[EXTRACT] OCR service returned error: {error_msg}")
+            say.error("The reader could not read these pages",
+                      pages=f"{page_from}-{page_to}", reason=error_msg)
             raise ExtractionError("EXTRACTION_FAILED", error_msg, False)
-        
+
         # Map OCR response to expected schema
         roll_metadata = ocr_data.get("roll_metadata", {})
-        log.info(f"[EXTRACT] Roll metadata keys: {list(roll_metadata.keys())}")
-        print(f"[EXTRACT] Roll metadata keys: {list(roll_metadata.keys())}")
-        
+
         # Helper to safely convert string to int
         def safe_int(value):
             # Explicit emptiness check, not truthiness: 0 is falsy, so a
@@ -300,14 +266,9 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
             "records": []
         }
         
-        log.info(f"[EXTRACT] Transformed metadata structure created")
-        print(f"[EXTRACT] Transformed metadata structure created")
-        
         # Transform OCR records to pipeline format
         ocr_records = ocr_data.get("records", [])
-        log.info(f"[EXTRACT] Transforming {len(ocr_records)} OCR records to pipeline format")
-        print(f"[EXTRACT] Transforming {len(ocr_records)} OCR records to pipeline format")
-        
+
         for idx, record in enumerate(ocr_records, 1):
             # Page/row identity. Prefer what the OCR service actually reports.
             #
@@ -330,15 +291,16 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
             # discards every other record in the unit over one bad field --
             # the same all-or-nothing failure the safe_int() on age avoids.
             if not page_from <= record_page <= page_to:
-                log.warning(
-                    "[EXTRACT] Record %d reports page %d outside requested %d-%d; clamping",
-                    idx, record_page, page_from, page_to,
-                )
-                print(f"[EXTRACT] Record {idx}: page {record_page} outside {page_from}-{page_to}, clamping")
+                say.warning(
+                    "A voter was filed against a page we did not read, so it was moved to the nearest one",
+                    voter=idx, page=record_page, moved_to=min(max(record_page, page_from), page_to))
                 record_page = min(max(record_page, page_from), page_to)
-            
-            log.debug(f"[EXTRACT] Record {idx}: page={record_page}, row={record_row}, epic={record.get('id_card_no')}")
-            print(f"[EXTRACT] Record {idx}: page={record_page}, row={record_row}, epic={record.get('id_card_no')}")
+
+            # One line per voter, and only when something is actually running
+            # with debug turned on. Thirty cards a page at info level was a
+            # wall of noise that hid the lines that mattered.
+            log.debug("[extractor] voter=%d page=%d row=%d epic=%s", idx, record_page,
+                      record_row, record.get("id_card_no"))
 
             # Join the parsed name parts back into one display name. The OCR
             # service splits names into first/middle/last because Tesseract
@@ -383,23 +345,20 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
                 "confidence": 0.95 if not record.get("needs_review") else 0.70,
             })
         
-        log.info(f"[EXTRACT] Transformation complete, returning {len(transformed['records'])} records")
-        print(f"[EXTRACT] Transformation complete, returning {len(transformed['records'])} records")
+        say.info("Voters read and put into our format", voters=len(transformed["records"]))
         return transformed
-        
+
     except FileNotFoundError as exc:
-        log.error(f"[EXTRACT] PDF file not found: {document_location}")
-        print(f"[EXTRACT] PDF file not found: {document_location}")
+        say.error("The PDF was not where the document said it was",
+                  file=document_location)
         raise ExtractionError("INVALID_PDF", f"PDF file not found: {document_location}", False) from exc
     except httpx.TimeoutException as exc:
-        log.error(f"[EXTRACT] OCR service timeout after {config.EXTRACTOR_TIMEOUT_SECONDS}s")
-        print(f"[EXTRACT] OCR service timeout after {config.EXTRACTOR_TIMEOUT_SECONDS}s")
+        say.error("The reader did not answer in time",
+                  waited=f"{config.EXTRACTOR_TIMEOUT_SECONDS}s")
         raise ExtractionError("EXTRACTION_TIMEOUT", str(exc)) from exc
     except (httpx.HTTPError, ValueError) as exc:
-        log.error(f"[EXTRACT] OCR service HTTP error: {str(exc)}")
-        print(f"[EXTRACT] OCR service HTTP error: {str(exc)}")
+        say.error("Could not talk to the reader", reason=str(exc))
         raise ExtractionError("EXTRACTION_SERVICE_UNAVAILABLE", str(exc)) from exc
     except Exception as exc:
-        log.error(f"[EXTRACT] Unexpected error during extraction: {str(exc)}")
-        print(f"[EXTRACT] Unexpected error during extraction: {str(exc)}")
+        say.error("Something went wrong while reading", reason=str(exc))
         raise ExtractionError("INTERNAL_ERROR", f"Unexpected error: {str(exc)}", False) from exc

@@ -1,8 +1,88 @@
 FROM python:3.12-slim
 
-# Install system dependencies for OCR
-RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
+# ---------------------------------------------------------------------------
+# Tesseract is built from source, not installed from apt.
+#
+# The Debian trixie package is tesseract 5.5.0 / leptonica 1.84.1. The verified
+# ground truth was produced on Windows with tesseract 5.5.3 / leptonica 1.87.0.
+# The Hindi model is byte-identical between the two (hin.traineddata md5
+# f7d08874dfd41e07744a42a541fd9e53), so the gap is the engine itself: an A/B
+# over the same card crops at 200 DPI had 15 of 30 cards read differently, and
+# the differences are exactly the accuracy regressions we see --
+#   तो->तौ / तो->ततौ,  मी->भी,  आफि->आसि,  and a dropped 1 in house 'इ-1/75'.
+#
+# Both halves are pinned to match Windows. Leptonica matters as much as
+# tesseract here: it performs the binarisation that feeds the recogniser, so a
+# mismatched leptonica changes the pixels the model actually scores.
+# ---------------------------------------------------------------------------
+ARG LEPTONICA_VERSION=1.87.0
+ARG TESSERACT_VERSION=5.5.3
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    ca-certificates \
+    libtool \
+    pkg-config \
+    build-essential \
+    curl \
+    libarchive-dev \
+    libcurl4-openssl-dev \
+    libicu-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libwebp-dev \
+    libxml2-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- leptonica -------------------------------------------------------------
+# Installed to /usr/local so tesseract's configure finds it there rather than
+# picking up a distro copy. --disable-openmp and the explicit -j keep the
+# build from spawning a thread per core inside a constrained container.
+#
+# The tarball is fetched to an explicit filename: `curl -O` names the file
+# after the URL path, which is "1.87.0.tar.gz", not the "leptonica-1.87.0"
+# prefix the extracted directory has.
+WORKDIR /tmp
+RUN curl -fsSL -o leptonica.tar.gz \
+      "https://github.com/DanBloomberg/leptonica/archive/refs/tags/${LEPTONICA_VERSION}.tar.gz" \
+    && tar xzf leptonica.tar.gz \
+    && cd "leptonica-${LEPTONICA_VERSION}" \
+    && ./autogen.sh \
+    && ./configure --prefix=/usr/local --disable-openmp \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && cd / && rm -rf leptonica.tar.gz "leptonica-${LEPTONICA_VERSION}"
+
+# --- tesseract -------------------------------------------------------------
+RUN curl -fsSL -o tesseract.tar.gz \
+      "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/${TESSERACT_VERSION}.tar.gz" \
+    && tar xzf tesseract.tar.gz \
+    && cd "tesseract-${TESSERACT_VERSION}" \
+    && ./autogen.sh \
+    && ./configure --prefix=/usr/local --disable-openmp --disable-debug \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && cd / && rm -rf tesseract.tar.gz "tesseract-${TESSERACT_VERSION}"
+
+# Fail the build, not the pipeline, if the engine drifts from the baseline.
+# A silent downgrade here is what produced 6 accuracy regressions that looked
+# like OCR noise rather than a packaging change. leptonica is read from
+# tesseract's own banner rather than from ldconfig, because the banner reports
+# the version tesseract was actually linked against.
+RUN tesseract --version \
+    && tesseract --version | grep -q "5\.5\.3" \
+    && tesseract --version | grep -q "leptonica-1\.87\.0"
+
+# --- runtime dependencies --------------------------------------------------
+# tesseract-ocr-hin supplies the Hindi model. The apt version is 4.1.0-2,
+# which is the same file the Windows baseline used, so it is deliberately
+# left unpinned to apt and not rebuilt.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-hin \
     tesseract-ocr-eng \
     libgl1 \
@@ -13,6 +93,43 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+# A source-built tesseract resolves its models under /usr/local/share/tessdata,
+# but apt drops the Hindi and English models in /usr/share/tesseract-ocr/5/
+# tessdata. Without this the service still starts and /health still reports
+# paddleocr_available=true, while every Hindi read returns empty -- a silent,
+# total loss of accuracy with no error anywhere.
+RUN set -eux; \
+    src=/usr/share/tesseract-ocr/5/tessdata; \
+    dst=/usr/local/share/tessdata; \
+    mkdir -p "$dst"; \
+    for f in "$src"/*.traineddata; do \
+        [ -e "$f" ] || continue; \
+        cp "$f" "$dst/"; \
+    done; \
+    test -f "$dst/hin.traineddata"; \
+    test -f "$dst/eng.traineddata"; \
+    md5sum "$dst/hin.traineddata"
+
+# Prove the engine can actually LOAD Hindi, not merely that the file is on
+# disk. tesseract exits 0 when it cannot find a language, printing only
+# "Error opening data file .../hin.traineddata" to stderr, so a file-existence
+# test passes while every extraction returns blank. This is the failure the
+# first version of this build actually had.
+#
+# --list-langs resolves each model through the same search path a real
+# recognition uses, so hin appearing in that list is the load proof. A
+# /dev/null probe was tried first and rejected: tesseract treats a
+# zero-dimension image as its own error case, so it reports the same
+# "couldn't load" text for reasons that have nothing to do with the model.
+#
+# hin.traineddata is read from the copy in /usr/local/share/tessdata because
+# that is the only location a source-built tesseract searches.
+RUN set -eux; \
+    echo "f7d08874dfd41e07744a42a541fd9e53  /usr/local/share/tessdata/hin.traineddata" \
+      | md5sum -c -; \
+    tesseract --list-langs 2>/dev/null | grep -qx 'hin'; \
+    tesseract --list-langs 2>/dev/null | grep -qx 'eng'
 
 WORKDIR /app
 

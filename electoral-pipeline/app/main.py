@@ -459,74 +459,115 @@ def session_status(session_id: str, db: Session = Depends(get_db)):
 @app.get("/browse", response_class=HTMLResponse, dependencies=[Depends(admin)])
 def browse_records(
     request: Request,
+    table: str = "",
     q: str = "",
-    gender: str = "",
-    age: str = "",
-    lang: str = "en",
     page: int = 1,
     db: Session = Depends(get_db),
 ):
-    """Database browser - search and filter voter records across all documents."""
-    from sqlalchemy import select, func, or_, and_
+    """Read-only browser over every table in the database.
 
-    # Build query
-    query = select(ElectoralRecord)
+    Which table and which columns are shown comes from app.db_browse, never
+    from the request: a name that is not in the registry is refused, so a
+    visitor cannot reach anything the pipeline does not already expose.
+    """
+    from sqlalchemy import func, select, text
+    from app.db_browse import (
+        TABLE_ORDER,
+        TABLES,
+        Table,
+        cell_text,
+        columns_present_in,
+        default_table,
+        get_table,
+    )
 
-    # Apply filters
-    filters = []
-    if q:
-        q_clean = q.strip()
-        search_term = f"%{q_clean}%"
-        filters.append(
-            or_(
-                ElectoralRecord.name_hi.ilike(search_term),
-                ElectoralRecord.name_en.ilike(search_term),
-                ElectoralRecord.epic_number.ilike(search_term),
-                ElectoralRecord.voter_first_name_hi.ilike(search_term),
-                ElectoralRecord.voter_first_name_en.ilike(search_term),
-                ElectoralRecord.voter_middle_name_hi.ilike(search_term),
-                ElectoralRecord.voter_middle_name_en.ilike(search_term),
-                ElectoralRecord.voter_sur_name_hi.ilike(search_term),
-                ElectoralRecord.voter_sur_name_en.ilike(search_term),
-                ElectoralRecord.relative_name_hi.ilike(search_term),
-                ElectoralRecord.relative_name_en.ilike(search_term),
-                ElectoralRecord.house_number_hi.ilike(search_term),
-                ElectoralRecord.house_number_en.ilike(search_term),
-            )
+    chosen = get_table(table) or default_table()
+    PER_PAGE = 50
+    page = max(1, page)
+
+    # Read the live column list and drop any registry entry the database does
+    # not have. A renamed column should cost one column, not the whole page.
+    actual = {r[0] for r in db.execute(
+        text("SELECT column_name FROM information_schema.columns "
+             "WHERE table_name = :t"), {"t": chosen.name})}
+    missing = columns_present_in(chosen, actual)
+    if missing:
+        chosen = Table(
+            name=chosen.name,
+            label=chosen.label,
+            description=chosen.description,
+            columns=[c for c in chosen.columns if c.name not in missing],
         )
 
-    if gender:
-        # Filter by gender - check both hi and en
-        gender_en_val = gender_en(gender) or gender
-        filters.append(
-            or_(
-                ElectoralRecord.gender_hi == gender,
-                ElectoralRecord.gender_en == gender_en_val,
-            )
-        )
-
-    if age:
+    # Row counts for every table, so the tab list can show what is in each.
+    counts: dict[str, int] = {}
+    for name in TABLE_ORDER:
         try:
-            if "-" in age:
-                min_age, max_age = map(int, age.split("-"))
-                filters.append(and_(ElectoralRecord.age >= min_age, ElectoralRecord.age <= max_age))
-            else:
-                filters.append(ElectoralRecord.age == int(age))
-        except ValueError:
-            pass  # Ignore invalid age format
+            counts[name] = db.scalar(
+                text(f"SELECT count(*) FROM {name}")  # name from registry only
+            ) or 0
+        except Exception:
+            counts[name] = 0
 
-    if filters:
-        query = query.where(and_(*filters))
+    # The whole query runs as one statement built from registry column names.
+    # No part of it comes from user input: the only user value is the search
+    # term, which is passed as a bound parameter.
+    col_names = [c.name for c in chosen.columns]
+    select_list = ", ".join(col_names)
+    params: dict[str, object] = {}
 
-    # Get total count
-    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    where = ""
+    if q.strip():
+        # Search the text columns of this table. Bound as a parameter, so the
+        # term is data and can never be read as SQL.
+        searchable = [c.name for c in chosen.columns
+                      if not c.numeric and not c.expandable]
+        if searchable:
+            clause = " OR ".join(f'"{n}"::text ILIKE :term' for n in searchable)
+            where = f" WHERE {clause}"
+            params["term"] = f"%{q.strip()}%"
 
-    # Pagination
-    PER_PAGE = 100
-    offset = (max(page, 1) - 1) * PER_PAGE
-    records = db.scalars(query.order_by(ElectoralRecord.document_id, ElectoralRecord.page_number, ElectoralRecord.source_row_number).limit(PER_PAGE).offset(offset)).all()
+    total_sql = f"SELECT count(*) FROM {chosen.name}{where}"
+    total = db.scalar(text(total_sql), params) or 0
 
-    return render(request, "browse.html", records=records, total=total, query=q, gender=gender, age=age, lang=lang, page=page)
+    # Newest rows first for the log-like tables, page order for the voter list.
+    if chosen.name == "electoral_records":
+        order = '"page_number" NULLS LAST, "source_row_number" NULLS LAST, id'
+    elif chosen.name == "processing_events":
+        order = '"created_at" DESC NULLS LAST, id DESC'
+    elif chosen.name == "extraction_raw_responses":
+        order = '"received_at" DESC NULLS LAST, id DESC'
+    else:
+        order = "id"
+
+    rows_sql = (
+        f"SELECT {select_list} FROM {chosen.name}{where} "
+        f"ORDER BY {order} LIMIT :lim OFFSET :off"
+    )
+    params.update(lim=PER_PAGE, off=(page - 1) * PER_PAGE)
+    fetched = db.execute(text(rows_sql), params).fetchall()
+
+    # Transpose rows into per-column lists so the template can loop columns on
+    # the outside, which keeps the header and body in step.
+    cells = []
+    for row in fetched:
+        cells.append({c.name: row[idx] for idx, c in enumerate(chosen.columns)})
+
+    pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+    return render(
+        request,
+        "browse.html",
+        table=chosen,
+        tables=[TABLES[n] for n in TABLE_ORDER],
+        counts=counts,
+        cells=cells,
+        total=total,
+        query=q,
+        page=page,
+        pages=pages,
+        per_page=PER_PAGE,
+        cell_text=cell_text,
+    )
 
 
 @app.get("/browse/export", dependencies=[Depends(admin)])

@@ -198,10 +198,13 @@ def process_document_job(document_id, session_id):
             print(f"[PROCESS_DOC] Session state changed before unit creation, aborting")
             return
         
-        session.pages_total = pages
-        units = []
+        # Progress is measured against pages that actually carry voter
+        # cards. Counting the 2 cover pages makes the bar top out at
+        # 20/22 = 91% and never reach 100%, which reads as a stuck job.
         # Voter cards start from page 3, skip pages 1-2
         start_page = 3 if pages >= 3 else 1
+        session.pages_total = pages - start_page + 1
+        units = []
         for index, start in enumerate(range(start_page, pages + 1, config.PAGES_PER_UNIT), 1):
             unit = ExtractionUnit(session_id=session.id, unit_number=index, page_from=start, page_to=min(start + config.PAGES_PER_UNIT - 1, pages))
             db.add(unit)

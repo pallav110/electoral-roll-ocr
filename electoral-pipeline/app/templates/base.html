@@ -90,6 +90,17 @@
     .hover\:text-blue-700:hover { color: #1d4ed8; }
     .transition-colors { transition-property: color, background-color, border-color; transition-duration: 0.15s; }
     .overflow-x-auto { overflow-x: auto; }
+    /* Used by every page, but missing until now: without these the browse
+       table's cards and buttons lose their shape whenever the Tailwind CDN
+       is unreachable. */
+    .panel { background: white; border: 1px solid #e5e7eb; border-radius: 0.75rem; box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05); padding: 1.5rem; margin-bottom: 1.5rem; }
+    .button { display: inline-block; background: #1d4ed8; color: white; padding: 0.5rem 1rem; border-radius: 0.5rem; border: 1px solid #1d4ed8; font-size: 0.875rem; text-decoration: none; cursor: pointer; }
+    .button:hover { background: #1e40af; text-decoration: none; }
+    .button.secondary { background: white; color: #374151; border-color: #d1d5db; }
+    .button.secondary:hover { background: #f9fafb; }
+    .whitespace-nowrap { white-space: nowrap; }
+    .break-all { word-break: break-all; }
+    .whitespace-pre-wrap { white-space: pre-wrap; }
     .w-full { width: 100%; }
     table { width: 100%; border-collapse: collapse; }
     thead { background-color: #f9fafb; }
