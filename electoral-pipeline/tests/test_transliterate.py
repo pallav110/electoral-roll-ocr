@@ -9,12 +9,52 @@ from app.transliterate import gender_en, relation_en, source_hash, transliterate
 
 
 @pytest.mark.parametrize("hindi,expected", [
-    ("राजीव", "rajiva"),
-    ("बबीता", "babita"),
-    ("राजीव सक्सेना", "rajiva saksena"),
+    ("राजीव", "Rajiv"),
+    ("बबीता", "Babita"),
+    ("राजीव सक्सेना", "Rajiv Saksena"),
 ])
 def test_transliterate_names(hindi, expected):
     assert transliterate(hindi) == expected
+
+
+@pytest.mark.parametrize("hindi,expected", [
+    # A name ending in मात्रा ा carries a real vowel. Dropping it produced
+    # Kalpan, Rekh, Saksen, Sudh - a consonant-final English word that does
+    # not spell the Hindi at all.
+    ("कल्पना", "Kalpana"),
+    ("रेखा", "Rekha"),
+    ("सुधा", "Sudha"),
+    ("सक्सेना", "Saksena"),
+    ("अर्चना", "Archana"),
+    # A name ending in a bare consonant carries an inherent schwa that
+    # English does not write. Keeping it produced Rohita, Amita, Kumara.
+    ("रोहित", "Rohit"),
+    ("अमित", "Amit"),
+    ("कुमार", "Kumar"),
+    # Conjunct endings resolve to a conventional vowel: Ravindra, not Ravindr.
+    ("रविन्द्र", "Ravindra"),
+    ("चन्द्र", "Chandra"),
+])
+def test_final_vowel_follows_the_devanagari_not_a_suffix_list(hindi, expected):
+    """The trailing-'a' decision is made from the script.
+
+    It used to be made by a hand-written suffix list (ita|ika|iya|ta|da|ma|
+    va|la|ra), which cannot work: by that point राजीव and कल्पना have both
+    become "rajiva"/"kalpana" and differ only in a vowel quality already
+    flattened away. That rule failed in both directions.
+    """
+    assert transliterate(hindi) == expected
+
+
+def test_the_rule_cannot_be_defeated_by_a_suffix_heuristic():
+    """सुनीता and अमित both end in the romanised syllable 'ta'.
+
+    One must keep the vowel and the other must drop it, so no rule reading
+    only the romanised form can decide. These two are the guard against
+    someone 'simplifying' this back into a suffix list.
+    """
+    assert transliterate("सुनीता") == "Sunita"
+    assert transliterate("अमित") == "Amit"
 
 
 @pytest.mark.parametrize("value", ["64", "AWX5108170", "300", "43"])
@@ -46,7 +86,7 @@ def test_gender_and_relation_use_vocabulary_not_phonetics():
 
 
 def test_unknown_gender_falls_back_to_transliteration():
-    assert gender_en("कुछ") == "kucha"
+    assert gender_en("कुछ") == "Kuch"
 
 
 def test_output_is_ascii_only():
@@ -108,6 +148,10 @@ def _map(ocr_rec, row=1):
                     "gender": None, "section_name": None},
         "common": {"serial_number": 1, "epic_number": ocr_rec.get("id_card_no"),
                    "age": ocr_rec.get("age"), "relationship_type": _relation_key(ocr_rec.get("relation_name"))},
+        # raw_record is what map_record reads the Hindi relation label from.
+        # It was missing here, so no test ever exercised the field and the
+        # column could stay NULL across every row without failing anything.
+        "raw_record": dict(ocr_rec),
         "confidence": 0.95,
     }
     return map_record(item, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
@@ -116,13 +160,41 @@ def _map(ocr_rec, row=1):
 def test_record_stores_both_languages():
     r = _map(_ocr_record())
     assert r.name_hi == "राजीव सक्सेना"
-    assert r.name_en == "rajiva saksena"
+    assert r.name_en == "Rajiv Saksena"
     assert r.relative_name_hi == "शिव नारायण"
-    assert r.relative_name_en == "siva narayana"
+    assert r.relative_name_en == "Shiv Narayan"
     assert r.gender_hi == "पुरुष" and r.gender_en == "Male"
     assert r.house_number_hi == "63" and r.house_number_en == "63"
     assert r.relationship_type == "father"
     assert r.age == 43 and r.epic_number == "AWX5108170"
+
+
+@pytest.mark.parametrize("relation", ["पिता", "पति", "माता", "अन्य"])
+def test_relation_name_reaches_the_stored_record(relation):
+    """The Hindi relation label must survive into the record.
+
+    map_record read this at line 157 but never passed it to the constructor,
+    so the column was NULL on every row. relationship_type is derived from
+    the same value upstream, so it stayed populated and masked the loss.
+    """
+    r = _map(_ocr_record(relation_name=relation))
+    assert r.relation_name == relation
+
+
+def test_ocr_fields_missing_from_raw_record_are_not_fabricated():
+    """No raw_record means no OCR fields. They must be empty, not invented."""
+    item = {
+        "source": {"page_number": 7, "row_number": 1},
+        "hindi": {"name": "राजीव सक्सेना", "relative_name": "", "house_number": "",
+                  "gender": "", "section_name": ""},
+        "english": {"name": None, "relative_name": None, "house_number": "", "gender": None,
+                    "section_name": None},
+        "common": {"serial_number": 1, "epic_number": "AWX5108170", "age": "43"},
+        "confidence": 0.95,
+    }
+    r = map_record(item, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
+    assert r.relation_name is None
+    assert r.relationship_type is None
 
 
 def test_stale_english_in_extractor_output_is_ignored():
@@ -137,8 +209,8 @@ def test_stale_english_in_extractor_output_is_ignored():
         "confidence": 0.95,
     }
     r = map_record(item, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
-    assert r.name_en == "rajiva"
-    assert r.relative_name_en == "siva"
+    assert r.name_en == "Rajiv"
+    assert r.relative_name_en == "Shiv"
     assert r.gender_en == "Male"
 
 

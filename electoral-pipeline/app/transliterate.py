@@ -50,6 +50,43 @@ _LOAD_ERROR: str | None = None
 
 DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 
+# Devanagari vowel signs and modifiers (matras + final marks).
+_MATRAS = set(map(chr, [
+    0x093e, # ा
+    0x093f, # ि
+    0x0940, # ी
+    0x0941, # ु
+    0x0942, # ू
+    0x0943, # ृ
+    0x0947, # े
+    0x0948, # ै
+    0x094b, # ो
+    0x094c, # ौ
+    0x0902, # ं
+    0x0901, # ँ
+    0x0903  # ः
+]))
+_VIRAMA = chr(0x094d)  # ्
+# Punctuation and joiners that can trail a name token (all explicit; no literals).
+_TRAILING_NOISE = set(map(chr, [
+    0x0964, # ।
+    ord('.'),
+    ord(','),
+    ord(';'),
+    ord(':'),
+    ord('-'),
+    0x200c, # ZWNJ
+    0x200d, # ZWJ
+    0xfeff  # BOM
+]))
+
+def _print_marks():
+    print("_MATRAS =", [(f"U+{ord(c):04X}", c) for c in sorted(_MATRAS)])
+    print("_TRAILING_NOISE =", [(f"U+{ord(c):04X}", c) for c in sorted(_TRAILING_NOISE)])
+    print("_VIRAMA =", (f"U+{ord(_VIRAMA):04X}", _VIRAMA))
+# _print_marks()  # Uncomment in dev to inspect invisible sets
+
+
 # Scheme -> (sanscript scheme name, strip combining marks?)
 SCHEMES = {
     "iast-plain": ("iast", True),
@@ -113,11 +150,78 @@ GLOBAL_STRUCTURAL_MAP = {
 }
 
 
-def clean_phonetic_rules(text: str) -> str:
+def _final_roman_a_is_real(hindi_token: str) -> bool:
+    """Does this Devanagari token end in a vowel that the romanisation writes
+    as a final 'a' that must be KEPT?
+
+    Asked of the script, never of the romanised text. In Devanagari the final
+    syllable is unambiguous:
+
+        राजीव   -> राजीव   ends in a bare consonant    -> inherent schwa -> drop
+        कल्पना  -> कल्पना  ends in मात्रा ा             -> real vowel     -> keep
+        रेखा    -> रेखा    ends in मात्रा ा             -> real vowel     -> keep
+        रविन्द्र -> रविन्द्र ends in a conjunct (virama) -> conventional   -> keep
+        सचिन    -> सचिन    ends in a bare consonant    -> inherent schwa -> drop
+
+    Why this cannot be asked of the romanised form: by then राजीव and कल्पना
+    have both become "rajiva"/"kalpana", differing only in a vowel quality
+    the romanisation has already flattened. That is why the previous rule had
+    to guess from a hand-written suffix list and got both directions wrong
+    (Kalpan, Saksen, Rohita, Amita). Deriving the answer from the script also
+    keeps it correct if TRANSLITERATION_SCHEME is changed.
+
+    Known limitation: a bare consonant after a virama is treated as keeping
+    its vowel, which is right for रविन्द्र (Ravindra), चन्द्र (Chandra) and
+    दत्त (Datta) but wrong for गर्ग, where English convention is "Garg" not
+    "Garga". Script alone cannot separate those; that is a spelling
+    convention, and 23 of the 24 conjunct-ending names in the roll are
+    served correctly by this branch.
+    """
+    token = (hindi_token or "").strip()
+    while token and token[-1] in _TRAILING_NOISE:
+        token = token[:-1]
+    if not token:
+        return False
+    last = token[-1]
+    if last in _MATRAS:
+        return True                       # explicit matra -> a real vowel
+    if last == _VIRAMA:
+        return False                      # no vowel signalled at all
+    if len(token) >= 2 and token[-2] == _VIRAMA:
+        return True                       # conjunct before it -> conventional vowel
+    return False                          # bare consonant -> inherent schwa
+
+
+def _clean_word(word: str, keep_final_a: bool) -> str:
+    """Apply the phonetic clean-up to one romanised token.
+
+    Step C is the only step that depends on the script, so the decision is
+    passed in rather than recomputed here.
+    """
+    word_lower = word.lower()
+    if word_lower in GLOBAL_STRUCTURAL_MAP:
+        return GLOBAL_STRUCTURAL_MAP[word_lower]
+
+    # Step C: drop the inherent-schwa 'a' unless the script says it is real.
+    if word_lower.endswith("a") and len(word) > 4 and not keep_final_a:
+        word = word[:-1]
+
+    # Step D: standardise character pairs the algorithmic mapping produces.
+    word = re.sub(r'amch', 'anch', word, flags=re.IGNORECASE)  # Uttaramchal -> Uttaranchal
+    word = re.sub(r'ee', 'i', word, flags=re.IGNORECASE)
+    word = re.sub(r'oo', 'u', word, flags=re.IGNORECASE)
+    word = re.sub(r'shh', 'sh', word, flags=re.IGNORECASE)
+    word = re.sub(r'rri', 'ri', word, flags=re.IGNORECASE)
+    word = re.sub(r'rru', 'ru', word, flags=re.IGNORECASE)
+
+    return word.strip().title()
+
+
+def clean_phonetic_rules(text: str, source_tokens=None) -> str:
     """Apply phonetic cleaning rules to ITRANS/IAST output.
 
     This handles:
-    - Trailing 'a' removal for male names/surnames (conservative)
+    - Trailing 'a' removal, decided from the Devanagari token it came from
     - Character pair standardization (amch → anch, ee → i, etc.)
     - Structural token replacement (kaloni → Colony, etc.)
 
@@ -127,6 +231,12 @@ def clean_phonetic_rules(text: str) -> str:
 
     Args:
         text: Transliterated text (ITRANS/IAST output)
+        source_tokens: the Devanagari tokens `text` was transliterated from,
+            in the same order. When given, the trailing-'a' decision is made
+            from the script (correct). When omitted - a Latin-only string, or
+            a caller that has no source - every word keeps its vowel, which is
+            the conservative choice: it never invents a vowel that is not
+            there, it only fails to drop a schwa.
 
     Returns:
         Cleaned English text with proper capitalization
@@ -135,36 +245,14 @@ def clean_phonetic_rules(text: str) -> str:
         return text
 
     words = text.split()
-    cleaned_words = []
+    tokens = list(source_tokens) if source_tokens is not None else []
+    if len(tokens) != len(words):
+        tokens = [None] * len(words)
 
-    for word in words:
-        word_lower = word.lower()
-
-        # Step A: Match direct structural tokens (address components)
-        if word_lower in GLOBAL_STRUCTURAL_MAP:
-            cleaned_words.append(GLOBAL_STRUCTURAL_MAP[word_lower])
-            continue
-
-        # Step B (REMOVED): Internal schwa deletion was too aggressive.
-        # The raw IAST output (akasa, babita, kusuma) is actually better for
-        # Indian names than the over-cleaned versions (aksa, bbita).
-
-        # Step C: Dynamic Trailing 'a' removal for Indian Male/Surname formats
-        # Skips short names or explicit feminine sound groupings
-        # (-ita, -ika, -iya, -ta, -da, -ma, -va, -la, -ra)
-        if word_lower.endswith('a') and len(word) > 4:
-            if not re.search(r'(ita|ika|iya|ta|da|ma|va|la|ra)$', word_lower):
-                word = word[:-1]
-
-        # Step D: Standardize messy character pairs caused by algorithmic mapping
-        word = re.sub(r'amch', 'anch', word, flags=re.IGNORECASE)  # Uttaramchal -> Uttaranchal
-        word = re.sub(r'ee', 'i', word, flags=re.IGNORECASE)
-        word = re.sub(r'oo', 'u', word, flags=re.IGNORECASE)
-        word = re.sub(r'shh', 'sh', word, flags=re.IGNORECASE)
-        word = re.sub(r'rri', 'ri', word, flags=re.IGNORECASE)
-        word = re.sub(r'rru', 'ru', word, flags=re.IGNORECASE)
-
-        cleaned_words.append(word.strip().title())
+    cleaned_words = [
+        _clean_word(word, _final_roman_a_is_real(tokens[index]) if tokens[index] else False)
+        for index, word in enumerate(words)
+    ]
 
     return " ".join(cleaned_words)
 
@@ -247,8 +335,10 @@ def transliterate(text) -> str | None:
         log.warning("transliterate failed for %r: %s", value, exc)
         return value
 
-    # Apply phonetic cleaning rules
-    out = clean_phonetic_rules(out)
+    # Apply phonetic cleaning rules. The Devanagari tokens go with the
+    # romanised ones so the trailing-'a' decision can be made from the
+    # script, where it is still unambiguous.
+    out = clean_phonetic_rules(out, source_tokens=tokens)
 
     return " ".join(out.split()) or None
 

@@ -246,6 +246,12 @@ def map_record(item: dict, document_id, session_id, unit_id):
         voter_sur_name_hi=voter_sur_name_hi, voter_sur_name_en=voter_sur_name_en,
         # Relative name
         relative_name_hi=relative_hi, relative_name_en=relative_en,
+        # The Hindi relation label (पिता, पति, माता, अन्य) as read by OCR.
+        # This was computed at line 157 but never passed to the constructor,
+        # so the column silently stayed NULL on every row while
+        # relationship_type -- derived from the same value three files
+        # earlier in extractor.py -- came through populated and hid it.
+        relation_name=relation_name,
         # Father's name
         voter_father_first_name_hi=voter_father_first_name_hi, voter_father_first_name_en=voter_father_first_name_en,
         voter_father_middle_name_hi=voter_father_middle_name_hi, voter_father_middle_name_en=voter_father_middle_name_en,
