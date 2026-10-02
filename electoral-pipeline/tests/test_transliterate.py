@@ -24,7 +24,11 @@ def test_transliterate_names(hindi, expected):
     ("कल्पना", "Kalpana"),
     ("रेखा", "Rekha"),
     ("सुधा", "Sudha"),
-    ("सक्सेना", "Saksena"),
+    # सक्सेना used to stand here, but it is now a Layer 1 lexicon key and
+    # resolves to "Saxena" -- an English spelling convention, not a schwa
+    # decision. This test is about the trailing vowel, so it uses a name the
+    # lexicon does not carry; see test_name_lexicon.py for the map.
+    ("सरस्वती", "Sarasvati"),
     ("अर्चना", "Archana"),
     # A name ending in a bare consonant carries an inherent schwa that
     # English does not write. Keeping it produced Rohita, Amita, Kumara.

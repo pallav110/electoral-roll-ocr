@@ -27,6 +27,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import app.transliterate as T  # noqa: E402
 
+# One guard, imported rather than reimplemented. Two drift lists in two scripts
+# is two lists that will disagree, and the disagreement shows up as a wrong
+# name in an English column.
+from model_guards import guard_reasons, has_orphan_marks, is_drift, normalise as _normalise  # noqa: E402
+
 EVAL_CSV = REPO_ROOT / "indictrans2_eval.csv"
 
 NAME_FIELDS = {
@@ -43,21 +48,8 @@ NAME_FIELDS = {
     "voter_other_first_name",
 }
 
-# IndicTrans2 is a translation model. These are correct translations and wrong
-# answers for a name field -- the model answered a different question. Not
-# candidates for a map; they are evidence the model must not own names alone.
-SEMANTIC_DRIFT = {
-    "the sky", "joy", "imagination", "relax", "peace", "wealth", "the moon",
-    "sun", "lord", "goddess", "flower", "the earth", "student", "teacher",
-    "king", "queen", "brave", "new", "the best",
-}
-
-
-def is_drift(english: str) -> bool:
-    low = (english or "").strip().lower().rstrip(".")
-    if not low:
-        return False
-    return low in SEMANTIC_DRIFT or low.startswith("the ")
+# Drift detection lives in model_guards so the two evaluation scripts cannot
+# disagree about what counts as drift.
 
 
 def load_eval():
@@ -72,49 +64,64 @@ def main():
                         help="only words seen at least this many times")
     args = parser.parse_args()
 
-    rows = load_eval()
-    out = []
-    for row in rows:
+    # A name appears once per field it was found in (a first name and a
+    # father's first name, say), so the same string shows up several times.
+    # Sum the occurrences and keep one row per string, or पाल shows up twice
+    # and the map gets a duplicate entry.
+    merged = {}
+    for row in load_eval():
         hindi = row["hindi"]
-        # House numbers go through house_en(); everything else through the
-        # general path. Using the wrong one would compare against a column
-        # that was never produced for that field.
-        if row["field"] == "house_no":
-            current = T.house_en(hindi)
-        else:
-            current = T.transliterate(hindi)
-        out.append({
+        occ = int(row["occurrences"] or 0)
+        if hindi in merged:
+            merged[hindi]["occurrences"] += occ
+            merged[hindi]["fields"].add(row["field"])
+            continue
+        merged[hindi] = {
             "field": row["field"],
-            "occurrences": int(row["occurrences"] or 0),
+            "fields": {row["field"]},
+            "occurrences": occ,
             "hindi": hindi,
-            "stale_rule_based": row["rule_based"],
-            "current": current or "",
+            # House numbers go through house_en(); everything else through the
+            # general path. Using the wrong one would compare against a column
+            # that was never produced for that field.
+            "current": T.house_en(hindi) if row["field"] == "house_no"
+                       else (T.transliterate(hindi) or ""),
             "model": row["indictrans2"] or "",
-        })
+        }
+
+    out = list(merged.values())
+
+    # Run the full guard suite and record *why* each rejection happened,
+    # rather than blanking the model column and then reporting 0% drift --
+    # which is what an earlier version did, and it hid every rejection.
+    for row in out:
+        row["reasons"] = guard_reasons(row["hindi"], row["model"])
+        row["usable"] = not row["reasons"]
 
     names = [r for r in out if r["field"] in NAME_FIELDS]
     print(f"total rows {len(out)}  name rows {len(names)}")
 
     drift = [r for r in names if is_drift(r["model"])]
+    rejected = [r for r in names if not r["usable"]]
+    print(f"model rejected by guards on names: {len(rejected)} "
+          f"({len(rejected) / max(len(names), 1) * 100:.0f}%)")
     print(f"model meaning-drift on names: {len(drift)} "
           f"({len(drift) / max(len(names), 1) * 100:.0f}% of name rows)\n")
 
-    # Only rows where both engines produced something comparable.
-    comparable = [
-        r for r in names
-        if r["current"] and r["model"] and not is_drift(r["model"])
-    ]
+    # Only rows where the model survived the guards and both engines produced
+    # something comparable.
+    comparable = [r for r in names if r["current"] and r["model"] and r["usable"]]
     differ = [
         r for r in comparable
-        if r["current"].strip().lower() != r["model"].strip().lower()
+        if _normalise(r["current"]) != _normalise(r["model"])
         and r["occurrences"] >= args.min_occurrences
     ]
     if args.field:
-        differ = [r for r in differ if r["field"] == args.field]
+        differ = [r for r in differ if args.field in r["fields"]]
 
     total_occ = sum(r["occurrences"] for r in comparable)
     diff_occ = sum(r["occurrences"] for r in differ)
-    print(f"comparable name rows: {len(comparable)}")
+    print(f"comparable name strings: {len(comparable)}")
     print(f"disagreements: {len(differ)}  "
           f"({diff_occ}/{total_occ} occurrences, "
           f"{diff_occ / max(total_occ, 1) * 100:.1f}%)\n")
@@ -127,11 +134,12 @@ def main():
               f"rules={r['current']:<18} model={r['model']}")
 
     print("\n" + "=" * 72)
-    print("MODEL MEANING-DRIFT on names (evidence against model-owned names)")
+    print("MODEL REJECTED by guards (never candidates for the map)")
     print("=" * 72)
-    for r in sorted(drift, key=lambda r: -r["occurrences"])[:20]:
+    for r in sorted(rejected, key=lambda r: -r["occurrences"])[:20]:
         print(f"  [{r['occurrences']:>3}x] {r['hindi']:<20} "
-              f"rules={r['current']:<18} model={r['model']}")
+              f"rules={r['current']:<18} model={r['model'][:40]!r}")
+        print(f"        rejected: {', '.join(r['reasons'])}")
 
     print(f"\nfield mix of disagreements: "
           f"{dict(Counter(r['field'] for r in differ))}")

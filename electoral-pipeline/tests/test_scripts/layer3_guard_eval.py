@@ -33,47 +33,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from layer1_candidates import NAME_FIELDS, is_drift, load_eval  # noqa: E402
+from layer1_candidates import NAME_FIELDS, load_eval  # noqa: E402
+from model_guards import guard_reasons, has_orphan_marks, normalise  # noqa: E402
 
 import app.transliterate as T  # noqa: E402
-
-DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
-DIGIT_RE = re.compile(r"\d")
-
-# A model that repeats is broken. Two repeats of the same short unit is the
-# threshold: legitimate names do not repeat ("Ram Ram" is not a name).
-REPEAT_RE = re.compile(r"(.{2,30}?)\1{2,}")
-
-
-def guard_reasons(hindi: str, model: str) -> list[str]:
-    """Every reason to REJECT the model's answer. Empty means it may be used."""
-    out = model or ""
-    reasons = []
-
-    if not out.strip():
-        return ["empty"]
-    if DEVANAGARI_RE.search(out):
-        reasons.append("devanagari residue")
-    if REPEAT_RE.search(out):
-        reasons.append("degenerate repetition")
-    if is_drift(out):
-        reasons.append("meaning drift")
-    if len(out) > 3 * max(len(hindi), 4):
-        reasons.append("runaway length")
-
-    # Digits are load-bearing: a wrong digit points at the wrong house.
-    if set(DIGIT_RE.findall(hindi)) - set(DIGIT_RE.findall(out)):
-        reasons.append("digits lost")
-
-    # A one-word Hindi name must not come back as a sentence fragment. This is
-    # what catches "श्री" -> "Mr." and "शान्ति" -> "Mr.".
-    if len(hindi.split()) == 1 and len(out.split()) > 1:
-        # A compound written as two words is not necessarily wrong
-        # ("रामस्वरूप" -> "Ram Swaroop"), so this is reported separately below
-        # rather than treated as a hard reject.
-        pass
-
-    return reasons
 
 
 def main():
@@ -107,8 +70,7 @@ def main():
     print(f"model ACCEPTED:            {len(accepted)} "
           f"({len(accepted) / max(len(names), 1) * 100:.0f}%)")
 
-    agree = [r for r in accepted
-             if r["rules"].strip().lower() == r["model"].strip().lower()]
+    agree = [r for r in accepted if normalise(r["rules"]) == normalise(r["model"])]
     differ = [r for r in accepted if r not in agree]
     print(f"  of accepted, rules and model already AGREE: {len(agree)}")
     print(f"  of accepted, genuine disagreements:        {len(differ)}")

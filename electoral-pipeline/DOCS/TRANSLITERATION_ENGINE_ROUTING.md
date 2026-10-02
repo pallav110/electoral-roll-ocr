@@ -92,14 +92,98 @@ still differ are model meaning-drift (`अंकुर` → "shoots", `वंश
 "Descendants") or the long-vowel convention (`संजीव` → `Sanjeev`), which is a
 spelling-convention fact and not derivable from the script.
 
+## Layer 1: the proper-noun spelling lexicon
+
+Layer 0 produces a phonetic transliteration. English does not spell names
+phonetically — `पाल` is "Pal", not "Pala"; `वर्मा` is "Verma", not "Varma".
+That gap is a lexicon fact, not a derivable one, and `app/name_lexicon.json`
+is the only place it lives.
+
+**Nothing in the map was hand-approved.** `tests/test_scripts/build_layer1_map.py`
+generates it from the measured disagreements, and an entry is accepted only if
+all three hold:
+
+1. The model output passes **every** guard in `tests/test_scripts/model_guards.py`
+   — meaning drift, degenerate repetition, detached diacritics, lost digits.
+   An entry learned from a rejected output would put garbage in the map.
+2. The disagreement is a **spelling** difference, not a meaning one: same
+   initial letter, same word count, within a small edit distance after
+   collapsing doubled letters and the `ee`/`ii` vowel. This is what rejects
+   "Victory" for `विजय` and "Hero" for `वीर` unattended.
+3. The model output is **not longer** than the rules. The rules already drop
+   the inherent schwa wherever English drops it, so a longer output means the
+   model invented a vowel: `शिव` → "Shiva" when the correct English is "Shiv".
+   This filter is why `शिव`, `महावीर` and `भीम` are *absent* from the map.
+
+### Measured effect
+
+| | strings | |
+|---|---|---|
+| guard-passing name strings | 263 | |
+| agree with IndicTrans2 before the map | 145 (55%) | Layer 0 only |
+| agree with IndicTrans2 after the map | 166 (63%) | +21 |
+| map entries | 21 | covering 72 occurrences |
+| guard-rejected (never enter the map) | 52 (17%) | |
+
+The 21 new agreements are exactly the 21 entries — the map cannot help
+anywhere the guards rejected the model, by construction. That is the point:
+Layer 1 only accepts spellings that survived Layer 3's filters, so it cannot
+import drift into the rule path.
+
+### Scope
+
+Whole-string lookup only. A substring or fuzzy match would rewrite `राम` inside
+`रामपाल` and corrupt names the rules already get right — `रामपाल` is "Ramapal",
+not "Pal". The lookup is also skipped for any value carrying a digit or
+punctuation, so a house number can never be shadowed by a name entry;
+`house_en()` owns that convention.
+
+A missing or corrupt lexicon degrades to Layer 0 alone rather than raising.
+
+### Regenerating
+
+    python tests/test_scripts/build_layer1_map.py --dry-run   # inspect
+    python tests/test_scripts/build_layer1_map.py             # write
+
+The generator deliberately bypasses the lexicon when computing the Layer 0
+baseline. Without that, an entry already in the map makes its own comparison
+show no disagreement and the map would silently empty itself on the next run.
+
 ## Routing
 
 | Field | Engine | Why |
 |---|---|---|
 | `relation_name` | **rule-based** | closed vocabulary; MT mistranslates labels |
 | `gender` | **rule-based** | closed vocabulary; MT mistranslates labels |
-| `house_no` | **rule-based** + `house_en()` | address convention now a 4-line rule; see below |
-| names | **undecided** | see open questions |
+| `house_no` | **rule-based** + `house_en()` | address convention is a 4-line rule; see below |
+| names | **Layer 0 + Layer 1** | no model at runtime; 63% of guard-passing strings |
+
+Names now run entirely on rules plus the lexicon. IndicTrans2 is not in the
+production path — it is the *oracle* that generated the lexicon, and its
+output survives three filters before being allowed to become a rule.
+
+## Layer 3 (IndicTrans2): the oracle, not the runtime
+
+IndicTrans2-200M stays out of `transliterate()`. Its measured value is that it
+supplies the spelling conventions Layer 0 cannot derive — and it supplies them
+**once, offline**, into a map that is exact-match, auditable, and free at
+runtime.
+
+Against the guards it is rejected on 17% of name strings, and those rejections
+are not marginal:
+
+| Hindi | rules | IndicTrans2 | why rejected |
+|---|---|---|---|
+| चन्द्र | Chandra | "the moon" | meaning drift (10 occurrences) |
+| सीमा | Sima | "the limit of the limit…" ×15 | repetition, runaway |
+| उत्तम | Uttam | "the best of the best 。 。 。" | repetition, drift |
+| भोज | Bhoj | 300-char "feast of the food of the food…" | repetition, drift |
+| कृष्ण | Krishna | "Kr ̣ s ̣ n ̣ a" | orphaned combining marks |
+| लाल | Lala | "Red" | meaning drift |
+
+128 of the 299 guard-passing strings already agreed with the rules, so the
+model's runtime contribution would have been small even unguarded. Offline it
+is genuinely useful; online it is 185x slower and strictly riskier.
 
 ## House numbers: resolved without a model
 
@@ -163,6 +247,7 @@ Model wins on vowel fidelity: `अक्षय` Akshay, `अर्जुन` Arj
 Model loses on meaning-drift and on `आनन्द` -> joy.
 
 Needed before deciding:
+
 - validate output contains no Devanagari
 - reject output containing ASCII punctuation (guards "The B-89" class)
 - preserve digits
