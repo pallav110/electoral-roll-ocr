@@ -54,6 +54,44 @@ already there); it was rendering as `Ecaenao 146`.
 Guarded by `tests/test_scheme_contract.py`; whole-corpus residue check is
 `tests/test_scripts/sweep_corpus.py`.
 
+## Layer 0 (cont.): homorganic nasal assimilation
+
+Measuring the model against the rules on names (`tests/test_scripts/layer3_guard_eval.py`)
+showed **22 of 22** names containing an anusvara were wrong. Not drift — one
+rule.
+
+The Devanagari anusvara (ं) is not a letter with a fixed sound: the nasal
+assimilates to the class of the consonant that follows, and English spelling
+follows the same rule. ITRANS writes it as a literal `M`, so `सिंह` came out
+`siMha`; the schwa rule then saw a bare consonant, dropped the inherent `a`,
+and the `M` went with it:
+
+    सिंह  siMha  -> Simh     correct: Singh   (65 occurrences — most common
+                                            name in the roll)
+    शंकर  shaMkara -> Shamkar         Shankar
+    चंद   chaMda -> Chand             Chand
+    पंडित paMDita -> Pamdit           Pandit
+    बिंदी biMdI   -> Bimdi            Bindi
+
+`_assimilate_anusvara()` resolves the nasal on the Devanagari side, before
+romanisation, writing it with a virama so it forms a conjunct and contributes
+no vowel: `शंकर` → `शङ्कर` → `Shankar`. It has to run before romanisation —
+afterwards the class is no longer visible, since `siMha` does not say whether
+the M was velar or dental.
+
+Two cases the rule must *not* touch:
+
+- **Word-final anusvara** (`संत`). Rewriting it as a bare न invents a syllable:
+  `Sanat`, not `Sant`. Left exactly as it was.
+- **नं**, the abbreviation for "number" that `GLOBAL_STRUCTURAL_MAP` reads as
+  `"No."`. This failed twice: word-final it became `नन` → `Nana`, and inside
+  `नं-बी` the hyphen looked like a word boundary and it became `Nan-B`.
+
+Anusvara names went from 0/22 to 16/22 agreeing with IndicTrans2. The 6 that
+still differ are model meaning-drift (`अंकुर` → "shoots", `वंशज` →
+"Descendants") or the long-vowel convention (`संजीव` → `Sanjeev`), which is a
+spelling-convention fact and not derivable from the script.
+
 ## Routing
 
 | Field | Engine | Why |

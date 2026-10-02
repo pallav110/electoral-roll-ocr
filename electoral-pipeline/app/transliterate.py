@@ -192,6 +192,131 @@ GLOBAL_STRUCTURAL_MAP = {
 }
 
 
+# Homorganic nasal (anusvara) assimilation.
+#
+# Devanagari anusvara (ं) and chandrabindu (ँ) are not letters with a fixed
+# sound: the nasal assimilates to the class of the consonant that follows.
+# English spelling follows the same rule, so the Devanagari already tells us
+# what to write:
+#
+#     सिंह  si + M + ha   -> the M is velar before h -> Singh  (not "Simh")
+#     शंकर sha + M + ka   -> velar            -> Shankar (not "Shamkar")
+#     चंद  cha + M + da   -> retroflex        -> Chand   (not "Chamd")
+#     पंडित pa + M + Da   -> retroflex        -> Pandit  (not "Pamdit")
+#     बिंदी bi + M + dI    -> dental           -> Bindi   (not "Bimdi")
+#
+# ITRANS writes the anusvara as a literal "M" (siMha). The schwa rule then
+# saw "ha" -- a bare consonant -- dropped the inherent 'a', and the M went
+# with it. Every one of the 22 anusvara names in the roll was wrong as a
+# result, including सिंह, the most frequent name in the corpus at 65
+# occurrences.
+#
+# Resolved on the Devanagari side, before the romanisation, because by the
+# time we have "siMha" the class of the following letter is no longer visible.
+_ANUSVARA = chr(0x0902)   # ं
+_CHANDRABINDU = chr(0x0901)  # ँ
+_NASALS = {_ANUSVARA, _CHANDRABINDU}
+
+# _MATRAS includes ं and ँ because they sit where a vowel sign sits, but they
+# are nasals, not vowels: an anusvara is a consonant letter that may be
+# followed by another one (हंस + ं). Searching for the consonant that governs
+# an anusvara has to skip real vowel signs only, or "नं" finds no consonant and
+# a word-final anusvara gets rewritten as a bare न.
+_VOWEL_SIGNS = _MATRAS - _NASALS
+
+# A single Devanagari letter: consonant, vowel, nasal or sign. Used to tell
+# "the next character is another letter to assimilate against" from "the next
+# character is a separator and this token really has ended".
+_DEVANAGARI_LETTER = re.compile(r"[ऀ-ॿ]")
+
+# Place (varna) groups. The anusvara takes the nasal of the following
+# consonant's group. The value is the Devanagari letter carrying that class's
+# nasal, written with a VIRAMA so it forms a conjunct with the consonant that
+# follows and contributes no vowel of its own:
+#
+#     शंकर  sha + anusvara + ka  ->  शङ्कर  (n becomes ङ-class, joins ka)
+#     चंद   cha + anusvara + da  ->  चन्द
+#
+# Writing a bare न/ण here instead would splice in an inherent schwa and give
+# "Shanakar" / "Chanad" -- the nasal must be a conjunct, not a syllable.
+_VIRAMA_CHR = chr(0x094D)   # ्
+_N_DENTAL = chr(0x0928)     # न
+_N_RETROFLEX = chr(0x0923)  # ण
+_N_PALATAL = chr(0x091E)    # ञ
+
+_VELAR = "कखगघङ"          # ka kha ga gha nga
+_PALATAL = "चछजझञ"        # cha chha ja jha nya
+_RETROFLEX = "टठडढण"       # Ta Tha Da Dha na
+_DENTAL = "तथदधन"          # ta tha da dha na
+_LABIAL = "पफबभम"          # pa pha ba bha ma
+_SEMIVOWELS = "यरलव"       # ya ra la va
+
+_ANUSVARA_NASAL = {}
+_ANUSVARA_NASAL.update({ch: _N_RETROFLEX for ch in _VELAR})     # ङ-class -> ण
+_ANUSVARA_NASAL.update({ch: _N_PALATAL for ch in _PALATAL})      # ञ-class -> ञ
+_ANUSVARA_NASAL.update({ch: _N_RETROFLEX for ch in _RETROFLEX})  # ण-class -> ण
+_ANUSVARA_NASAL.update({ch: _N_DENTAL for ch in _DENTAL})         # न-class -> न
+_ANUSVARA_NASAL.update({ch: _N_DENTAL for ch in _LABIAL})         # म-class -> न
+_ANUSVARA_NASAL.update({ch: _N_DENTAL for ch in _SEMIVOWELS})      # यरलव -> न
+
+
+def _assimilate_anusvara(token: str) -> str:
+    """Rewrite each anusvara in a Devanagari token as the nasal conjunct the
+    following consonant calls for, so the romaniser has a real letter pair to
+    transliterate instead of a bare "M" that the schwa rule then deletes.
+
+        सिंह   si + M + ha  ->  सिन्ह    -> Singh     (velar: n joins h)
+        शंकर  sha + M + ka  ->  शङ्कर   -> Shankar   (velar)
+        चंद   cha + M + da  ->  चन्द    -> Chand     (retroflex)
+        पंडित pa + M + Dita ->  पण्डित  -> Pandit    (retroflex)
+        बिंदी bi + M + dI    ->  बिन्दी  -> Bindi     (dental)
+
+    The nasal is written with a virama so it forms a conjunct with the
+    consonant after it and adds no vowel of its own. A word-final anusvara has
+    nothing to join, so it becomes a plain न and keeps its inherent schwa --
+    संत -> सन्त -> Sant.
+
+    This has to run before romanisation. Afterwards the class of the following
+    letter is no longer visible: "siMha" does not say whether the M was velar
+    or dental, only the Devanagari does.
+    """
+    if not token or not (_ANUSVARA in token or _CHANDRABINDU in token):
+        return token
+
+    out = list(token)
+    for index, char in enumerate(out):
+        if char not in _NASALS:
+            continue
+
+        # Find the next consonant, skipping real vowel signs and any further nasal.
+        # A label separator or a digit means the word really did end, but the
+        # abbreviation still has to survive as one token for the map: in
+        # "नं-बी 190" the hyphen splits the token, and assimilating there turned
+        # the "No." into "Nan-B".
+        follower_index = None
+        for offset in range(index + 1, len(out)):
+            candidate = out[offset]
+            if candidate in _VOWEL_SIGNS or candidate == _VIRAMA or candidate in _NASALS:
+                continue
+            if not _DEVANAGARI_LETTER.fullmatch(candidate):
+                # Punctuation, a digit, or Latin: the token boundary is real.
+                break
+            follower_index = offset
+            break
+
+        if follower_index is None:
+            # Word-final: nothing to join, so the anusvara is left exactly as
+            # it was. A plain nasal here would invent a syllable -- "नं" (the
+            # abbreviation for "number", which GLOBAL_STRUCTURAL_MAP reads as
+            # "No.") became "नन" -> "Nana", and संत became "सनत" -> "Sanat".
+            # Leaving it alone keeps the token intact for the map, and the
+            # romaniser already spells a trailing anusvara as n.
+            continue
+
+        out[index] = _ANUSVARA_NASAL.get(out[follower_index], _N_DENTAL) + _VIRAMA_CHR
+    return "".join(out)
+
+
 def _final_roman_a_is_real(hindi_token: str) -> bool:
     """Does this Devanagari token end in a vowel that the romanisation writes
     as a final 'a' that must be KEPT?
@@ -264,6 +389,15 @@ def _clean_segment(segment: str, keep_final_a: bool) -> str:
     # the actual unit, so it is fixed here alongside the other digraph folds.
     segment = re.sub(r'jn(?=[aeiou])', 'gy', segment, flags=re.IGNORECASE)
     segment = re.sub(r'^jn', 'gy', segment, flags=re.IGNORECASE)
+
+    # The ङ-upadhmanya conjunct is the one the library drops a letter from:
+    #     सन्ह -> "snha"  -> "ngh"
+    # Standard IAST writes this digraph "ṅᵛh", so the library is the thing
+    # that is wrong here, not the spelling. सिंह is the most frequent name in
+    # the roll at 65 occurrences.
+    # The palatal nasal ञ needs no rule: _strip_marks already removes the
+    # library's '~' marker and "sa~njIva" lands on the correct "sanj".
+    segment = re.sub(r'nh', 'ngh', segment, flags=re.IGNORECASE)
 
     return segment.strip().title()
 
@@ -532,8 +666,14 @@ def transliterate(text) -> str | None:
         out_tokens = []
         for token in tokens:
             if DEVANAGARI.search(token):
-                # This token has Devanagari - transliterate the whole token
-                out = sanscript.transliterate(token, sanscript.DEVANAGARI, target)
+                # This token has Devanagari - transliterate the whole token.
+                # The anusvara is assimilated first, while the following letter
+                # is still a Devanagari letter and its class (velar/palatal/
+                # retroflex/dental/labial) is still readable. See
+                # _assimilate_anusvara for why this cannot be done afterwards.
+                out = sanscript.transliterate(
+                    _assimilate_anusvara(token), sanscript.DEVANAGARI, target
+                )
                 if strip:
                     out = _strip_marks(out)
                 out_tokens.append(out)
