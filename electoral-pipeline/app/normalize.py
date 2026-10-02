@@ -230,6 +230,10 @@ def map_record(item: dict, document_id, session_id, unit_id):
     relationship_type = _relation_type_en(_text(common.get("relationship_type")))
 
     # TODO(integration): Extend fields here alongside ElectoralRecord when your API adds fields.
+    # OCR extracts anubhag_code/anubhag_name (from page 3 header), not section_number.
+    # Use anubhag_code as section_number since they represent the same concept.
+    section_number_val = _int(common.get("anubhag_code") or common.get("section_number"), "section_number")
+
     record = ElectoralRecord(
         document_id=document_id, session_id=session_id, extraction_unit_id=unit_id,
         page_number=page, source_row_number=row,
@@ -272,7 +276,7 @@ def map_record(item: dict, document_id, session_id, unit_id):
         relationship_type=relationship_type, age=age,
         gender_hi=gender_hi, gender_en=gender_en_value,
         house_number_hi=house_hi, house_number_en=house_en,
-        section_number=_int(common.get("section_number"), "section_number"),
+        section_number=section_number_val,
         section_name_hi=section_hi, section_name_en=section_en,
         confidence=confidence, source_record_hash=identity, translit_source_hash=translit_basis,
         is_valid=not errors, validation_errors=errors,

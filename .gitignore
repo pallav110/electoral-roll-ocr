@@ -9,3 +9,8 @@ __pycache__/
 # Local environment and source PDFs — not part of the repo.
 .venv/
 input/
+
+# Voter exports written by the export endpoint during testing. These are
+# generated output, not source, and contain real extracted records.
+export.csv
+*_export.csv

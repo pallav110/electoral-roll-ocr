@@ -1,27 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytesseract
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
-PHOTO_BOX_REGION = (0.75, 0.23, 0.99, 0.96)
-
-
-def _mask_photo_box(image: np.ndarray) -> np.ndarray:
-    """Match the production API's photo-placeholder mask for OCR diagnostics."""
-    if image is None or image.size == 0:
-        return image
-    height, width = image.shape[:2]
-    x0_ratio, y0_ratio, x1_ratio, y1_ratio = PHOTO_BOX_REGION
-    x0, x1 = int(width * x0_ratio), int(width * x1_ratio)
-    y0, y1 = int(height * y0_ratio), int(height * y1_ratio)
-    masked = image.copy()
-    masked[y0:y1, x0:x1] = 255
-    return masked
+# The photo mask is imported, not restated. This file previously carried its own
+# PHOTO_BOX_REGION at (0.75, 0.23, 0.99, 0.96) and its own copy of the mask --
+# a third variant of the same constant, and one that did not match the
+# production value. A diagnostic that "matches production" only by intent is
+# worse than no diagnostic, because its output looks authoritative.
+from ocr_pdf_api import _mask_photo_box  # noqa: E402
 
 
 def _card_slices(image: np.ndarray) -> list[tuple[int, int]]:

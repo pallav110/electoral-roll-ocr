@@ -339,10 +339,11 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
                     # whole unit, discarding every other record in it.
                     "age": safe_int(record.get("age")),
                     "relationship_type": _relation_key(record.get("relation_name")),
+                    "anubhag_code": safe_int(record.get("anubhag_code")),
                 },
                 # Raw OCR record fields for component name extraction
                 "raw_record": record,
-                "confidence": 0.95 if not record.get("needs_review") else 0.70,
+                "confidence": record.get("confidence"),
             })
         
         say.info("Voters read and put into our format", voters=len(transformed["records"]))

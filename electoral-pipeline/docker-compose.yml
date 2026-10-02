@@ -1,3 +1,33 @@
+# The host filesystem mounts. Every service that does discovery (web,
+# worker, beat) or opens PDFs (worker) needs the same view, so the list is
+# declared once here as an anchor and referenced by name.
+#
+# THE UNC FORM IS REQUIRED ON WINDOWS. "C:/Users:/host/c/Users" is parsed
+# by Compose as source "C" and target "/Users", which does not exist, and
+# the mount is silently empty -- the container starts, looks healthy, and
+# cannot see the drive. "//c/Users:/host/c/Users" is the form that
+# actually binds. On a Linux host the equivalent "/srv/rolls:/srv/rolls"
+# needs no escaping at all, which is why the same compose file works on
+# both once the mounts are right.
+#
+# Only drives that exist on the host can be mounted. There is no way to
+# reach an E: that is not there, and typing one is reported as an unknown
+# drive rather than silently finding nothing.
+x-host-mounts: &host-mounts
+  - ./sample-pdfs:/data/pdfs
+  - type: bind
+    source: //c/Users
+    target: /host/c/Users
+  - type: bind
+    source: //d
+    target: /host/d
+  # The ingest folder is where PDFs from unmapped paths are copied so they
+  # become discoverable without needing a new mount. Must be present on all
+  # services that run discover (web, worker, beat).
+  - type: bind
+    source: ./ingest
+    target: /data/ingest
+
 services:
   db:
     image: postgres:16-alpine
@@ -11,6 +41,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U electoral"]
       interval: 3s
       retries: 20
+
   redis:
     image: redis:7-alpine
     volumes:
@@ -19,6 +50,7 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       retries: 20
+
   ocr:
     build:
       context: .
@@ -47,6 +79,7 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 10s
       retries: 20
+
   init:
     build: .
     # Exec form, not the string "python -m app.init_db && python -m app.migrate".
@@ -58,6 +91,7 @@ services:
     env_file: .env
     depends_on:
       db: {condition: service_healthy}
+
   web:
     build: .
     env_file: .env
@@ -65,13 +99,18 @@ services:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
       - TRANSLITERATION_SCHEME=itrans
+      # Where the host drives are bind-mounted. A folder path typed in the UI
+      # is rewritten to sit under this root, so "C:\Users\me\Rolls" becomes
+      # /host/c/Users/me/Rolls. Every drive listed in the anchor above is
+      # reachable; anything else is reported as an unknown drive.
+      - HOST_MOUNT_ROOT=/host
     ports: ["127.0.0.1:${WEB_PORT:-8088}:8000"]
-    volumes:
-      - ./sample-pdfs:/data/pdfs
+    volumes: *host-mounts
     depends_on:
       init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       ocr: {condition: service_healthy}
+
   worker:
     build: .
     # Concurrency 1 on purpose. Each unit is a 3-page OCR request, and the OCR
@@ -84,12 +123,13 @@ services:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
       - TRANSLITERATION_SCHEME=itrans
-    volumes:
-      - ./sample-pdfs:/data/pdfs
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
     depends_on:
       init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       ocr: {condition: service_healthy}
+
   beat:
     build: .
     command: celery -A app.tasks.celery_app beat --loglevel=INFO
@@ -98,12 +138,13 @@ services:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
       - TRANSLITERATION_SCHEME=itrans
-    volumes:
-      - ./sample-pdfs:/data/pdfs
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
     depends_on:
       init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       ocr: {condition: service_healthy}
+
 volumes:
   pgdata:
   redisdata:

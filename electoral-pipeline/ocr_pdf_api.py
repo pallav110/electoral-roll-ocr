@@ -53,7 +53,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from paddleocr import PaddleOCR
-except ImportError:
+except Exception as exc:
+    # Not just ImportError. On Windows the paddleocr package can load and then
+    # fail inside torch's own DLL loading with OSError (WinError 127, shm.dll),
+    # which escapes an `except ImportError` entirely and takes the whole module
+    # down with it -- including /health, since FastAPI never finishes importing.
+    # PaddleOCR=None is an already-supported state: every call site either
+    # checks for it or catches Exception, so degrading here is correct rather
+    # than a new failure mode.
+    log = logging.getLogger(__name__)
+    log.warning("paddleocr unavailable (%s: %s); falling back to Tesseract-only",
+                type(exc).__name__, exc)
     PaddleOCR = None
 
 log = logging.getLogger(__name__)
@@ -691,13 +701,16 @@ def _crop_card_region(image: Any, region: tuple[float, float, float, float],
     return image[py0:py1, px0:px1]
 
 
-def _extract_text_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
-    """Read a card image with Hindi Tesseract, returning lines. Image should be pre-cleaned; reads grayscale and Otsu variants, scores by Devanagari chars and labels."""
+def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]], Optional[float]]:
+    """Read a card image with Hindi Tesseract, returning lines and mean confidence.
+    Image should be pre-cleaned; reads grayscale and Otsu variants, scores by Devanagari chars and labels.
+    Returns (lines, mean_confidence) where confidence is 0-100 or None.
+    """
     try:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None or img.size == 0:
-            return None
+            return None, None
 
         # Upscaling helps Tesseract's LSTM see Devanagari strokes; it works on
         # an estimated character height, and at card scale that estimate is
@@ -709,24 +722,63 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, 11, 2)
 
-        candidates: list[list[str]] = []
+        candidates: list[tuple[list[str], float]] = []
         for variant in (gray, thresh):
-            text = pytesseract.image_to_string(
+            # Use image_to_data to get per-word confidence
+            data = pytesseract.image_to_data(
                 Image.fromarray(variant),
                 lang=TESSERACT_HINDI_LANG,
                 config=TESSERACT_CONFIG,
+                output_type=pytesseract.Output.DICT
             )
-            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            # Extract text lines and their confidences
+            lines = []
+            confs = []
+            current_line = []
+            current_line_confs = []
+            last_line_num = -1
+            for i, text in enumerate(data['text']):
+                line_num = data['line_num'][i]
+                conf = data['conf'][i]
+                if text.strip():
+                    if line_num != last_line_num and current_line:
+                        lines.append(" ".join(current_line))
+                        if current_line_confs:
+                            confs.append(sum(current_line_confs) / len(current_line_confs))
+                        current_line = []
+                        current_line_confs = []
+                    current_line.append(text.strip())
+                    if conf >= 0:  # -1 means no confidence
+                        current_line_confs.append(conf)
+                    last_line_num = line_num
+            if current_line:
+                lines.append(" ".join(current_line))
+                if current_line_confs:
+                    confs.append(sum(current_line_confs) / len(current_line_confs))
+
             if lines:
-                candidates.append(lines)
+                mean_conf = sum(confs) / len(confs) if confs else 0.0
+                candidates.append((lines, mean_conf))
 
         if not candidates:
-            return None
+            return None, None
 
-        return max(candidates, key=_hindi_line_score)
+        # Select best by hindi line score, return its lines and confidence.
+        #
+        # Confidence is the tie-breaker, and it has to be: `max` alone returns
+        # the FIRST maximal element, so when two variants (gray/thresholded)
+        # read the same Hindi text with equal score, the winner was decided by
+        # dictionary order. That made the reported confidence an artefact of
+        # which read happened to be considered first -- whole pages came back
+        # as a flat 0.95 or 0.7, which looked exactly like a hardcoded value
+        # but was actually real Tesseract output arriving untied. Ordering by
+        # (score, confidence) keeps every existing winner and only decides the
+        # cases that were previously arbitrary.
+        best = max(candidates, key=lambda x: (_hindi_line_score(x[0]), x[1]))
+        return best[0], best[1]
     except Exception as exc:
         log.debug("Hindi Tesseract OCR failed: %s", exc)
-        return None
+        return None, None
 
 
 # Hindi labels that a clean read of a voter card band contains. Each is worth
@@ -2068,18 +2120,21 @@ def _extract_card(
 
         # ── 5. Hindi fields ──────────────────────────────────────────────
         hindi_fields_lines = None
+        hindi_fields_conf = None
         hindi_png = _crop_png(cl, TESSERACT_CARD_CONTENT_REGIONS[2], "HINDI_FIELDS")
         if hindi_png:
-            hindi_fields_lines = _extract_text_with_tesseract(hindi_png)
-            _t("_extract_text_with_tesseract (hindi crop)", hindi_fields_lines)
+            hindi_fields_lines, hindi_fields_conf = _extract_text_with_tesseract(hindi_png)
+            _t("_extract_text_with_tesseract (hindi crop)", f"lines={hindi_fields_lines} conf={hindi_fields_conf}")
         if not hindi_fields_lines:
             ok, enc_cl = cv2.imencode(".png", cl)
             if ok:
-                hindi_fields_lines = _extract_text_with_tesseract(enc_cl.tobytes())
-                _t("_extract_text_with_tesseract (full card fallback)", hindi_fields_lines)
+                hindi_fields_lines, hindi_fields_conf = _extract_text_with_tesseract(enc_cl.tobytes())
+                _t("_extract_text_with_tesseract (full card fallback)", f"lines={hindi_fields_lines} conf={hindi_fields_conf}")
 
         # ── 6. Parse Hindi lines into record ─────────────────────────────
         record = parse_voter_box_from_ocr_lines(hindi_fields_lines or [])
+        if hindi_fields_conf is not None:
+            record["_tesseract_conf"] = hindi_fields_conf
         _t("parse_voter_box_from_ocr_lines", record)
         if record.get("empty"):
             record = _empty_record()
@@ -2108,7 +2163,7 @@ def _extract_card(
             h_lines = None
             house_png = _crop_png(cl, HOUSE_REGION, "HOUSE")
             if house_png:
-                h_lines = _extract_text_with_tesseract(house_png)
+                h_lines, _ = _extract_text_with_tesseract(house_png)
                 _t("_extract_text_with_tesseract (HOUSE region)", h_lines)
 
             # Some rolls print the house as free text rather than a number
@@ -2126,7 +2181,7 @@ def _extract_card(
             paddle_house = None  # PaddleOCR house value (trusted primary)
             hv_png = _crop_png(cl, HOUSE_VALUE_REGION, "HOUSE_VAL")
             if hv_png:
-                hv_lines = _extract_text_with_tesseract(hv_png)
+                hv_lines, _ = _extract_text_with_tesseract(hv_png)
                 _t("_extract_text_with_tesseract (HOUSE_VAL region)", hv_lines)
                 e_digit = _extract_house_number_with_tesseract(hv_png)
                 _t("_extract_house_number_with_tesseract (digits)", e_digit)
@@ -2140,7 +2195,12 @@ def _extract_card(
                 e_digit = _extract_house_number_with_tesseract(house_png)
                 _t("_extract_house_number_with_tesseract (HOUSE fallback)", e_digit)
 
-            combined = _combine_house_read(hindi_fields_lines, e_digit, h_lines, hv_lines, e_raw)
+            # Extract just the lines for _combine_house_read (ignores confidence)
+            # hindi_fields_lines is either None, a list[str], or tuple[list[str], float]
+            hindi_lines = hindi_fields_lines[0] if isinstance(hindi_fields_lines, tuple) else hindi_fields_lines
+            h_lines_only = h_lines[0] if isinstance(h_lines, tuple) else h_lines
+            hv_lines_only = hv_lines[0] if isinstance(hv_lines, tuple) else hv_lines
+            combined = _combine_house_read(hindi_lines, e_digit, h_lines_only, hv_lines_only, e_raw)
             _t("_combine_house_read", combined)
 
             parser_house = record.get("house_no", "")
@@ -2312,6 +2372,38 @@ def _split_person_name(full_name: str) -> tuple[str, str, str]:
         return parts[0], "", parts[1]
     return parts[0], " ".join(parts[1:-1]), parts[-1]
 
+def _compute_confidence(
+    tesseract_conf: Optional[float],
+    paddle_conf: Optional[dict[str, float]]
+) -> Optional[float]:
+    """Combine Tesseract and PaddleOCR confidences into a single 0-1 score.
+
+    Tesseract confidence is 0-100 (word-level mean).
+    PaddleOCR confidence is 0-1 per field (serial, house, age).
+
+    Strategy:
+    - If both available, average them (normalize Tesseract to 0-1)
+    - If only one available, use that
+    - If neither, return None
+    """
+    tess_norm = tesseract_conf / 100.0 if tesseract_conf is not None else None
+
+    # Average PaddleOCR field confidences
+    paddle_avg = None
+    if paddle_conf and isinstance(paddle_conf, dict) and paddle_conf:
+        valid_confs = [c for c in paddle_conf.values() if c > 0]
+        if valid_confs:
+            paddle_avg = sum(valid_confs) / len(valid_confs)
+
+    if tess_norm is not None and paddle_avg is not None:
+        return (tess_norm + paddle_avg) / 2.0
+    elif tess_norm is not None:
+        return tess_norm
+    elif paddle_avg is not None:
+        return paddle_avg
+    return None
+
+
 def _public_record(
     record: dict[str, Any], counter: int, pdf_name: str,
     roll_metadata: dict[str, str],
@@ -2365,6 +2457,11 @@ def _public_record(
         "needs_review": bool(record.get("_needs_review", False)),
         "review_reasons": list(record.get("_review_reasons", [])),
         "field_sources": dict(record.get("_field_sources", {})),
+        # Confidence: combine Tesseract and PaddleOCR confidences
+        "confidence": _compute_confidence(
+            record.get("_tesseract_conf"),
+            record.get("_paddle_conf")
+        ),
     }
 
 def _page_looks_like_voter_grid(page: fitz.Page) -> bool:
@@ -2680,6 +2777,7 @@ def _extract_pdf_ocr_unlocked(
 
                 # One combined paddle call: serial (for Q/deleted) + house + age
                 # Stacked vertically with known pixel offsets for result routing.
+                field_confidences = {}
                 try:
                     crops_info = []  # (field, scaled_img)
 
@@ -2722,11 +2820,16 @@ def _extract_pdf_ocr_unlocked(
                         res = paddle_inst.ocr(stacked, cls=False)
                         hits = res[0] or []
 
+                        # Extract PaddleOCR confidence scores per field
+                        field_confidences = {}
                         for field, (fy0, fy1) in h_offsets.items():
-                            field_texts = [
-                                ln[1][0] for ln in hits
+                            field_hits = [
+                                ln for ln in hits
                                 if fy0 <= sum(pt[1] for pt in ln[0]) / 4 <= fy1
                             ]
+                            field_texts = [ln[1][0] for ln in field_hits]
+                            field_confs = [ln[1][1] for ln in field_hits]
+                            field_confidences[field] = sum(field_confs) / len(field_confs) if field_confs else 0.0
 
                             if field == "serial":
                                 # A single Paddle read can drop a Q that is
@@ -2802,6 +2905,9 @@ def _extract_pdf_ocr_unlocked(
                     house_val = re.sub(r"^[।॥|]+(?=\d)", "1", house_val)
                     house_val = re.sub(r"(?<=\d)[।॥|]+(?=\d)", "1", house_val)
                     rec["house_no"] = house_val
+
+                # Store PaddleOCR confidence for this record
+                rec["_paddle_conf"] = field_confidences
 
                 paddle_done += 1
                 _progress(

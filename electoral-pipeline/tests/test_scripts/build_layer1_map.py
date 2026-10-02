@@ -64,6 +64,22 @@ def rules_only(text: str) -> str:
         T._NAME_LEXICON_CACHE = saved
 
 
+def squash(value: str) -> str:
+    """Collapse the two systematic, non-error spelling differences.
+
+    Doubled letters and the ee/ii vowel are conventions, not mistakes, so two
+    names that differ only in those are the same name written two ways.
+
+    ORDER MATTERS, and getting it wrong is silent. Collapsing doubled letters
+    first consumes the "ee" in "Sandeep" as a repeated character, so the vowel
+    fold never sees it and Sanjiv/Sanjeev fail to meet -- which is exactly the
+    pair the comparison exists to accept. Fold the vowel, then the doubling.
+    """
+    value = re.sub(r"[^a-z]", "", value.lower())
+    value = value.replace("ee", "i").replace("ii", "i")
+    return re.sub(r"(.)\1+", r"\1", value)
+
+
 def looks_like_a_spelling(rules: str, model: str) -> bool:
     """Is `model` a plausible English spelling of the same name as `rules`?
 
@@ -91,13 +107,6 @@ def looks_like_a_spelling(rules: str, model: str) -> bool:
     # not. Same initial letter is the cheapest signal that survives both.
     if a[0].lower() != b[0].lower():
         return False
-
-    # Collapse doubled letters and the ee/ii vowel, the two systematic
-    # differences that are not errors at all.
-    def squash(value: str) -> str:
-        value = re.sub(r"(.)\1+", r"\1", value)
-        value = value.replace("ee", "i").replace("ii", "i")
-        return re.sub(r"[^a-z]", "", value.lower())
 
     sa, sb = squash(a), squash(b)
 

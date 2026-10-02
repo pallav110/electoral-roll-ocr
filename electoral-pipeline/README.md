@@ -4,15 +4,67 @@ This is a runnable first implementation of the team plan. PostgreSQL owns all do
 
 ## Start
 
-1. Install Docker Desktop and start its engine.
-2. From this directory, run `cp .env.example .env` and change `ADMIN_TOKEN` in `.env`.
-3. Run `docker compose up --build -d`.
+1. Install Docker and start its engine (Docker Desktop on Windows, the `docker.io` package on Ubuntu).
+2. From this directory, copy the env file and set a password:
+   - Linux/macOS: `cp .env.example .env`
+   - Windows PowerShell: `Copy-Item .env.example .env`
+   - Windows cmd: `copy .env.example .env`
+
+   Then edit `.env` and change `ADMIN_TOKEN`.
+3. Start the stack — **pick the command for your OS**:
+
+   ```bash
+   # Windows
+   docker compose up --build -d
+
+   # Linux / Ubuntu  (adds the Linux path mapping; see below)
+   docker compose -f docker-compose.yml -f docker-compose.linux.yml up --build -d
+   ```
+
 4. The included blank demo PDF can be used immediately, or add your own PDF files to `sample-pdfs/`.
 5. Open [the local dashboard](http://localhost:8088), signing in as `admin` with your `ADMIN_TOKEN`. Use **Discover PDFs now** for an immediate scan. Celery Beat also scans hourly.
 
 The dashboard listens on `127.0.0.1:8088` by default. Change `WEB_PORT` if occupied. Run `docker compose logs -f worker beat web` to follow processing. Run `docker compose down` to stop; the database and Redis data remain in Docker volumes. `docker compose down -v` also deletes those volumes.
 
-For a concise team handoff, see [TEAM_HANDBOOK.md](TEAM_HANDBOOK.md). Run `python3 package_for_team.py` to create a ZIP that excludes the local `.env` password.
+For a concise team handoff, see [TEAM_HANDBOOK.md](TEAM_HANDBOOK.md). Run `python package_for_team.py` (`python3` on Linux) to create a ZIP that excludes the local `.env` password.
+
+## Pointing at PDFs on either OS
+
+In **Folders**, type a folder path and every PDF beneath it is discovered. The path is rewritten onto the mounted view of the host filesystem:
+
+| | Windows host | Linux host |
+|---|---|---|
+| Typed | `C:\Users\me\Rolls` | `/srv/rolls` |
+| Read from | `/host/c/Users/me/Rolls` | `/host/srv/rolls` |
+| Also works | `D:\rolls` → `/host/d/rolls` | `/home/me/Desktop/x` → `/host/home/me/Desktop/x` |
+
+Any absolute path works on both. On Linux that is because `docker-compose.linux.yml` mounts the host's filesystem root at `/host` (read-only). On Windows each drive is mounted separately and its letter becomes a path segment, which is how one mount root can stand for several drives.
+
+The two deployments need different compose files because `//c/Users` — the UNC mount syntax — is Windows-only. On Linux Compose parses it as an ordinary relative path, and Docker creates the missing directory instead of failing, so the mount appears to succeed while staying empty. Use the two-file command on Linux; the plain `docker compose up` on Windows is unchanged and needs no override.
+
+### Cloud-synced folders (OneDrive, Dropbox, Google Drive)
+
+A folder of **Files On-Demand placeholders** can be listed but not read: the file appears in the directory with its full size, then fails on open with `Input/output error`. This is not a mount problem — the container has the path and the file is listed. It is the cloud provider refusing to materialise the bytes.
+
+Such files are now reported instead of silently skipped. The folder row shows the count and names of what could not be read, so a scan that found nothing says *why*:
+
+> `4 PDF(s) could not be read (cloud placeholders?): bill no 1.pdf, stamp.pdf, ...`
+
+To make them readable, either pin the folder in File Explorer (right-click → Always keep on this device), or open the OneDrive client so it can fetch on demand. Files already on disk are unaffected.
+
+### Scanning a very large folder
+
+The walk is fully recursive with no depth limit, so pointing a root at a directory containing a `.venv`, `node_modules` or similar registers PDFs from inside it — correct, but slow over a bind mount. A root covering ~12,000 directories can take many minutes, and the request stays open the whole time. Prefer pointing roots at the folders that actually hold rolls.
+
+To run the tests:
+
+```bash
+# Linux / macOS
+docker compose run --rm -v "$PWD/tests:/code/tests:ro" web python -m pytest -q tests
+
+# Windows PowerShell
+docker compose run --rm -v "${PWD}/tests:/code/tests:ro" web python -m pytest -q tests
+```
 
 ## Current flow
 

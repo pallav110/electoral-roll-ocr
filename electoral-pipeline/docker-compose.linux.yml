@@ -1,0 +1,100 @@
+# Linux/Ubuntu deployment override.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d
+#
+# Compose MERGES these two files rather than replacing one with the other, so
+# every service, volume and healthcheck defined in docker-compose.yml still
+# applies. This file only changes what genuinely differs on a Linux host.
+# The Windows deployment is untouched and needs no override:
+#
+#   docker compose up -d
+#
+#
+# ---------------------------------------------------------------------------
+# WHY THE BASE FILE CANNOT BE USED AS-IS ON LINUX
+# ---------------------------------------------------------------------------
+# The base file mounts drives with the UNC form, "//c/Users:/host/c/Users".
+# That is Windows-only Compose syntax: Compose special-cases a leading double
+# slash as a Windows drive path. On Linux it is parsed as an ordinary relative
+# path, so the mount does not bind the drive -- it binds a directory that does
+# not exist. The container still starts and looks perfectly healthy while
+# /host/c is empty, which is the worst kind of failure: silent, and reported as
+# "0 PDFs found" rather than as an error.
+#
+# Linux has no drive letters, so the whole concept does not carry over. What
+# does carry over is the intent -- a folder typed in the UI should resolve to
+# real files wherever it lives -- and the way to get there is to mount the
+# host's filesystem root and let the typed path hang off it.
+#
+# NOTE ON MERGING. Compose APPENDS a service's `volumes` list rather than
+# replacing it, so the base file's Windows mounts ("//c/Users", "//d") are still
+# in the merged result. They are not harmless: on Linux Compose parses
+# "//c/Users" as an ordinary relative path, and Docker creates the missing
+# source directory instead of failing, so the bind appears to succeed while
+# /host/c stays empty. That dead mount is cancelled below with the same target
+# plus bind.create_host_path: false, which makes Compose drop it outright.
+# An empty target list is the documented way to remove an inherited mount.
+x-host-mounts: &host-mounts
+  - ./sample-pdfs:/data/pdfs
+  # Where PDFs from paths the container cannot read are copied so they become
+  # discoverable without a new mount. Must be present on all services that run
+  # discover (web, worker, beat).
+  - type: bind
+    source: ./ingest
+    target: /data/ingest
+
+  # The host root. This is what makes "any path" work for ANY absolute path,
+  # including the ones people actually use: /home, /mnt, /media, /srv.
+  #
+  # Read-only. Nothing in this pipeline writes to a scanned folder, so there is
+  # no reason to grant write access to the entire filesystem -- and a pipeline
+  # bug that deletes a voter's home directory is not a failure anyone wants to
+  # debug in production.
+  #
+  # Paths that are NOT under this mount (the container's own /data/pdfs,
+  # /data/ingest) keep working as before, because _resolve_scan_path passes
+  # already-resolved container paths straight through.
+  - type: bind
+    source: /
+    target: /host
+    read_only: true
+
+  # Cancels the two Windows drive mounts inherited from the base file. Compose
+  # has no "remove this entry" syntax, so re-declaring the same target with
+  # create_host_path: false is what drops it: without that flag Docker would
+  # happily create the missing source directory and the bind would appear to
+  # succeed while /host/c stayed empty.
+  - type: bind
+    source: //c/Users
+    target: /host/c/Users
+    bind:
+      create_host_path: false
+  - type: bind
+    source: //d
+    target: /host/d
+    bind:
+      create_host_path: false
+
+services:
+  web:
+    environment:
+      # Selects the "append the absolute path to the mount root" rewrite in
+      # app/workflow.py instead of the Windows drive-letter rule. This is set
+      # explicitly rather than detected: the containers are always Linux, so
+      # runtime detection would report "posix" on a Windows host and silently
+      # break the drive-letter mapping that host depends on.
+      - HOST_MOUNT_STYLE=posix
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+
+  worker:
+    environment:
+      - HOST_MOUNT_STYLE=posix
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+
+  beat:
+    environment:
+      - HOST_MOUNT_STYLE=posix
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts

@@ -48,6 +48,31 @@ class Document(Base):
     )
 
 
+class ScanRoot(Base):
+    """A folder the pipeline walks looking for PDFs.
+
+    Deliberately separate from `Document`. A document is a file that was
+    found; a scan root is a place to look. Keeping them apart means the same
+    PDF can be reached through more than one root without either table
+    having to model the other, and adding a root never rewrites history.
+
+    `path` is stored exactly as typed, and is resolved inside the container
+    that walks it -- not on the host and not at import time. See
+    app/workflow.py::discover for why that matters.
+    """
+    __tablename__ = "scan_roots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    label: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Set by the last discovery pass, so the UI can show what a root is
+    # actually finding rather than only what the user believes it holds.
+    last_found: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
+
+
 class ExtractionSession(Base):
     __tablename__ = "extraction_sessions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

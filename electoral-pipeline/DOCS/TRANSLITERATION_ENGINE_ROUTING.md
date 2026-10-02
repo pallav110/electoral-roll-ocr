@@ -7,7 +7,7 @@ real ground-truth OCR output.
 ## Measured
 
 | Engine | 346 strings | Notes |
-|---|---|---|
+| --- | --- | --- |
 | Rule-based (`sanscript` + phonetic cleanup) | 0.13 s | current production path |
 | IndicTrans2-200M, RTX 4060, batch 32, beams 5 | ~24 s | ~185x slower; accepted |
 
@@ -24,7 +24,7 @@ Under the IAST default all of it was dead code at once, and IAST's diacritics
 were then stripped, so the pair went missing in output:
 
 | Hindi | ITRANS | iast-plain (was) | Correct |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | शिव | shiva | `Siva` | Shiv |
 | चन्द्र | chandra | `Candra` | Chandra |
 | अर्चना | archanA | `Arcana` | Archana |
@@ -118,7 +118,7 @@ all three hold:
 ### Measured effect
 
 | | strings | |
-|---|---|---|
+| --- | --- | --- |
 | guard-passing name strings | 263 | |
 | agree with IndicTrans2 before the map | 145 (55%) | Layer 0 only |
 | agree with IndicTrans2 after the map | 166 (63%) | +21 |
@@ -149,10 +149,62 @@ The generator deliberately bypasses the lexicon when computing the Layer 0
 baseline. Without that, an entry already in the map makes its own comparison
 show no disagreement and the map would silently empty itself on the next run.
 
+## Layer 2: measured, and deliberately not built
+
+The proposed Layer 2 was **phonetic-key retrieval** — key every lexicon entry by
+a squashed form (doubled letters collapsed, `ee`/`ii` folded to `i`) so that an
+*unseen* spelling of a known name retrieves the known spelling. Exact match only
+helps a name the map has already seen verbatim; retrieval is supposed to help the
+collisions.
+
+Measured on the corpus, it retrieves nothing:
+
+| | |
+| --- | --- |
+| remaining guard-passing name disagreements | 97 strings, 120 occurrences |
+| already fixed by Layer 1 exact match | 21 (the map's own entries) |
+| **share a squashed phonetic key with a Layer 1 entry** | **0** |
+| differ from the rules only by vowel length | 2 |
+
+All 21 keys over the 21 entries are distinct, so there is nothing for a
+retrieval step to disambiguate. The premise — that unseen spellings of known
+names are the main remaining error — is false on this roll.
+
+The deeper problem is that the key cannot be built. Folding `ee`→`i` is
+**one-way**: `Sanjiv`→`sanjiv` but `Sanjeev`→`sanjev`, while `Bineesh`→`binish`
+and `Binesh`→`binesh` stay apart. The fold erases precisely the distinction it
+would need to detect, so any key built on it is blind to the long-vowel
+convention that motivates it.
+
+What the 97 actually are is model drift the guards let through, not spelling
+variants — and a spelling layer cannot repair a translation:
+
+| Hindi | rules | IndicTrans2 |
+| --- | --- | --- |
+| अभिलाषा | Abhilasha | "aspiration" |
+| अय्यूब | Ayyub | "Job" |
+| गिरी | Giri | "fell down" |
+| चरण | Charan | "phase" |
+| छवि | Chavi | "image" |
+
+The only systematic *spelling* disagreement left is the long-vowel convention
+(`Sanjiv`/`Sanjeev`, `Sandip`/`Sandeep`, `Nitu`/`Neetu`, `Niraj`/`Neeraj`,
+`Pradip`/`Pradeep`, `Gita`/`Geeta`) — 6 pairs at 1–5 occurrences each. That is a
+derivable convention, not a retrieval problem, so if it is ever worth encoding it
+belongs in Layer 0 as a rule keyed on ITRANS' long-`ii` marker, not in a
+retrieval layer.
+
+Guarded by `tests/test_scripts/test_squash.py`, which pins the key's ordering
+directly. That ordering was wrong for a while and nothing failed: the
+Levenshtein fallback in `looks_like_a_spelling` rescued all 21 entries anyway.
+The bug was therefore inert for Layer 1 — the committed map is byte-identical
+before and after the fix — but it would have silently broken any retrieval layer
+built on the same function.
+
 ## Routing
 
 | Field | Engine | Why |
-|---|---|---|
+| --- | --- | --- |
 | `relation_name` | **rule-based** | closed vocabulary; MT mistranslates labels |
 | `gender` | **rule-based** | closed vocabulary; MT mistranslates labels |
 | `house_no` | **rule-based** + `house_en()` | address convention is a 4-line rule; see below |
@@ -173,7 +225,7 @@ Against the guards it is rejected on 17% of name strings, and those rejections
 are not marginal:
 
 | Hindi | rules | IndicTrans2 | why rejected |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | चन्द्र | Chandra | "the moon" | meaning drift (10 occurrences) |
 | सीमा | Sima | "the limit of the limit…" ×15 | repetition, runaway |
 | उत्तम | Uttam | "the best of the best 。 。 。" | repetition, drift |
@@ -207,7 +259,7 @@ sound is E; a lone vowel before a numeral is a flat letter. It calls
 Measured on the corpus, both engines are wrong somewhere:
 
 | Input | Correct | Rule-based | IndicTrans2 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `इ-897` | E | `I-897` ✗ | `E-897` ✓ |
 | `47-ई-7` | E (address) / I (word) | `47-E-7` ✓ | `47-E-7` ✓ |
 | `15 ए` | E | `15 E` ✓ | `15 A` ✗ |

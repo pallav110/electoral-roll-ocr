@@ -1,0 +1,120 @@
+{% extends "base.html" %}{% block title %}Scan folders · Electoral Roll Processing{% endblock %}{% block content %}
+
+<div class="mb-8">
+  <h1 class="text-3xl font-bold text-gray-900 tracking-tight">Scan folders</h1>
+  <p class="text-gray-600 mt-1">Every PDF inside these folders is picked up, at any depth</p>
+</div>
+
+{% if request.query_params.get('found') %}
+  <div class="mb-6 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-green-800 text-sm">
+    Scan complete — {{ request.query_params.get('found') }} new PDF{{ '' if request.query_params.get('found') == '1' else 's' }} registered.
+  </div>
+{% endif %}
+
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-8">
+  <h2 class="text-lg font-semibold text-gray-900 mb-1">Add a folder</h2>
+  <p class="text-sm text-gray-600 mb-4">
+    Give a folder path and every PDF beneath it is discovered, however many
+    subfolders are in between.
+  </p>
+  <form method="post" action="/folders" class="flex flex-col gap-3">
+    <label class="flex flex-col gap-1">
+      <span class="text-sm font-medium text-gray-700">Folder path</span>
+      <input name="path" required placeholder="{{ path_placeholder }}" autofocus
+             class="px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+    </label>
+    <label class="flex flex-col gap-1 sm:max-w-sm">
+      <span class="text-sm font-medium text-gray-700">Label <span class="text-gray-400 font-normal">(optional)</span></span>
+      <input name="label" placeholder="Uttarakhand 2026 rolls"
+             class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+    </label>
+    <div>
+      <button type="submit" class="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors text-sm font-medium">Add folder</button>
+    </div>
+  </form>
+  <details class="mt-4 text-sm text-gray-600">
+    <summary class="cursor-pointer text-gray-700 font-medium">What paths can I use?</summary>
+    <div class="mt-3 space-y-1 bg-gray-50 rounded-lg p-4 font-mono text-xs">
+      {% if host_style == "posix" %}
+      <div><span class="text-green-700">/srv/rolls</span> &nbsp;&rarr;&nbsp; {{ host_prefix }}/srv/rolls</div>
+      <div><span class="text-green-700">/home/me/Desktop/xyz</span> &nbsp;&rarr;&nbsp; {{ host_prefix }}/home/me/Desktop/xyz</div>
+      <div><span class="text-green-700">/mnt/usb/rolls</span> &nbsp;&rarr;&nbsp; {{ host_prefix }}/mnt/usb/rolls</div>
+      <div class="pt-2 text-gray-500 font-sans">
+        Any absolute path on this machine works as typed &mdash; it is read from
+        <code>{{ host_prefix }}</code>, where the server's filesystem is mounted.
+        A bare name is taken as relative to the sample folder.
+      </div>
+      {% else %}
+      <div><span class="text-green-700">C:\Users\pallav\Rolls</span> &nbsp;&rarr;&nbsp; {{ host_prefix }}/c/Users/pallav/Rolls</div>
+      <div><span class="text-green-700">c:/Users/pallav/Rolls</span> &nbsp;&rarr;&nbsp; {{ host_prefix }}/c/Users/pallav/Rolls</div>
+      <div><span class="text-green-700">D:\rolls</span> &nbsp;&rarr;&nbsp; {{ host_prefix }}/d/rolls</div>
+      <div class="pt-2 text-gray-500 font-sans">
+        The host drives are mounted at <code>{{ host_prefix }}</code>, so a Windows
+        path works as typed. A leading slash means you are naming a container
+        path directly. A bare name is taken as relative to the sample folder.
+      </div>
+      {% endif %}
+    </div>
+  </details>
+</div>
+
+{% if roots %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Folder</th>
+          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Last scan</th>
+          <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">New PDFs</th>
+          <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-200">
+        {% for r in roots %}
+          <tr class="hover:bg-gray-50 transition-colors {% if not r.enabled %}opacity-50{% endif %}">
+            <td class="px-6 py-4">
+              <div class="font-mono text-sm text-gray-900 break-all">{{ r.path }}</div>
+              {% if r.label %}<div class="text-xs text-gray-500 mt-1">{{ r.label }}</div>{% endif %}
+              {% if not r.enabled %}
+                <span class="inline-flex items-center px-2 py-0.5 mt-2 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Paused</span>
+              {% endif %}
+              {% if r.last_error %}
+                <div class="text-xs text-red-600 mt-1">{{ r.last_error }}</div>
+              {% endif %}
+            </td>
+            <td class="px-6 py-4 text-sm text-gray-600">{{ time_ago(r.last_scanned_at) if r.last_scanned_at else 'Never' }}</td>
+            <td class="px-6 py-4 text-sm text-gray-900 text-right font-medium">{{ r.last_found }}</td>
+            <td class="px-6 py-4">
+              <div class="flex items-center justify-end gap-2">
+                <form method="post" action="/folders/{{ r.id }}/scan">
+                  <button type="submit" class="px-3 py-1.5 text-xs font-medium text-white bg-slate-800 rounded-md hover:bg-slate-700 transition-colors">Scan now</button>
+                </form>
+                <form method="post" action="/folders/{{ r.id }}/toggle">
+                  <button type="submit" class="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors">
+                    {{ 'Resume' if not r.enabled else 'Pause' }}
+                  </button>
+                </form>
+                <form method="post" action="/folders/{{ r.id }}/delete" onsubmit="return confirm('Remove this folder from the scan list? PDFs already discovered are kept.')">
+                  <button type="submit" class="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 rounded-md hover:bg-red-100 transition-colors">Remove</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8 text-center">
+  <p class="text-gray-600">No folders configured yet.</p>
+  <p class="text-sm text-gray-500 mt-1">
+    Until one is added, the pipeline scans
+    <code class="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded">sample-pdfs</code>
+    on its hourly schedule.
+  </p>
+</div>
+{% endif %}
+
+{% endblock %}

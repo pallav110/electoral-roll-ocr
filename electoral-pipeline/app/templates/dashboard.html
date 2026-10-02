@@ -5,14 +5,22 @@
     <h1 class="text-3xl font-bold text-gray-900 tracking-tight">Dashboard</h1>
     <p class="text-gray-600 mt-1">Monitor voter roll PDF processing status</p>
   </div>
-  <form method="post" action="/actions/discover">
-    <button type="submit" class="inline-flex items-center px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors font-medium text-sm shadow-sm">
+  <div class="flex flex-wrap items-center gap-3">
+    <a href="/folders" class="inline-flex items-center px-4 py-2 bg-white text-slate-800 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium text-sm shadow-sm">
       <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path>
       </svg>
-      Discover PDFs
-    </button>
-  </form>
+      Scan folders
+    </a>
+    <form method="post" action="/actions/discover">
+      <button type="submit" class="inline-flex items-center px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors font-medium text-sm shadow-sm">
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+        </svg>
+        Discover PDFs
+      </button>
+    </form>
+  </div>
 </div>
 
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">

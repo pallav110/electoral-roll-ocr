@@ -2,10 +2,13 @@
 import hashlib
 import logging
 import os
+import re
+import shutil
 import socket
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
 
 from pypdf import PdfReader
 from sqlalchemy import func, or_, select, update
@@ -14,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app import config
 from app.db import SessionLocal
 from app.extractor import ExtractionError, extract, validate_response
-from app.models import Document, ElectoralDocumentMetadata, ElectoralRecord, ExtractionSession, ExtractionUnit, ProcessingEvent, RawResponse, now
+from app.models import Document, ElectoralDocumentMetadata, ElectoralRecord, ExtractionSession, ExtractionUnit, ProcessingEvent, RawResponse, ScanRoot, now
 from app.normalize import map_metadata, map_record
 
 
@@ -31,22 +34,265 @@ def event(db, kind, document_id=None, session_id=None, unit_id=None, message=Non
     db.add(ProcessingEvent(document_id=document_id, session_id=session_id, extraction_unit_id=unit_id, service="pipeline", event_type=kind, message=message, details=details))
 
 
-def discover():
-    """Find PDFs by content hash. Same filename with changed bytes is a new document."""
-    log.info(f"[DISCOVER] Starting PDF discovery in {config.DOCUMENT_ROOT}")
-    print(f"[DISCOVER] Starting PDF discovery in {config.DOCUMENT_ROOT}")
-    
-    root = config.DOCUMENT_ROOT
-    root.mkdir(parents=True, exist_ok=True)
+def _resolve_scan_path(raw: str) -> PurePosixPath:
+    """Turn a folder path typed in the UI into one the container can open.
+
+    Returns a PurePosixPath on purpose, and never probes the filesystem.
+    Two reasons, both learned the hard way:
+
+    1. The process that walks this tree runs in a Linux container. Building
+       the result with pathlib.Path("/host/c") on a Windows host yields a
+       *WindowsPath*, which stringifies to backslashes -- so the path stored
+       in the database would be "\\host\\c\\..." and the Linux worker could
+       not open it. PurePosixPath is the same on both, so the value written
+       here is the value the worker will read, wherever the tests ran.
+
+    2. The Windows branch is pure string work. Path.is_absolute() on Linux
+       cannot tell "C:\\..." from a relative name, and on Windows the answer
+       depends on which drive is current. Rewriting first and asking about
+       the result is the only order that is correct in both places.
+
+    Accepted shapes on a Windows host (HOST_MOUNT_STYLE=drive):
+
+      "C:\\Users\\me\\Rolls"     -> /host/c/Users/me/Rolls
+      "c:/Users/me/Rolls"        -> /host/c/Users/me/Rolls
+      "/data/rolls"              -> /data/rolls   (already container-native)
+      "\\\\server\\share\\rolls"  -> left alone; a UNC path is not under a
+                                    drive mount and cannot be rewritten here
+
+    Accepted shapes on a Linux host (HOST_MOUNT_STYLE=posix):
+
+      "/srv/rolls"               -> /host/srv/rolls
+      "/home/me/Desktop/xyz"     -> /host/home/me/Desktop/xyz
+
+    A path that is ALREADY under the mount root is returned untouched, which is
+    what keeps this idempotent in both styles: saving a root and then typing the
+    resolved value back must not nest the prefix a second time.
+
+    The Windows drive letter becomes a *path segment* under the mount root, so
+    compose mounts C: at /host/c and a D: drive at /host/d. That mapping is why
+    the prefix is a directory rather than the mount itself: a fixed mount point
+    cannot represent more than one drive. Linux has no drive letters, so the
+    rule there is the uniform one -- append the absolute path to the mount root.
+    """
+    text = (raw or "").strip().strip('"')
+    if not text:
+        raise ValueError("empty path")
+
+    text = text.replace("\\", "/")
+
+    # A UNC path points at a share, not at a drive letter. There is no
+    # correct rewrite for it, so it is passed through and will fail with a
+    # clear "does not exist" rather than being silently turned into garbage.
+    if text.startswith("//"):
+        return PurePosixPath(text)
+
+    mount_root = PurePosixPath(config.HOST_MOUNT_ROOT)
+
+    # Already resolved -- the value the UI would show back after a save. Checked
+    # before the rewrite below in both styles, or a resolved root would gain a
+    # second copy of the prefix every time it was saved.
+    if text == mount_root.as_posix() or text.startswith(mount_root.as_posix() + "/"):
+        return PurePosixPath(text)
+
+    if config.HOST_MOUNT_STYLE == "posix":
+        # Linux. A path that is already container-internal must be left alone.
+        # Without this, "/data/pdfs" would be read as the HOST's /data/pdfs and
+        # the sample mount would silently become an empty directory -- the scan
+        # would report zero PDFs with no error anywhere.
+        if text.startswith("/"):
+            # Container-owned prefixes are the ones compose binds a named
+            # volume to. They are not host paths, so they are exempt.
+            container_roots = ("/data/pdfs", "/data/ingest", "/results")
+            if not any(text == c or text.startswith(c + "/") for c in container_roots):
+                return mount_root / text.lstrip("/")
+            return PurePosixPath(text)
+
+        # A drive letter on a Linux host. There is no drive to resolve, but the
+        # text is still a well-formed relative name, so it falls through to the
+        # fallback root below and reports a plain miss rather than producing a
+        # "/host/C:" segment that cannot exist.
+        return PurePosixPath(config.DOCUMENT_ROOT.as_posix()) / text
+
+    if text.startswith("/"):
+        return PurePosixPath(text)
+
+    if re.match(r"^[A-Za-z]:", text):
+        drive = text[0].lower()
+        rest = text[2:].lstrip("/")
+        return mount_root / drive / rest
+
+    # No drive and no leading slash: relative to the fallback root, which is
+    # what a bare "rolls" most likely means.
+    return PurePosixPath(config.DOCUMENT_ROOT.as_posix()) / text
+
+
+def discover(roots: list[str] | None = None) -> int:
+    """Find PDFs by content hash across every configured scan root.
+
+    Same filename with changed bytes is a new document, unchanged.
+
+    `roots` overrides the configured set for a one-off scan; the normal path
+    passes None and reads the scan_roots table, falling back to
+    config.DOCUMENT_ROOT only when no root has ever been configured. That
+    fallback is what keeps a fresh deployment working with no setup at all.
+
+    The walk is rglob, which is fully recursive to any depth -- a root with a
+    thousand folders under it is walked the same as a flat one. What is NOT
+    unbounded is the set of roots, and that is what this function now takes.
+
+    If a path is not already visible inside the container (not under any
+    bind mount), the PDFs are copied into the ingest folder so they become
+    discoverable without needing a new mount. This is what makes "any path"
+    work.
+    """
+    if roots is None:
+        with SessionLocal() as db:
+            rows = db.scalars(select(ScanRoot).where(ScanRoot.enabled.is_(True)).order_by(ScanRoot.id)).all()
+            roots = [r.path for r in rows]
+
+        if not roots:
+            log.info("[DISCOVER] No scan roots configured, falling back to %s", config.DOCUMENT_ROOT)
+            print(f"[DISCOVER] No scan roots configured, falling back to {config.DOCUMENT_ROOT}")
+            # Bootstrapping only. A configured root is never created for the
+            # user: if they typed a path that does not exist, that is a typo
+            # and silently making the directory would hide it behind a scan
+            # that finds nothing and reports success.
+            try:
+                config.DOCUMENT_ROOT.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                log.exception("[DISCOVER] Could not create fallback root %s", config.DOCUMENT_ROOT)
+            roots = [str(config.DOCUMENT_ROOT)]
+        else:
+            log.info("[DISCOVER] Scanning %d configured folder(s)", len(roots))
+            print(f"[DISCOVER] Scanning {len(roots)} configured folder(s)")
+
     found = 0
-    
+    for raw in roots:
+        try:
+            root = _resolve_scan_path(raw)
+        except ValueError:
+            log.warning("[DISCOVER] Ignoring blank scan root")
+            continue
+
+        # PurePosixPath carries no filesystem methods; Path is what actually
+        # walks. The conversion happens here, once, at the boundary between
+        # "a path string that is always POSIX" and "a path we touch the disk
+        # with" -- never inside the rewrite itself, which must stay testable
+        # on a host with no such mount.
+        root = Path(str(root))
+
+        if not root.exists() or not root.is_dir():
+            # The path the user typed isn't visible inside the container.
+            # Copy the PDFs into the ingest folder so they become discoverable.
+            # This is the "any path" feature: no mount required, just a copy.
+            message = f"folder not visible inside container: {root}"
+            log.info("[DISCOVER] %s — copying PDFs into ingest", message)
+            print(f"[DISCOVER] {raw!r}: not mounted; copying PDFs into ingest")
+            copied = _copy_pdfs_into_ingest(raw, root)
+            if copied:
+                # The copied files are now under INGEST_ROOT; scan that instead.
+                ingest_root = config.INGEST_ROOT / _safe_name(raw)
+                found += _discover_under(ingest_root, raw)
+                _record_scan_result(raw, copied, None)
+            else:
+                _record_scan_result(raw, 0, "no PDFs found to copy")
+            continue
+
+        found += _discover_under(root, raw)
+        # _discover_under already recorded this root's outcome, including any
+        # unreadable files. Recording it AGAIN here with no error message
+        # overwrote that warning with a clean result, which is why a folder of
+        # OneDrive placeholders still reported "found=0" with nothing wrong
+        # shown. Only the document count is folded into the running total.
+
+    log.info(f"[DISCOVER] Discovery complete, found {found} new documents")
+    print(f"[DISCOVER] Discovery complete, found {found} new documents")
+    return found
+
+
+def _safe_name(raw: str) -> str:
+    """Sanitize a raw path into a safe directory name for the ingest folder."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", raw.strip().strip('"')).strip("_")
+
+
+def _copy_pdfs_into_ingest(raw: str, resolved: Path) -> int:
+    """Copy every PDF under a host path into the container's ingest folder.
+
+    Returns the number of files copied. If the host path isn't readable at
+    all (e.g. a path that isn't mounted), returns 0 and logs why.
+    """
+    # The worker's view of the host filesystem is what we have via bind mounts.
+    # If the resolved path exists, use it directly. If not, we can't read it --
+    # the user typed a path that this deployment has no mount for.
+    host_path = resolved if resolved.exists() and resolved.is_dir() else None
+
+    if host_path is None:
+        # A container cannot copy a file it cannot see, so there is nothing
+        # to fall back to here: this is a genuine "no access", not a lookup we
+        # failed to do. The message names the path we actually looked for,
+        # because "drive not mounted" would be actively wrong on Linux, where
+        # the usual cause is a path that simply does not exist.
+        log.warning("[DISCOVER] Cannot reach host path %r (looked for %s)", raw, resolved)
+        print(
+            f"[DISCOVER] Cannot reach {raw!r} — looked for {resolved} inside the container "
+            f"and it is not there. Check the path exists and that it is covered by a mount "
+            f"in docker-compose.yml."
+        )
+        return 0
+
+    ingest_dir = config.INGEST_ROOT / _safe_name(raw)
+    ingest_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for pdf in host_path.rglob("*.pdf"):
+        try:
+            dest = ingest_dir / pdf.name
+            # If a file with the same name already exists, skip it — the
+            # content-hash check in _discover_under will deduplicate anyway.
+            if not dest.exists():
+                shutil.copy2(pdf, dest)
+                copied += 1
+        except OSError:
+            log.exception("[DISCOVER] Failed to copy %s", pdf)
+
+    log.info("[DISCOVER] Copied %d PDF(s) from %s into %s", copied, host_path, ingest_dir)
+    print(f"[DISCOVER] Copied {copied} PDF(s) from {host_path} into {ingest_dir}")
+    return copied
+
+
+def _record_scan_result(raw: str, count: int, error: str | None = None) -> None:
+    """Write back what a scan of this root actually found, so the UI shows
+    reality rather than what the user assumed. Best effort: a failure to
+    record must never abort the scan itself."""
+    try:
+        with SessionLocal.begin() as db:
+            root = db.scalar(select(ScanRoot).where(ScanRoot.path == raw))
+            if root is None:
+                return
+            root.last_found = count
+            root.last_scanned_at = now()
+            root.last_error = error
+    except Exception:
+        log.exception("[DISCOVER] Could not record scan result for %s", raw)
+
+
+def _discover_under(root: Path, label: str) -> int:
+    """Walk one resolved root and register every PDF beneath it.
+
+    Unreadable files are reported, not silently dropped. A file that cannot be
+    opened and a folder containing no PDFs both used to surface as "found=0",
+    which the UI renders identically to success.
+    """
+    log.info("[DISCOVER] Walking %s (from %r)", root, label)
+    print(f"[DISCOVER] Walking {root}")
+    found = 0
+    unreadable: list[str] = []
+
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() != ".pdf":
             continue
-        
-        log.debug(f"[DISCOVER] Processing file: {path.name}")
-        print(f"[DISCOVER] Processing file: {path.name}")
-        
+
         try:
             digest = hashlib.sha256()
             with path.open("rb") as stream:
@@ -55,10 +301,10 @@ def discover():
             stat = path.stat()
             values = dict(source_type="local", source_document_id=None, source_path=str(path.resolve()), file_name=path.name,
                           file_hash=digest.hexdigest(), file_size=stat.st_size, source_modified_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc), status="pending")
-            
-            log.info(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={digest.hexdigest()[:16]}...")
+
+            log.debug(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={digest.hexdigest()[:16]}...")
             print(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={digest.hexdigest()[:16]}...")
-            
+
             with SessionLocal.begin() as db:
                 result = db.execute(insert(Document).values(**values).on_conflict_do_nothing(index_elements=[Document.source_type, Document.file_hash], index_where=(Document.source_document_id.is_(None) & Document.file_hash.is_not(None))).returning(Document.id))
                 document_id = result.scalar_one_or_none()
@@ -66,16 +312,27 @@ def discover():
                     event(db, "DOCUMENT_DISCOVERED", document_id, message=path.name)
                     found += 1
                     log.info(f"[DISCOVER] New document registered: {document_id} for file {path.name}")
-                    print(f"[DISCOVER] New document registered: {document_id} for file {path.name}")
                 else:
-                    log.info(f"[DISCOVER] Document already exists for file {path.name}")
-                    print(f"[DISCOVER] Document already exists for file {path.name}")
-        except OSError:
-            log.exception("Could not discover %s", path)
-            print(f"[DISCOVER] ERROR: Could not discover {path}")
-    
-    log.info(f"[DISCOVER] Discovery complete, found {found} new documents")
-    print(f"[DISCOVER] Discovery complete, found {found} new documents")
+                    log.debug(f"[DISCOVER] Already registered: {path.name}")
+        except OSError as exc:
+            # Almost always a cloud placeholder -- OneDrive/Dropbox Files
+            # On-Demand reports Errno 5 on read through a bind mount, because
+            # the containerised filesystem driver cannot trigger the recall.
+            # The file is intact on the host; it is only unreachable from here.
+            unreadable.append(path.name)
+            log.warning("[DISCOVER] Could not read %s (%s)", path, exc.strerror or exc)
+            print(f"[DISCOVER] SKIP unreadable: {path}")
+
+    if unreadable:
+        _record_scan_result(
+            label,
+            found,
+            f"{len(unreadable)} PDF(s) could not be read (cloud placeholders?): "
+            + ", ".join(unreadable[:3])
+            + ("..." if len(unreadable) > 3 else ""),
+        )
+    else:
+        _record_scan_result(label, found)
     return found
 
 

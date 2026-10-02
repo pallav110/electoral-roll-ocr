@@ -1,6 +1,8 @@
 import logging
+import re
 import secrets
 import uuid
+from pathlib import Path
 from datetime import date, datetime, timezone
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
@@ -11,9 +13,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.extractor import mock_extract
-from app.models import Document, ElectoralRecord, ExtractionSession, ExtractionUnit, ProcessingEvent, RawResponse
+from app.models import Document, ElectoralRecord, ExtractionSession, ExtractionUnit, ProcessingEvent, RawResponse, ScanRoot
 from app.presentation import (
     describe_error,
     document_progress,
@@ -31,7 +33,7 @@ from app.presentation import (
     status_tone,
     time_ago,
 )
-from app.workflow import discover, dispatch_documents, retry_document, retry_unit
+from app.workflow import _resolve_scan_path, discover, dispatch_documents, retry_document, retry_unit
 from app.transliterate import gender_en
 
 
@@ -225,17 +227,111 @@ def unit_detail(request: Request, unit_id: str, db: Session = Depends(get_db)):
     return render(request, "unit.html", unit=unit, session=session, raw=raw, records=records, events=events)
 
 
+@app.get("/folders", response_class=HTMLResponse, dependencies=[Depends(admin)])
+def folders(request: Request, db: Session = Depends(get_db)):
+    """Manage the folders the pipeline walks looking for PDFs."""
+    roots = db.scalars(select(ScanRoot).order_by(ScanRoot.id)).all()
+    # The help text teaches whichever mapping this deployment actually uses. On
+    # Linux, "C:\..." is not merely unhelpful, it is wrong -- there are no drive
+    # letters to rewrite.
+    path_placeholder = (
+        "/srv/rolls" if config.HOST_MOUNT_STYLE == "posix" else r"C:\Users\pallav\Documents\Rolls"
+    )
+    return render(request, "folders.html", roots=roots,
+                  host_prefix=config.HOST_MOUNT_PREFIX,
+                  host_style=config.HOST_MOUNT_STYLE,
+                  path_placeholder=path_placeholder)
+
+
+@app.post("/folders", dependencies=[Depends(admin)])
+def folders_add(
+    request: Request,
+    path: str = Form(...),
+    label: str = Form(""),
+):
+    raw = (path or "").strip().strip('"')
+    if not raw:
+        raise HTTPException(400, "Folder path is required")
+
+    resolved = _resolve_scan_path(raw)
+
+    with SessionLocal.begin() as db:
+        existing = db.scalar(select(ScanRoot).where(ScanRoot.path == raw))
+        if existing:
+            # Re-adding is not an error and does not silently reset the root
+            # to disabled -- it is the natural thing to do after fixing a
+            # path, so it is made to work rather than refused.
+            existing.enabled = True
+            existing.last_error = None
+            log.info("[MAIN] Re-enabled existing scan root %s", raw)
+            return RedirectResponse("/folders", status_code=303)
+
+        db.add(ScanRoot(path=raw, label=(label or "").strip() or None, enabled=True))
+
+    log.info("[MAIN] Added scan root %r -> %s", raw, resolved)
+    return RedirectResponse("/folders", status_code=303)
+
+
+@app.post("/folders/{root_id}/delete", dependencies=[Depends(admin)])
+def folders_delete(root_id: int):
+    """Remove a scan root. Documents already discovered are NOT deleted --
+    they have their own records and their own status, and a folder no longer
+    being scanned does not un-discover a file that was legitimately read."""
+    with SessionLocal.begin() as db:
+        root = db.get(ScanRoot, root_id)
+        if not root:
+            raise HTTPException(404, "Scan root not found")
+        db.delete(root)
+
+    log.info("[MAIN] Deleted scan root %s", root_id)
+    return RedirectResponse("/folders", status_code=303)
+
+
+@app.post("/folders/{root_id}/toggle", dependencies=[Depends(admin)])
+def folders_toggle(root_id: int):
+    with SessionLocal.begin() as db:
+        root = db.get(ScanRoot, root_id)
+        if not root:
+            raise HTTPException(404, "Scan root not found")
+        root.enabled = not root.enabled
+
+    log.info("[MAIN] Toggled scan root %s", root_id)
+    return RedirectResponse("/folders", status_code=303)
+
+
+@app.post("/folders/{root_id}/scan", dependencies=[Depends(admin)])
+def folders_scan(root_id: int, db: Session = Depends(get_db)):
+    """Walk one root now, then dispatch whatever it turned up."""
+    root = db.get(ScanRoot, root_id)
+    if not root:
+        raise HTTPException(404, "Scan root not found")
+
+    # Release this session before scanning. The scan writes its result back
+    # through its own session (_record_scan_result), and that write blocks on
+    # this transaction's row lock for ScanRoot -- which is only released when
+    # this request ends. Holding it across the scan meant the result was
+    # silently discarded every time, so a folder of unreadable cloud
+    # placeholders reported "found=0" with no error recorded.
+    raw_path = root.path
+    db.expunge(root)
+    db.commit()
+
+    found = discover(roots=[raw_path])
+    dispatch_documents()
+    return RedirectResponse(f"/folders?found={found}", status_code=303)
+
+
 @app.post("/actions/discover", dependencies=[Depends(admin)])
 def discover_now():
     log.info(f"[MAIN] Manual discover action triggered")
     print(f"[MAIN] Manual discover action triggered")
-    
+
     discover()
     dispatch_documents()
-    
+
     log.info(f"[MAIN] Discover and dispatch completed, redirecting to documents")
     print(f"[MAIN] Discover and dispatch completed, redirecting to documents")
-    
+
     return RedirectResponse("/documents", status_code=303)
 
 
@@ -417,9 +513,16 @@ def export_csv(document_id: str, db: Session = Depends(get_db)):
             output.seek(0)
             output.truncate(0)
 
-    # Clean filename and ensure proper encoding
-    safe_filename = doc.file_name.replace('.pdf', '') + '_export.csv'
-    encoded_filename = quote(safe_filename)
+    # Clean filename and ensure proper encoding.
+    #
+    # quote() leaves "/" unescaped by default (safe="/"), so a slash in the
+    # source filename would truncate the Content-Disposition header at the
+    # first slash and hand the browser a name with no extension. The illegal
+    # characters are stripped first so the name survives a Windows browser too.
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", doc.file_name)
+    stem = Path(stem).stem.replace(".pdf", "") or "export"
+    safe_filename = f"{stem}_export.csv"
+    encoded_filename = quote(safe_filename, safe="")
     
     return StreamingResponse(
         generate_csv(),
