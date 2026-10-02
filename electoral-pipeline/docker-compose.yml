@@ -64,6 +64,7 @@ services:
     environment:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
     ports: ["127.0.0.1:${WEB_PORT:-8088}:8000"]
     volumes:
       - ./sample-pdfs:/data/pdfs
@@ -82,6 +83,7 @@ services:
     environment:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
     volumes:
       - ./sample-pdfs:/data/pdfs
     depends_on:
@@ -95,11 +97,13 @@ services:
     environment:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
     volumes:
       - ./sample-pdfs:/data/pdfs
     depends_on:
       init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
+      ocr: {condition: service_healthy}
 volumes:
   pgdata:
   redisdata:

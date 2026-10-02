@@ -152,7 +152,7 @@ def mock_extract(request: dict) -> dict:
             rows.append({
                 "source": {"page_number": page, "row_number": row},
                 "hindi": {"name": f"नमूना मतदाता {serial}", "relative_name": "नमूना अभिभावक", "house_number": str(serial), "gender": "पुरुष"},
-                "english": {"name": f"Sample Voter {serial}", "relative_name": "Sample Relative", "house_number": str(serial), "gender": "Male"},
+                "english": {"name": f"Sample Voter {serial}", "relative_name": "Sample Relative", "house_number": None, "gender": "Male"},
                 "common": {"serial_number": serial, "epic_number": f"MOCK{serial:07d}", "age": 25, "relationship_type": "father", "section_number": 1},
                 "confidence": 0.99,
             })
@@ -327,7 +327,7 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
                 "english": {
                     "name": None,
                     "relative_name": None,
-                    "house_number": record.get("house_no", ""),
+                    "house_number": None,
                     "gender": None,
                     "section_name": None,
                 },

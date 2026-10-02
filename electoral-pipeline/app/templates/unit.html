@@ -77,7 +77,10 @@
               <span class="lang-hi text-sm text-gray-900">{{ r.gender_hi or '—' }}</span>
               <span class="lang-en text-sm text-gray-900">{{ r.gender_en or '—' }}</span>
             </td>
-            <td class="px-4 py-3 text-sm text-gray-900 font-mono">{{ r.house_number_hi or r.house_number_en or '—' }}</td>
+            <td class="px-4 py-3 text-sm text-gray-900 font-mono">
+              <span class="lang-hi">{{ r.house_number_hi or '—' }}</span>
+              <span class="lang-en">{{ r.house_number_en or '—' }}</span>
+            </td>
             <td class="px-4 py-3">
               {% if r.is_valid %}
                 <span class="text-green-600 text-sm">Valid</span>

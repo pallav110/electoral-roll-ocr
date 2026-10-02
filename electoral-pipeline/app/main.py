@@ -319,6 +319,8 @@ def export_csv(document_id: str, db: Session = Depends(get_db)):
 
     def generate_csv():
         output = io.StringIO()
+        # Write UTF-8 BOM so Excel auto-detects encoding (Google Sheets doesn't need it)
+        output.write('﻿')
         writer = csv.writer(output)
 
         # Write header with all fields

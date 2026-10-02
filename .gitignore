@@ -1,5 +1,6 @@
 # Debug card crops from boundary/geometry inspection — regenerated on demand.
 debug_cards/
+.env
 
 # Python bytecode
 __pycache__/

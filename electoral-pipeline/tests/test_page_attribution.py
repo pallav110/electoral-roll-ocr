@@ -132,12 +132,15 @@ def test_page_outside_requested_range_is_clamped_not_fatal(fake_post, monkeypatc
     validate_response(out, 5, 5)  # must not raise
 
 
-def test_card_index_zero_is_not_treated_as_missing():
+def test_card_index_zero_is_not_treated_as_missing(tmp_path):
     """Regression: safe_int returned None for 0, discarding the first card.
 
     card_index 0 is the first card of every page, so this is not a rare edge
     case -- it silently mis-filed one record per page.
     """
+    pdf = tmp_path / "roll.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
     def _post(url, files, data, headers, timeout):
         return _Resp({
             "ok": True,
@@ -146,7 +149,7 @@ def test_card_index_zero_is_not_treated_as_missing():
         })
 
     with patch("app.extractor.httpx.post", _post):
-        out = extract("doc", "/dev/null", page_from=4, page_to=4)
+        out = extract("doc", str(pdf), page_from=4, page_to=4)
     assert [r["source"]["row_number"] for r in out["records"]] == [1, 2]
 
 

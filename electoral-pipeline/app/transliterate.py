@@ -117,36 +117,71 @@ STATIC_MAPPINGS = {
 }
 
 # 2. Structural address and system shorthand map (address components)
+# Keys are lowercase romanised forms (ITRANS output) that the cleaner matches.
+# ITRANS mapping reference:
+# Vowels: अ=a, आ=A, इ=i, ई=I, उ=u, ऊ=U, ए=e, ऐ=ai, ओ=o, औ=au
+# Consonants + inherent 'a': क=ka, ख=kha, ग=ga, घ=gha, च=cha, छ=Cha, ज=ja, झ=jha, ट=Ta, ठ=Tha, ड=Da, ढ=Dha, त=ta, थ=tha, द=da, ध=dha, न=na, प=pa, फ=pha, ब=ba, भ=bha, म=ma, य=ya, र=ra, ल=la, व=va, श=sha, ष=Sha, स=sa, ह=ha
+# Matras: ा=A, ि=i, ी=I, ु=u, ू=U, े=e, ै=ai, ो=o, ौ=au, ं=M, ः=H, ्=
 GLOBAL_STRUCTURAL_MAP = {
-    "kaloni": "Colony",
-    "colony": "Colony",
-    "na0": "No.",
-    "na": "No.",
-    "no": "No.",
-    "gali": "Gali",
-    "se": "to",
-    "b": "B",
-    "block": "Block",
-    "sector": "Sector",
-    "phase": "Phase",
-    "extn": "Extension",
-    "ext": "Extension",
-    "rd": "Road",
-    "rd.": "Road",
-    "st": "Street",
-    "st.": "Street",
-    "ave": "Avenue",
-    "ave.": "Avenue",
-    "mg": "MG",
-    "vs": "VS",
-    "dr": "Dr",
-    "dr.": "Dr",
-    "mr": "Mr",
-    "mr.": "Mr",
-    "mrs": "Mrs",
-    "mrs.": "Mrs",
-    "ms": "Ms",
-    "ms.": "Ms",
+    # Common address words - mapped from ITRANS output
+    "kaloni": "Colony",           # कॉलोनी -> kaoloni
+    "koloni": "Colony",           # कॉलोनी -> koloni (variant)
+    "plot": "Plot",               # प्लॉट -> plot
+    "plaota": "Plot",             # प्लॉट -> plaota (without diacritic)
+    "plata": "Plot",              # प्लॉट -> plata (after Mc stripping)
+    "makan": "House",             # मकान -> makan
+    "makaan": "House",            # मकान -> makaan
+    "sankhya": "No.",             # संख्या -> sankhya
+    "sankhyaa": "No.",            # संख्या -> sankhyaa
+    "khasra": "Khasra",           # खसरा -> khasra
+    "khasara": "Khasra",          # खसरा -> khasara
+    "kha": "Kha",                 # ख -> kha (khasra prefix)
+    "nam": "No.",                 # नं -> nam (न + ं)
+    "na": "No.",                  # न -> na
+    "no": "No.",                  # no
+    "n": "No.",                   # n
+    "gali": "Gali",               # गली -> gali
+    "se": "to",                   # से -> se
+    "b": "B",                     # ब -> b
+    "bi": "B",                    # बी -> bi
+    "block": "Block",             # ब्लॉक -> block
+    "blok": "Block",              # ब्लॉक -> blok
+    "sector": "Sector",           # सेक्टर -> sector
+    "phaze": "Phase",             # फेज -> phaze
+    "phez": "Phase",              # फेज -> phez
+    "extenshan": "Extension",     # एक्सटेंशन -> extenshan
+    "ext": "Extension",           # एक्सटेंशन -> ext
+    "rod": "Road",                # रोड -> rod
+    "strit": "Street",            # स्ट्रीट -> strit
+    "avenyu": "Avenue",           # एवेन्यू -> avenyu
+    "hno": "HNO",                 # एचएनओ -> hno
+    "echaenao": "HNO",            # एचएनО -> echaenao (with च)
+    "ehanao": "HNO",              # एहनО -> ehanao (with ह)
+    "echaano": "HNO",             # एचАNО -> echaano (Cyrillic А/О + Latin N)
+    "echa": "H",                  # एच -> echa (H)
+    "echaena": "HNO",             # एचएन -> echaena (HNO)
+    "echaenao146": "HNO 146",     # एचएनО146 -> echaenao146 (with digits)
+    "echaenao146": "HNO 146",     # duplicate entry for common OCR output
+    "ha": "H",                    # ह -> ha (H)
+    "hana": "HNO",                # हन -> hana (HNO)
+    "hano": "HNO",                # हनो -> hano (HNO)
+    "han": "HN",                  # हन -> han (HN)
+    "pno": "PNO",                 # पी. नं -> pno
+    "pi": "P",                    # पी -> pi
+    "p": "P",                     # प -> p
+    # Vowel normalization (choti ee/badi ee both -> i, choti u/badi u both -> u)
+    "ee": "i",                    # ई -> I -> i (lowercase)
+    "ii": "i",                    # ई variant
+    "oo": "u",                    # ऊ -> U -> u
+    "uu": "u",                    # ऊ variant
+    "ai": "ai",                   # ऐ -> ai
+    "au": "au",                   # औ -> au
+    "sha": "sha",                 # श -> sha
+    "sha_": "sha",                # ष -> Sha -> sha (lowercase)
+    "ksha": "ksha",               # क्ष -> ksha
+    "tra": "tra",                 # त्र -> tra
+    "gya": "gya",                 # ज्ञ -> gya
+    # Numbers and punctuation pass through unchanged
 }
 
 
@@ -192,29 +227,50 @@ def _final_roman_a_is_real(hindi_token: str) -> bool:
     return False                          # bare consonant -> inherent schwa
 
 
+# Split on common delimiters while preserving them for reconstruction
+_DELIMITER_RE = re.compile(r'([-/,.])')
+
+
+def _clean_segment(segment: str, keep_final_a: bool) -> str:
+    """Apply the phonetic clean-up to one romanised segment (no delimiters)."""
+    segment_lower = segment.lower()
+    if segment_lower in GLOBAL_STRUCTURAL_MAP:
+        return GLOBAL_STRUCTURAL_MAP[segment_lower]
+
+    # Step C: drop the inherent-schwa 'a' unless the script says it is real.
+    if segment_lower.endswith("a") and len(segment) > 4 and not keep_final_a:
+        segment = segment[:-1]
+
+    # Step D: standardise character pairs the algorithmic mapping produces.
+    segment = re.sub(r'amch', 'anch', segment, flags=re.IGNORECASE)  # Uttaramchal -> Uttaranchal
+    segment = re.sub(r'ee', 'i', segment, flags=re.IGNORECASE)
+    segment = re.sub(r'oo', 'u', segment, flags=re.IGNORECASE)
+    segment = re.sub(r'shh', 'sh', segment, flags=re.IGNORECASE)
+    segment = re.sub(r'rri', 'ri', segment, flags=re.IGNORECASE)
+    segment = re.sub(r'rru', 'ru', segment, flags=re.IGNORECASE)
+
+    return segment.strip().title()
+
+
 def _clean_word(word: str, keep_final_a: bool) -> str:
     """Apply the phonetic clean-up to one romanised token.
 
-    Step C is the only step that depends on the script, so the decision is
-    passed in rather than recomputed here.
+    Handles tokens with delimiters like 'bI-89' by splitting on
+    delimiters, cleaning each segment, and rejoining.
     """
-    word_lower = word.lower()
-    if word_lower in GLOBAL_STRUCTURAL_MAP:
-        return GLOBAL_STRUCTURAL_MAP[word_lower]
-
-    # Step C: drop the inherent-schwa 'a' unless the script says it is real.
-    if word_lower.endswith("a") and len(word) > 4 and not keep_final_a:
-        word = word[:-1]
-
-    # Step D: standardise character pairs the algorithmic mapping produces.
-    word = re.sub(r'amch', 'anch', word, flags=re.IGNORECASE)  # Uttaramchal -> Uttaranchal
-    word = re.sub(r'ee', 'i', word, flags=re.IGNORECASE)
-    word = re.sub(r'oo', 'u', word, flags=re.IGNORECASE)
-    word = re.sub(r'shh', 'sh', word, flags=re.IGNORECASE)
-    word = re.sub(r'rri', 'ri', word, flags=re.IGNORECASE)
-    word = re.sub(r'rru', 'ru', word, flags=re.IGNORECASE)
-
-    return word.strip().title()
+    # Split on delimiters, keeping them
+    parts = _DELIMITER_RE.split(word)
+    # parts will be like ['bI', '-', '89'] for 'bI-89'
+    cleaned_parts = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            # Even indices are the segments between delimiters
+            if part:
+                cleaned_parts.append(_clean_segment(part, keep_final_a))
+        else:
+            # Odd indices are the delimiters themselves
+            cleaned_parts.append(part)
+    return "".join(cleaned_parts)
 
 
 def clean_phonetic_rules(text: str, source_tokens=None) -> str:
@@ -282,11 +338,100 @@ def _load_sanscript():
     return _SANSCRIPT
 
 
+# Cyrillic → Devanagari normalization map for common OCR misreads
+_CYRILLIC_TO_DEVANAGARI = {
+    'А': 'अ',  # А -> अ
+    'Б': 'भ',  # Б -> भ (rough)
+    'В': 'व',  # В -> व
+    'Г': 'ग',  # Г -> ग
+    'Д': 'द',  # Д -> द
+    'Е': 'ए',  # Е -> ए
+    'Ж': 'झ',  # Ж -> झ
+    'З': 'ज',  # З -> ज
+    'И': 'इ',  # И -> इ
+    'Й': 'य',  # Й -> य
+    'К': 'क',  # К -> क
+    'Л': 'ल',  # Л -> ल
+    'М': 'म',  # М -> म
+    'Н': 'न',  # Н -> न
+    'О': 'ओ',  # О -> ओ
+    'П': 'प',  # П -> प
+    'Р': 'र',  # Р -> र
+    'С': 'स',  # С -> स
+    'Т': 'त',  # Т -> त
+    'У': 'उ',  # У -> उ
+    'Ф': 'फ',  # Ф -> फ
+    'Х': 'ह',  # Х -> ह
+    'Ц': 'थ',  # Ц -> थ
+    'Ч': 'च',  # Ч -> च
+    'Ш': 'ष',  # Ш -> ष
+    'Щ': 'श',  # Щ -> श
+    'Ъ': '्',  # Ъ -> ् (virama)
+    'Ы': 'ॏ',  # Ы -> ॉ (candra o)
+    'Ь': '्',  # Ь -> ् (virama)
+    'Э': 'ए',  # Э -> ए
+    'Ю': 'य',  # Ю -> य
+    'Я': 'य',  # Я -> य
+    # lowercase
+    'а': 'अ',  # а -> अ
+    'б': 'भ',  # б -> भ
+    'в': 'व',  # в -> व
+    'г': 'ग',  # г -> ग
+    'д': 'द',  # д -> द
+    'е': 'ए',  # е -> ए
+    'ж': 'झ',  # ж -> झ
+    'з': 'ज',  # з -> ज
+    'и': 'इ',  # и -> ин
+    'й': 'य',  # й -> य
+    'к': 'क',  # к -> क
+    'л': 'ल',  # л -> л
+    'м': 'म',  # м -> म
+    'н': 'न',  # н -> न
+    'о': 'ओ',  # о -> ओ
+    'п': 'प',  # п -> प
+    'р': 'र',  # р -> र
+    'с': 'स',  # с -> स
+    'т': 'त',  # т -> त
+    'у': 'उ',  # у -> у
+    'ф': 'फ',  # ф -> फ
+    'х': 'ह',  # х -> ह
+    'ц': 'थ',  # ц -> थ
+    'ч': 'च',  # ч -> च
+    'ш': 'ष',  # ш -> ष
+    'щ': 'श',  # щ -> श
+    'ъ': '्',  # ъ -> ्
+    'ы': 'ॏ',  # ы -> ॉ
+    'ь': '्',  # ь -> ्
+    'э': 'ए',  # э -> ए
+    'ю': 'य',  # ю -> य
+    'я': 'य',  # я -> य
+}
+
+_CYRILLIC_RE = re.compile(r'[Ѐ-ӿ]')
+
+
+def _normalize_cyrillic(text: str) -> str:
+    """Replace Cyrillic lookalikes with Devanagari equivalents.
+
+    OCR sometimes produces Cyrillic characters that visually resemble
+    Devanagari (e.g., U+041E 'О' vs U+0913 'ओ'). This normalizes them
+    so transliteration works correctly.
+    """
+    if not _CYRILLIC_RE.search(text):
+        return text
+    return "".join(_CYRILLIC_TO_DEVANAGARI.get(ch, ch) for ch in text)
+
+
 def _strip_marks(text: str) -> str:
-    """Drop combining marks so IAST becomes plain ASCII."""
+    """Drop combining marks (Mn + Mc) so IAST becomes plain ASCII.
+
+    ITRANS can emit Devanagari spacing marks (Mc, e.g., U+0949 CANDRA O)
+    which survive NFD + combining() filter. Remove both Mn and Mc.
+    """
     decomposed = unicodedata.normalize("NFD", text)
     return unicodedata.normalize("NFC", "".join(
-        ch for ch in decomposed if not unicodedata.combining(ch)
+        ch for ch in decomposed
+        if unicodedata.category(ch) not in ("Mn", "Mc")
     ))
 
 
@@ -305,6 +450,8 @@ def transliterate(text) -> str | None:
     value = str(text).strip()
     if not value:
         return None
+    # Normalize Cyrillic lookalikes that OCR sometimes produces
+    value = _normalize_cyrillic(value)
     # No Devanagari: already English (a house number, an EPIC, a Latin name
     # the OCR read directly). Pass through untouched — never transliterate a
     # number, and never "translate" "64" into something else.
@@ -338,6 +485,8 @@ def transliterate(text) -> str | None:
     # Apply phonetic cleaning rules. The Devanagari tokens go with the
     # romanised ones so the trailing-'a' decision can be made from the
     # script, where it is still unambiguous.
+    import sys
+    print(f"DEBUG transliterate: value={value!r}, tokens={tokens!r}, out={out!r}", file=sys.stderr)
     out = clean_phonetic_rules(out, source_tokens=tokens)
 
     return " ".join(out.split()) or None
