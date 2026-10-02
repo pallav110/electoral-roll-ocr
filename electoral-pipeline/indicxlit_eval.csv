@@ -1,0 +1,25 @@
+﻿field,occurrences,hindi,rule_based,indicxlit,digits_ok,semantic_drift
+house_no,1,15 ए,15 E,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],False,False
+house_no,1,47-ई-7,47-I-7,a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S]a[S],False,False
+house_no,3,7 बी,7 B,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],False,False
+house_no,1,8इ-526,8I-526,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],False,False
+voter_husband_first_name,3,अंकुर,Amkur,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_first_name,1,अक्षय,Aksay,[SH][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S,True,False
+voter_father_first_name,3,अक्षरपी,Aksarapi,[SE][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S,True,False
+voter_husband_first_name,2,अजय,Ajay,[LA][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L,True,False
+voter_first_name,1,अनिल,Anil,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_first_name,1,अनीता,Anita,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+relation_name,2,अन्य,Anya,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_father_first_name,1,अफजलाल,Aphajalal,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_first_name,1,अभिलाषा,Abhilasa,[LA][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L,True,False
+voter_first_name,1,अमन,Aman,][[S]][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_husband_first_name,1,अमरेश,Amares,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_husband_first_name,1,अमलेशवर,Amalesavar,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_first_name,2,अमित,Amit,[A]]][S]][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_father_first_name,1,अय्यूब,Ayyub,[LA][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L][L,True,False
+voter_first_name,1,अरवाज,Aravaj,[LA]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a]a[a],True,False
+voter_first_name,1,अरविन्द,Aravinda,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_first_name,1,अर्जुन,Arjun,[S]”””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””””,True,False
+voter_sur_name,3,अली,Ali,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_first_name,1,अविनाश,Avinas,[S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S][S],True,False
+voter_first_name,2,अशोक,Asok,][a]]][a]][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a,True,False

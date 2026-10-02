@@ -180,7 +180,14 @@ GLOBAL_STRUCTURAL_MAP = {
     "sha_": "sha",                # ष -> Sha -> sha (lowercase)
     "ksha": "ksha",               # क्ष -> ksha
     "tra": "tra",                 # त्र -> tra
-    "gya": "gya",                 # ज्ञ -> gya
+    # This library does not spell ज्ञ as "gya". It marks the rare nasal ञ
+    # (U+091E) that ज्ञ is built from with a literal '~' -- "j~na" -- which
+    # _strip_marks then removes, so the key reaching the map is "jna". The old
+    # "gya" key therefore never matched anything. Keys are the post-strip form.
+    "jn": "Gyan",                 # ज्ञ
+    "jna": "Gyan",                # ज्ञ -> jna (schwa dropped)
+    "jnа": "Gyan",                # ज्ञ, Cyrillic-final variant seen in OCR
+    "gya": "Gyan",                # ज्ञ -> gya (older/alternate spelling)
     # Numbers and punctuation pass through unchanged
 }
 
@@ -249,6 +256,15 @@ def _clean_segment(segment: str, keep_final_a: bool) -> str:
     segment = re.sub(r'rri', 'ri', segment, flags=re.IGNORECASE)
     segment = re.sub(r'rru', 'ru', segment, flags=re.IGNORECASE)
 
+    # ज्ञ is a single conjunct (ज् + ञ) that English always spells "gy"/"gy"-
+    # vowel. This library does not transliterate it that way: it marks the rare
+    # nasal ञ with a literal '~', which _strip_marks removes, leaving "jn" --
+    # so ज्ञान reached output as "Jnan". A map entry can only fix the whole word
+    # it names, and every compound of ज्ञ is a different string; the conjunct is
+    # the actual unit, so it is fixed here alongside the other digraph folds.
+    segment = re.sub(r'jn(?=[aeiou])', 'gy', segment, flags=re.IGNORECASE)
+    segment = re.sub(r'^jn', 'gy', segment, flags=re.IGNORECASE)
+
     return segment.strip().title()
 
 
@@ -314,9 +330,26 @@ def clean_phonetic_rules(text: str, source_tokens=None) -> str:
 
 
 def _scheme() -> tuple[str, bool]:
+    """The romanisation scheme to transliterate with.
+
+    Defaults to ITRANS because the whole cleanup layer is keyed on ITRANS:
+    GLOBAL_STRUCTURAL_MAP is documented as "keys are lowercase romanised forms
+    (ITRANS output)", and _clean_segment's digraph folds (shh->sh, rri->ri,
+    amch->anch) only fire on ITRANS spellings. Running the IAST default
+    disabled all of it at once -- every one of those rules silently became a
+    no-op, so ITRANS digraphs degraded to single letters:
+
+        ITRANS  iast-plain  output       ITRANS   iast-plain
+        shiva   siva       Siva/Shiv     kShetra  ksetra     Kshetra/Ksetra
+        chandra candra     Candra/Chandra akShaya  aksaya     Akshay/Aksay
+
+    The IAST forms are not more correct -- they are the *diacritic-stripped*
+    IAST forms, and it is the stripping that costs the 'sh'. IAST only wins
+    where ITRANS emits a non-combining escape (see _UDATTA_RE below).
+    """
     return SCHEMES.get(
-        os.getenv("TRANSLITERATION_SCHEME", "iast-plain").strip().lower(),
-        SCHEMES["iast-plain"],
+        os.getenv("TRANSLITERATION_SCHEME", "itrans").strip().lower(),
+        SCHEMES["itrans"],
     )
 
 
@@ -409,6 +442,26 @@ _CYRILLIC_TO_DEVANAGARI = {
 
 _CYRILLIC_RE = re.compile(r'[Ѐ-ӿ]')
 
+# The udatta/anudatta stress signs (U+0951/U+0952) are almost always an OCR
+# misread of the anusvara in "nँ" -- "नं" in a house number like "हाऊस नं - 121".
+# ITRANS renders them as the literal two-character sequences "\'" and "\_",
+# which are not Unicode combining marks, so _strip_marks cannot remove them:
+# the address came out as "Haus Na\' - 121". IAST happens to emit a real
+# combining mark there, which is why this only appears under ITRANS.
+# Normalising the input fixes it for every scheme and keeps the escape out of
+# the cleanup layer entirely.
+_STRESS_TO_ANUSVARA = {
+    chr(0x0951): chr(0x0902),  # ॑ udatta  -> ं anusvara
+    chr(0x0952): chr(0x0902),  # ॒ anudatta -> ं anusvara
+}
+_STRESS_RE = re.compile(f"[{''.join(_STRESS_TO_ANUSVARA)}]")
+
+
+def _normalize_stress_marks(text: str) -> str:
+    if not _STRESS_RE.search(text):
+        return text
+    return "".join(_STRESS_TO_ANUSVARA.get(ch, ch) for ch in text)
+
 
 def _normalize_cyrillic(text: str) -> str:
     """Replace Cyrillic lookalikes with Devanagari equivalents.
@@ -423,16 +476,23 @@ def _normalize_cyrillic(text: str) -> str:
 
 
 def _strip_marks(text: str) -> str:
-    """Drop combining marks (Mn + Mc) so IAST becomes plain ASCII.
+    """Drop combining marks (Mn + Mc) so the romanisation becomes plain ASCII.
 
     ITRANS can emit Devanagari spacing marks (Mc, e.g., U+0949 CANDRA O)
     which survive NFD + combining() filter. Remove both Mn and Mc.
+
+    ITRANS also marks two rare letters with a literal '~' rather than a
+    combining sign: ङ (U+0919) and ञ (U+091E). ज्ञ is built from the second, so
+    the library writes it "j~n" and it reached English output as "J~Nan".
+    The tilde is a marker, never a letter, so it is removed here -- once, for
+    every word -- instead of needing a GLOBAL_STRUCTURAL_MAP entry per word.
     """
     decomposed = unicodedata.normalize("NFD", text)
-    return unicodedata.normalize("NFC", "".join(
+    stripped = unicodedata.normalize("NFC", "".join(
         ch for ch in decomposed
         if unicodedata.category(ch) not in ("Mn", "Mc")
     ))
+    return stripped.replace("~", "") if "~" in stripped else stripped
 
 
 def transliterate(text) -> str | None:
@@ -452,6 +512,9 @@ def transliterate(text) -> str | None:
         return None
     # Normalize Cyrillic lookalikes that OCR sometimes produces
     value = _normalize_cyrillic(value)
+    # Same for the udatta/anudatta stress signs, which ITRANS writes as literal
+    # backslash escapes rather than combining marks.
+    value = _normalize_stress_marks(value)
     # No Devanagari: already English (a house number, an EPIC, a Latin name
     # the OCR read directly). Pass through untouched — never transliterate a
     # number, and never "translate" "64" into something else.
@@ -485,8 +548,6 @@ def transliterate(text) -> str | None:
     # Apply phonetic cleaning rules. The Devanagari tokens go with the
     # romanised ones so the trailing-'a' decision can be made from the
     # script, where it is still unambiguous.
-    import sys
-    print(f"DEBUG transliterate: value={value!r}, tokens={tokens!r}, out={out!r}", file=sys.stderr)
     out = clean_phonetic_rules(out, source_tokens=tokens)
 
     return " ".join(out.split()) or None
@@ -508,6 +569,40 @@ def gender_en(text) -> str | None:
 
 def relation_en(text) -> str | None:
     return transliterate_vocab(text, STATIC_MAPPINGS)
+
+
+def house_en(text) -> str | None:
+    """Devanagari house/flat number -> Latin, as an address label.
+
+    Two differences from transliterate():
+
+    1. The long 'ee' (ई, ी) is /i:/ -- the "ee" in *see*. The English letter
+       whose name is that sound is E, not I. transliterate() maps it to i,
+       which is right inside a name (सीता -> Sita) and wrong for a label
+       (47-ई-7 is flat 47-E-7).
+
+    2. A lone vowel before a numeral is a flat letter: इ-897 is flat E-897.
+       ITRANS has no notion of that convention and yields i-897.
+    """
+    if text is None:
+        return None
+    value = str(text).strip()
+    if not value:
+        return None
+
+    out = transliterate(value)
+    if not out:
+        return out
+
+    # The long ee names the letter E rather than the vowel i. Only in the
+    # token that carries the numeral -- "Plot No. 279" must not become
+    # "PlEot No. 279", and a vowel inside a word (Kha) must be left alone.
+    out = re.sub(
+        r"(?<![A-Za-z])([iI])(?=\s*[-–/,.]?\s*\d)",
+        "E",
+        out,
+    )
+    return out
 
 
 def source_hash(*parts) -> str:

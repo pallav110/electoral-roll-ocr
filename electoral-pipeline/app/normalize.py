@@ -5,7 +5,7 @@ import logging
 from datetime import date
 
 from app.models import ElectoralDocumentMetadata, ElectoralRecord
-from app.transliterate import gender_en, relation_en, source_hash, transliterate, translate_for_field
+from app.transliterate import gender_en, house_en as house_number_en, relation_en, source_hash, transliterate, translate_for_field
 
 
 log = logging.getLogger(__name__)
@@ -225,7 +225,7 @@ def map_record(item: dict, document_id, session_id, unit_id):
     # House numbers may be pure digits (pass through unchanged) or mixed
     # Devanagari/Latin like "7 बी" → "7 bi" / "8इ-526" → "8i-526".
     # Transliterate handles both: digits/punctuation stay, Devanagari converts.
-    house_en = transliterate(house_hi)
+    house_en = house_number_en(house_hi)
     gender_en_value = gender_en(gender_hi)
     relationship_type = _relation_type_en(_text(common.get("relationship_type")))
 

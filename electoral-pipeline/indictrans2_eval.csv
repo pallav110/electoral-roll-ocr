@@ -1,0 +1,347 @@
+﻿field,occurrences,hindi,rule_based,indictrans2,digits_ok
+house_no,1,15 ए,15 E,15A,True
+house_no,1,47-ई-7,47-I-7,47-E-7,True
+house_no,3,7 बी,7 B,7B,True
+house_no,1,8इ-526,8I-526,8E-526,True
+voter_husband_first_name,3,अंकुर,Amkur,shoots,True
+voter_first_name,1,अक्षय,Aksay,Akshay,True
+voter_father_first_name,3,अक्षरपी,Aksarapi,alphabetic,True
+voter_husband_first_name,2,अजय,Ajay,Ajay,True
+voter_first_name,1,अनिल,Anil,Anil,True
+voter_first_name,1,अनीता,Anita,Anita,True
+relation_name,2,अन्य,Anya,Other,True
+voter_father_first_name,1,अफजलाल,Aphajalal,Afzalal,True
+voter_first_name,1,अभिलाषा,Abhilasa,aspiration,True
+voter_first_name,1,अमन,Aman,Aman,True
+voter_husband_first_name,1,अमरेश,Amares,Amresh,True
+voter_husband_first_name,1,अमलेशवर,Amalesavar,Amaleshwar,True
+voter_first_name,2,अमित,Amit,Amit,True
+voter_father_first_name,1,अय्यूब,Ayyub,Job,True
+voter_first_name,1,अरवाज,Aravaj,aravaaz,True
+voter_first_name,1,अरविन्द,Aravinda,Arvind,True
+voter_first_name,1,अर्जुन,Arjun,Arjuna,True
+voter_sur_name,3,अली,Ali,Ali,True
+voter_first_name,1,अविनाश,Avinas,Avinash,True
+voter_first_name,2,अशोक,Asok,Ashok,True
+voter_first_name,1,आकाश,Akas,the sky,True
+voter_first_name,2,आनन्द,Ananda,joy,True
+voter_first_name,2,आफिफ,Aphiph,Afif,True
+voter_first_name,1,आरती,Arati,Aarti,True
+voter_first_name,5,आराम,Aram,Relax,True
+voter_father_first_name,1,आलोक,Alok,the light,True
+voter_first_name,1,आशिका,Asika,Ashika,True
+voter_husband_first_name,4,आशीष,Asis,Blessings,True
+voter_first_name,1,आशु,Asu,Ashu,True
+house_no,1,इ-1/75,I-1/75,E-1 / 75,True
+house_no,1,इ-10/602,I-10/602,E-10 / 602,True
+house_no,1,इ-481,I-481,E-481,True
+house_no,2,"इ-8,496","I-8,496","E-8, 496",True
+house_no,1,इ-85,I-85,E-85,True
+house_no,1,इ-857 गली न॑.8,I-857 Gali No..8,E-857 Street No.8,True
+house_no,1,इ-889,I-889,E-889,True
+house_no,1,इ-897,I-897,E-897,True
+house_no,1,इ-9/827,I-9/827,E-9 / 827,True
+voter_first_name,1,इन्द्रपाल,Indrapal,Indrapal,True
+voter_father_first_name,2,ईंद्र,Imdra,Indra,True
+voter_father_first_name,2,ईश्वर,Isvar,God,True
+voter_first_name,1,उत्तम,Uttam,the best of the best 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。 。,True
+anubhag_name,248,उत्तरांचल कालोनी गली न0 8 से 9,Uttaramcal Colony Gali Na0 8 to 9,Uttaranchal Colony Gali No.8 to 9,False
+voter_father_first_name,2,उदय,Uday,Rise,True
+voter_father_first_name,1,उमा,Uma,Uma,True
+voter_first_name,2,उमेश,Umes,Umesh,True
+voter_first_name,2,उर्मिला,Urmila,Urmila,True
+voter_first_name,1,ऊषा,Usa,Usha,True
+voter_first_name,1,ऋषिपाल,Rsipal,Rishipal,True
+house_no,1,ए-73,E-73,A-73,True
+house_no,1,एचएनओ 146,Ecaenao 146,HNO 146,True
+voter_husband_first_name,1,ओमकार,Omakar,Omkar,True
+voter_first_name,1,ओमपाल,Omapal,Ompal,True
+voter_first_name,3,ओमवीर,Omavir,Omvir,True
+voter_sur_name,2,कटियार,Katiyar,Katiyar,True
+voter_first_name,5,कमल,Kamal,lotus,True
+voter_first_name,1,कमला,Kamala,Kamala,True
+voter_first_name,1,कमलेश,Kamales,Kamlesh,True
+voter_husband_first_name,4,करण,Karan,Karan,True
+voter_first_name,1,कल्पना,Kalpana,imagination,True
+voter_first_name,1,काजल,Kajal,Kajal,True
+voter_first_name,1,कान्ता,Kanta,Kanta,True
+voter_father_first_name,1,काली,Kali,black,True
+voter_first_name,2,काशी,Kasi,Kashi,True
+voter_husband_first_name,1,काशीराम,Kasiram,Kashiram,True
+voter_father_first_name,2,किशन,Kisan,Kishan,True
+voter_husband_first_name,1,किशनपाल,Kisanapal,Kishanpal,True
+voter_husband_last_name,47,कुमार,Kumar,Kumar,True
+voter_sur_name,3,कुमारी,Kumari,Kumari,True
+voter_other_first_name,1,कुवरपाल,Kuvarapal,Kuwarpal,True
+voter_first_name,2,कुसुम,Kusum,Kusum,True
+voter_first_name,2,कृपाल,Krpal,Kripal,True
+voter_father_first_name,2,कृष्ण,Krsna,Kr ̣ s ̣ n ̣ a,True
+voter_husband_first_name,2,कृष्णपाल,Krsnapal,Krishnapal,True
+voter_first_name,1,कृष्णा,Krsna,Kr ̣ s ̣ n ̣ a,True
+voter_father_first_name,4,कैलाश,Kailas,Kailash,True
+voter_first_name,1,कैलासी,Kailasi,Kailasi,True
+voter_father_first_name,1,खातेराम,Khateram,khateram,True
+voter_father_last_name,2,खान,Khan,Khan,True
+voter_father_first_name,1,गंगाशरण,Gamgasaran,Gangasharan,True
+voter_father_first_name,1,गंगू,Gamgu,Gangu,True
+voter_father_first_name,1,गरीब,Garib,the poor,True
+voter_sur_name,6,गर्ग,Garga,Garg,True
+voter_father_last_name,1,गिरी,Giri,fell down,True
+voter_first_name,1,गीता,Gita,Geeta,True
+voter_first_name,1,गुड्डी,Guddi,Guddi,True
+voter_father_first_name,3,गुपड़,Gupar,secret,True
+voter_first_name,1,घनश्याम,Ghanasyam,Ghanshyam,True
+voter_first_name,1,चंद,Camd,Chand,True
+voter_father_middle_name,1,चंदा,Camda,Donation,True
+voter_father_last_name,2,चन्द,Canda,Chand,True
+voter_father_first_name,1,चन्दर,Candar,Chander,True
+voter_mother_first_name,10,चन्द्र,Candra,the moon,True
+voter_husband_first_name,3,चन्द्रभान,Candrabhan,Chandrabhan,True
+voter_husband_first_name,1,चन्द्रवीर,Candravir,Chandravir,True
+voter_first_name,3,चमन,Caman,Chaman,True
+voter_father_last_name,1,चरण,Caran,Phase,True
+voter_husband_first_name,1,चौखे,Caukhe,squares,True
+voter_first_name,1,चौखेराम,Caukheram,Chowkheram,True
+voter_father_first_name,1,चौधरी,Caudhari,Chaudhary,True
+voter_father_first_name,1,चौधुराम,Caudhuram,chaudhuram,True
+voter_father_last_name,1,चौहान,Cauhan,Chauhan,True
+voter_first_name,1,छमा,Chama,Shama,True
+voter_first_name,1,छवि,Chavi,Image,True
+voter_father_first_name,1,छोटेलाल,Chotelal,Chhotelal,True
+voter_father_first_name,1,जग,Jaga,The World,True
+voter_father_first_name,1,जगत,Jagat,The World,True
+voter_father_first_name,2,जगदीश,Jagadis,Jagdish,True
+voter_father_first_name,1,जगवीर,Jagavir,Jagveer,True
+voter_first_name,2,जितेन्द्र,Jitendra,Jitendra,True
+voter_father_first_name,1,जीवाराम,Jivaram,Jivaram,True
+voter_first_name,1,जुबैर,Jubair,Zubair,True
+voter_father_first_name,1,जुल्फिकार,Julphikar,Zulfikar,True
+voter_sur_name,2,जैन,Jain,Jain,True
+voter_sur_name,2,जोशी,Josi,Joshi,True
+voter_first_name,2,ज्ञान,Jnan,Knowledge,True
+voter_father_first_name,1,ज्योति,Jyoti,the light,True
+voter_first_name,1,टीनेश,Tines,Teenage,True
+voter_other_last_name,1,ट्ट,Tta,t,True
+voter_first_name,1,डोली,Doli,Dolly,True
+voter_sur_name,1,तकी,Taki,Taqi,True
+voter_father_first_name,1,ताहर,Tahar,Tahr,True
+voter_father_first_name,2,तीरपाल,Tirapal,archer,True
+voter_first_name,1,तुषार,Tusar,Tushar,True
+voter_father_first_name,1,तेज,Teja,fast,True
+voter_first_name,2,तेजपाल,Tejapal,Tejpal,True
+voter_sur_name,2,तोमर,Tomar,Tomar,True
+voter_father_last_name,6,त्यागी,Tyagi,Tyagi,True
+voter_father_middle_name,2,दत्त,Datta,Dutt,True
+voter_first_name,1,दयावती,Dayavati,Compassionate,True
+voter_father_first_name,1,दाताराम,Dataram,Dataram,True
+voter_father_last_name,1,दास,Dasa,slave,True
+voter_first_name,1,दिनेश,Dines,Dinesh,True
+voter_first_name,1,दीपक,Dipak,lamp,True
+voter_first_name,1,दुर्ग,Durga,Fort,True
+voter_sur_name,26,देवी,Devi,Devi,True
+voter_father_first_name,1,देवेंद्र,Devemdra,Devendra,True
+voter_first_name,1,देवेन्द्र,Devendra,Devendra,True
+voter_husband_first_name,1,देश,Desa,Country,True
+voter_first_name,1,धनपति,Dhanapati,Wealthy,True
+voter_husband_first_name,2,धर्मेंद्र,Dharmemdra,Dharmendra,True
+voter_first_name,1,नमन,Naman,Salute,True
+voter_husband_first_name,2,नरेन्द्र,Narendra,Narendra,True
+voter_father_first_name,1,नविष,Navis,Venom,True
+voter_sur_name,9,नहाल,Nahal,Nahal,True
+voter_father_last_name,3,नारायण,Narayan,Narayan,True
+voter_husband_first_name,1,नितिन,Nitin,Nitin,True
+voter_first_name,1,निर्मल,Nirmal,Nirmal,True
+voter_first_name,1,निविता,Nivita,Nivita,True
+voter_first_name,3,नीतू,Nitu,Neetu,True
+voter_first_name,2,नीरज,Niraj,Neeraj,True
+voter_first_name,1,नीलम,Nilam,sapphire,True
+voter_first_name,1,नीलोफर,Nilophar,Niloufer,True
+voter_first_name,1,नेहा,Neha,Neha,True
+voter_first_name,1,पखराज,Pakharaj,Pakhraj,True
+relation_name,85,पति,Pati,husband,True
+voter_sur_name,1,पनवार,Panavar,Panwar,True
+voter_first_name,1,परमजीत,Paramajit,Paramjit,True
+voter_first_name,1,पवन,Pavan,wind,True
+voter_sur_name,2,पवार,Pavar,Pawar,True
+voter_sur_name,2,पाण्डेय,Pandey,Pandey,True
+voter_father_last_name,10,पाल,Pala,Pal,True
+relation_name,129,पिता,Pita,Father,True
+house_no,1,"पी. नं-बी 190, ख नं-701","P. No.-B 190, Kha No.-701",P. No.190B.B.No.701,True
+voter_father_first_name,1,पुत्तु,Puttu,Puttu,True
+gender,118,पुरुष,Purus,the men's,True
+voter_first_name,1,पुष्पा,Puspa,Pushpa,True
+voter_first_name,1,पूजा,Puja,Puja,True
+voter_first_name,3,पूनम,Punam,Poonam,True
+voter_father_first_name,1,पूरन,Puran,Puran,True
+voter_father_middle_name,1,प्रकाश,Prakas,Light,True
+voter_first_name,3,प्रदीप,Pradip,Pradeep,True
+voter_first_name,1,प्रभा,Prabha,Prabha,True
+voter_first_name,1,प्रभांशु,Prabhamsu,Prabhanshu,True
+voter_first_name,1,प्रमिला,Pramila,Pramila,True
+voter_husband_first_name,3,प्रमोद,Pramod,Pramod,True
+voter_first_name,1,प्रवेश,Praves,Entry,True
+voter_father_middle_name,4,प्रसाद,Prasad,Prasad,True
+voter_first_name,1,प्रसून,Prasun,Prasoon,True
+voter_first_name,2,प्रियंका,Priyamka,Priyanka,True
+voter_father_first_name,2,प्रीतम,Pritam,Pritam,True
+voter_first_name,1,प्रीति,Priti,Love,True
+voter_first_name,1,प्रेमवती,Premavati,Premvati,True
+house_no,1,प्लॉट नं 279 ख नं 79,Plot No. 279 Kha No. 79,Plot No.279B No.79,True
+voter_first_name,1,बबली,Babali,Babli,True
+voter_first_name,2,बबीता,Babita,Babita,True
+voter_first_name,1,बविता,Bavita,Bawita,True
+voter_sur_name,1,बालियान,Baliyan,Balyan,True
+voter_first_name,2,बिजेन्द्र,Bijendra,Bijendra,True
+voter_father_first_name,1,बिनेश,Bines,Bineesh,True
+voter_husband_first_name,2,बिरंजी,Biramji,Biranji,True
+house_no,1,बी-89,B-89,The B-89,True
+voter_sur_name,1,बैरी,Bairi,Barry,True
+voter_husband_first_name,2,ब्रह्म,Brahma,Brahma,True
+voter_first_name,2,ब्रह्मपाल,Brahmapal,Brahmapala,True
+voter_husband_first_name,1,भगवान,Bhagavan,God,True
+voter_father_first_name,1,भवर,Bhavar,Bhaavra...........................................................................................................................,True
+voter_sur_name,1,भाटी,Bhati,Bhati,True
+voter_first_name,3,भीकम,Bhikam,bhikkum...........................................................................................................................,True
+voter_husband_first_name,1,भीम,Bhim,Bhima,True
+voter_father_first_name,1,भोज,Bhoj,the feast of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the people of the food of the food of the food of the food of the food of the food of the people of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food of the food.,True
+voter_first_name,2,मंजू,Mamju,Manju,True
+voter_father_first_name,1,मगेन्द्र,Magendra,Magendra,True
+voter_middle_name,1,मति,Mati,Value,True
+voter_first_name,2,मनीष,Manis,Manish,True
+voter_first_name,1,मनीषा,Manisa,Manisha,True
+voter_husband_first_name,3,मनोज,Manoj,Manoj,True
+voter_first_name,2,ममता,Mamata,Mamta,True
+voter_father_first_name,2,महक,Mahak,Smell,True
+voter_husband_first_name,2,महावीर,Mahavir,Mahavira,True
+gender,98,महिला,Mahila,Woman,True
+voter_father_first_name,3,महेश,Mahes,Mahesh,True
+voter_first_name,1,मांगीराम,Mamgiram,Mangiram,True
+voter_husband_first_name,1,मांगे,Mamge,Ask for,True
+relation_name,1,माता,Mata,Mother,True
+voter_father_first_name,1,मान,Mana,Value,True
+voter_first_name,1,मानसी,Manasi,Mansi,True
+voter_first_name,1,मीना,Mina,Meena,True
+voter_first_name,1,मीरा,Mira,Meera,True
+voter_father_first_name,4,मुकेश,Mukes,Mukesh,True
+voter_husband_first_name,1,मुनीश,Munis,Munish,True
+voter_first_name,3,मुनेश,Munes,Munesh,True
+voter_sur_name,2,मेहता,Mehata,Mehta,True
+voter_first_name,1,मोन्टी,Monti,Monty,True
+voter_father_first_name,2,मोहम्मद,Mohammad,Mohammed,True
+voter_father_last_name,1,यासीन,Yasin,Yasin,True
+voter_first_name,2,योगेन्द्र,Yogendra,Yogendra,True
+voter_father_first_name,4,योगेश,Yoges,Yogesh,True
+voter_first_name,3,रघुनाथ,Raghunath,Raghunath,True
+voter_father_first_name,1,रघुराज,Raghuraj,Raghuraj,True
+voter_first_name,1,रजनी,Rajani,Rajni,True
+voter_father_first_name,1,रणधीर,Ranadhir,Randhir,True
+voter_first_name,2,रणबीर,Ranabir,Ranbir,True
+voter_father_first_name,1,रणवीर,Ranavir,Ranveer,True
+voter_father_first_name,1,रतन,Ratan,Ratan,True
+voter_husband_first_name,4,रमेश,Rames,Ramesh,True
+voter_first_name,3,रवि,Ravi,Ravi,True
+voter_first_name,2,रविन्द्र,Ravindra,Ravindra,True
+voter_first_name,1,रवीता,Ravita,Ravita,True
+voter_first_name,7,राकेश,Rakes,Rakesh,True
+voter_husband_first_name,3,राज,Raja,Raj,True
+voter_father_first_name,6,राजकुमार,Rajakumar,Prince,True
+voter_father_first_name,1,राजदेव,Rajadev,Rajdev,True
+voter_first_name,3,राजपाल,Rajapal,Rajpal,True
+voter_first_name,2,राजबाला,Rajabala,Rajbala,True
+voter_father_first_name,1,राजबीर,Rajabir,Rajbir,True
+voter_first_name,1,राजबोरी,Rajabori,Rajbori,True
+voter_father_first_name,1,राजवीर,Rajavir,Rajveer,True
+voter_first_name,3,राजीव,Rajiv,Rajiv,True
+voter_first_name,1,राजू,Raju,Raju,True
+voter_first_name,5,राजेश,Rajes,Rajesh.,True
+voter_husband_last_name,1,राणा,Rana,Rana,True
+voter_father_first_name,1,राधेश्याम,Radhesyam,Radheshyam,True
+voter_husband_last_name,9,राम,Rama,Ram,True
+voter_father_first_name,1,रामगोपाल,Ramagopal,Ramgopal,True
+voter_father_first_name,1,रामपाल,Ramapal,Rampal,True
+voter_first_name,2,रामविलास,Ramavilas,Ram Vilas,True
+voter_father_first_name,1,रामस्वरूप,Ramasvarup,Ram Swaroop,True
+voter_first_name,2,राहुल,Rahul,Rahul,True
+voter_first_name,1,रीतू,Ritu,Ritu,True
+voter_first_name,1,रूपकुमारी,Rupakumari,Roopakumari,True
+voter_first_name,1,रूपवती,Rupavati,Roopwati,True
+voter_first_name,1,रूपा,Rupa,Rupa,True
+voter_first_name,1,रेखा,Rekha,Line,True
+voter_first_name,2,रोशन,Rosan,Roshan,True
+voter_first_name,1,रोहित,Rohit,Rohit,True
+voter_father_first_name,1,लक्ष्मन,Laksman,Lakshman,True
+voter_first_name,1,लक्ष्मी,Laksmi,Lakshmi,True
+voter_father_first_name,2,लखपत,Lakhapat,Lakhpat,True
+voter_father_last_name,1,लाटयान,Latayan,Latyan,True
+voter_sur_name,1,लाट्यान,Latyan,Latyan,True
+voter_husband_last_name,10,लाल,Lala,Red,True
+house_no,1,व444,Va444,V444,True
+voter_first_name,1,वंशज,Vamsaj,Descendants,True
+voter_sur_name,3,वर्मा,Varma,Verma,True
+voter_first_name,1,विक्रम,Vikram,Vikram,True
+voter_first_name,2,विजय,Vijay,Victory,True
+voter_father_first_name,2,विजेन्द्र,Vijendra,Vijendra,True
+voter_first_name,1,विनिता,Vinita,Vinita,True
+voter_father_first_name,3,विनोद,Vinod,jokey,True
+voter_first_name,1,विपिन,Vipin,Vipin,True
+voter_first_name,2,विमला,Vimala,Vimala,True
+voter_first_name,1,विशाल,Visal,huge,True
+voter_first_name,1,विश्वास,Visvas,Faith,True
+voter_first_name,4,वी.के.तोमर,Vi.Ke.Tomar,V.K. Tomar,True
+voter_father_first_name,4,वीर,Vira,Hero,True
+voter_father_first_name,2,वीरपाल,Virapal,Veerpal,True
+voter_father_first_name,1,वीरेन्द्र,Virendra,Virendra,True
+voter_husband_middle_name,2,शंकर,Samkar,Shankar,True
+voter_first_name,1,शकुंतला,Sakumtala,Shakuntala,True
+voter_father_last_name,35,शर्मा,Sarma,Sharma,True
+voter_first_name,1,शारदा,Sarada,Sharda,True
+voter_father_first_name,1,शाहिद,Sahid,Shahid,True
+voter_first_name,1,शाहीन,Sahin,Shaheen,True
+voter_father_first_name,3,शिव,Siva,Shiva,True
+voter_first_name,1,शिवानी,Sivani,Shivani,True
+house_no,1,शी,Si,Shi,True
+voter_father_first_name,1,शैपनाथ,Saipanath,Shaipnath,True
+voter_first_name,1,श्री,Sri,Mr.,True
+voter_father_first_name,1,श्रीचन्द्र,Sricandra,Srichandra,True
+voter_first_name,1,संजय,Samjay,Sanjay,True
+voter_father_first_name,5,संजीव,Samjiv,Sanjeev,True
+voter_first_name,4,संदीप,Samdip,Sandeep,True
+voter_sur_name,9,सक्सेना,Saksena,Saxena,True
+voter_first_name,1,सचिन,Sacin,Sachin,True
+voter_first_name,1,सतपाल,Satapal,Satpal,True
+voter_first_name,2,सतीश,Satis,Satish,True
+voter_father_first_name,4,सतेंद्र,Satemdra,Satendra,True
+voter_father_first_name,2,सत्य,Satya,Truth,True
+voter_father_first_name,1,सत्येन्द्र,Satyendra,Satyendra,True
+voter_first_name,1,सनी,Sani,Sunny,True
+voter_first_name,1,सन्ती,Santi,Santi,True
+voter_first_name,1,सन्तो,Santo,Saints,True
+voter_first_name,1,सन्तोष,Santos,Satisfaction,True
+voter_first_name,2,सपना,Sapana,Dreaming,True
+voter_husband_first_name,1,सरद,Sarad,Sarda,True
+voter_first_name,1,सरिता,Sarita,Sarita,True
+voter_first_name,1,सरोजबाला,Sarojabala,Sarojbala,True
+voter_first_name,1,सर्वेश,Sarves,Sarvesh,True
+voter_first_name,1,सावित्री,Savitri,Savitri,True
+voter_husband_middle_name,65,सिंह,Simh,Singh,True
+voter_first_name,2,सीमा,Sima,the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit of the limit.,True
+voter_first_name,2,सुखपाल,Sukhapal,Sukhpal,True
+voter_first_name,2,सुधा,Sudha,Sudha,True
+voter_first_name,1,सुधीर,Sudhir,Sudhir,True
+voter_first_name,4,सुनीता,Sunita,Sunita,True
+voter_husband_first_name,5,सुनील,Sunil,Sunil,True
+voter_father_first_name,1,सुमेर,Sumer,Sumer,True
+voter_father_first_name,1,सुरजमल,Surajamal,Surajmal,True
+voter_father_first_name,2,सुरेन्द्र,Surendra,Surendra,True
+voter_first_name,3,सुरेश,Sures,Suresh,True
+voter_first_name,1,सुशीला,Susila,Sushila,True
+voter_father_first_name,1,सूरज,Suraj,Sun,True
+voter_husband_last_name,1,सेन,Sena,Sen,True
+voter_first_name,1,सोहन,Sohan,Sohan,True
+voter_sur_name,1,हज,Haja,Hajj,True
+voter_husband_first_name,1,हरी,Hari,green,True
+house_no,1,हाऊस नं इ5/245,Haus No. I5/245,House No. E5 / 245,True
+house_no,1,"हाऊस नं, इ15/245","Haus No., I15/245",House No.15 / 245,True
+house_no,1,हाऊस न॑ - 121,Haus No. - 121,House No-121,True
+voter_husband_first_name,1,हीरा,Hira,Diamond,True
+voter_father_last_name,1,हैदर,Haidar,Haider,True
