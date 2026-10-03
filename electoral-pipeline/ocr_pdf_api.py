@@ -330,6 +330,13 @@ _OCR_NAME_VARIANTS: dict[str, str] = {
     "हाऊस नें. ड": "हाउस नं.",   # ऊ↔उ + matra noise
     "हाऊस नं इ":   "हाउस नं 1",  # इ↔1 confusion
     "इ-":          "ई-",         # इ↔ई vowel confusion in house prefix
+    # Full-roll run (2026-10-03, 531 records). The मात्रा + ह cluster in सिंह
+    # is the one recurring misread: सिंह renders as सिंड / सिंय. Both bad
+    # tokens are verified absent from the ground-truth corpus (सिंह = 28,
+    # सिंड = 0, सिंय = 0), so neither rule can shadow a correct name.
+    # Frequency for context: सिंह x161, सिंड x1, सिंय x1.
+    "सिंड":         "सिंह",        # ह↔ड
+    "सिंय":         "सिंह",        # ह↔य
 }
 
 # Corrections that cannot be applied globally because the OCR form is itself a
