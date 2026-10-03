@@ -23,6 +23,53 @@ def _text(value):
     return None if value is None else str(value).strip() or None
 
 
+def _confidence(value):
+    """Coerce a reported confidence to a float in [0, 1], or None if unusable.
+
+    Two things were wrong here, both found by running map_record over every
+    input type rather than by reading it:
+
+    1. `float(confidence)` raised on anything non-numeric. map_record is called
+       in a list comprehension over a whole unit's records, so one record whose
+       confidence OCRed as "" or "high" raised ValueError and aborted all 30 --
+       the other 29 were fine and were thrown away with it. An unusable
+       confidence is a problem with one field of one record; it must not
+       destroy the unit.
+
+    2. `bool` passed the range check, because `0 <= True <= 1` is True in
+       Python. A record whose confidence was the JSON value `true` was stored
+       with confidence True. _int() already refuses bool for the same reason;
+       this does too.
+
+    Out-of-range values are clamped rather than rejected. `2.5` is not evidence
+    that the record is 250% certain -- it is evidence that whatever produced the
+    number disagrees with the contract. Storing the clamped value keeps the
+    record, and the caller still sees a validation error naming the problem, so
+    the row is flagged for review rather than silently trusted.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:  # NaN: the one value that is not equal to itself
+        return None
+    # Infinity is a valid float, so float() accepts it and a bare clamp would
+    # turn it into 1.0 -- the *maximum* confidence, which is the most misleading
+    # possible value for "the producer emitted infinity". NaN already became
+    # None above; its infinities belong with it.
+    if number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _in_unit_interval(number: float) -> bool:
+    return 0.0 <= number <= 1.0
+
+
 def _relation_type_en(value):
     """Relationship type → English.
 
@@ -109,11 +156,23 @@ def map_record(item: dict, document_id, session_id, unit_id):
         log.warning(f"[MAP_RECORD] Age validation failed: age={age}")
         print(f"[MAP_RECORD] Age validation failed: age={age}")
     
-    confidence = item.get("confidence")
-    if confidence is not None and not 0 <= float(confidence) <= 1:
+    # Read the raw value for the error message, but validate and store the
+    # coerced one. The old code called float() unguarded and range-checked the
+    # result, which raised on a non-numeric confidence and let bool through.
+    raw_confidence = item.get("confidence")
+    confidence = _confidence(raw_confidence)
+
+    if confidence is None:
+        if raw_confidence is not None:
+            errors.append("confidence not a number")
+            log.warning(f"[MAP_RECORD] Confidence unusable: confidence={raw_confidence!r}")
+    elif not _in_unit_interval(confidence):
+        # Out of range. Stored clamped rather than rejected: the record is still
+        # worth keeping, and the note below is what puts it in front of a human.
         errors.append("confidence outside 0–1")
-        log.warning(f"[MAP_RECORD] Confidence validation failed: confidence={confidence}")
-        print(f"[MAP_RECORD] Confidence validation failed: confidence={confidence}")
+        clamped = max(0.0, min(1.0, confidence))
+        confidence = clamped
+        log.warning(f"[MAP_RECORD] Confidence out of range, clamped: confidence={raw_confidence!r} -> {confidence}")
     
     # Extract component name fields from OCR output (if available in raw_record)
     raw_record = item.get("raw_record", {})

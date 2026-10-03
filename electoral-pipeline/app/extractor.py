@@ -375,6 +375,19 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
         say.info("Voters read and put into our format", voters=len(transformed["records"]))
         return transformed
 
+    # ExtractionError must be caught before the generic handlers below. It is a
+    # plain Exception subclass carrying a specific code and a retryable flag, so
+    # the `except Exception` further down would catch it too and rewrite every
+    # deliberate code as INTERNAL_ERROR with retryable=False.
+    #
+    # That is not cosmetic. `except (httpx.HTTPError, ValueError)` would also
+    # swallow it -- EXTRACTION_SERVICE_UNAVAILABLE raises a ValueError-derived
+    # payload through -- and a transient reader timeout would be reported as a
+    # permanent internal error, so the unit is marked non-retryable and fails
+    # permanently instead of being retried on the next dispatch. Re-raising the
+    # specific errors first keeps the code and the retry decision intact.
+    except ExtractionError:
+        raise
     except FileNotFoundError as exc:
         say.error("The PDF was not where the document said it was",
                   file=document_location)

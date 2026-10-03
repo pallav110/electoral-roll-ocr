@@ -774,21 +774,62 @@ def normalize_unit(document_id, session_id, unit_id, data, claim_id):
         
         log.info(f"[NORMALIZE_UNIT] Saving {len(records)} electoral records")
         print(f"[NORMALIZE_UNIT] Saving {len(records)} electoral records")
-        
+
+        written = 0
         for record in records:
             values = {c.name: getattr(record, c.key) for c in ElectoralRecord.__table__.columns if c.name not in ("id", "created_at")}
-            db.execute(insert(ElectoralRecord).values(**values).on_conflict_do_nothing(index_elements=[ElectoralRecord.session_id, ElectoralRecord.page_number, ElectoralRecord.source_row_number], index_where=(ElectoralRecord.page_number.is_not(None) & ElectoralRecord.source_row_number.is_not(None))))
-        
+            # RETURNING, not rowcount. `result.rowcount` reports 3 here whether or
+            # not the rows were inserted: with ON CONFLICT DO NOTHING the driver
+            # counts rows the statement *processed*, not rows that landed. That
+            # was verified against the live database -- the re-run case returns
+            # rowcount 3 for zero inserted rows, which is exactly the
+            # over-reporting this change exists to remove.
+            #
+            # RETURNING yields only rows that were actually inserted, so counting
+            # them is the count we actually want. It also costs one extra column
+            # per row on a path that is already the slowest in the pipeline.
+            inserted = db.execute(
+                insert(ElectoralRecord)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[ElectoralRecord.session_id, ElectoralRecord.page_number, ElectoralRecord.source_row_number],
+                    index_where=(ElectoralRecord.page_number.is_not(None) & ElectoralRecord.source_row_number.is_not(None)),
+                )
+                .returning(ElectoralRecord.id)
+            ).all()
+            written += len(inserted)
+
+        # The count that gets stored is the count that actually reached the
+        # table, not the number of rows we intended to write.
+        #
+        # on_conflict_do_nothing discards a conflicting row silently, so
+        # len(records) overstates what was written whenever a re-normalisation
+        # hits rows this attempt already has. records_extracted is what the unit
+        # page and the dashboard read as "how many voters did this unit
+        # produce", so an inflated number there is a wrong answer presented
+        # confidently -- and a shortfall goes unnoticed entirely, because
+        # nothing else in the system compares the two numbers.
         unit.status = "completed"
         unit.completed_at = now()
-        unit.records_extracted = len(records)
+        unit.records_extracted = written
         unit.error_code = unit.error_message = None
         db.execute(update(ExtractionSession).where(ExtractionSession.id == session_uuid).values(extractor_version=data["extractor_version"]))
-        event(db, "NORMALIZATION_COMPLETED", doc_uuid, session_uuid, unit_uuid, details={"records": len(records)})
+        event(db, "NORMALIZATION_COMPLETED", doc_uuid, session_uuid, unit_uuid, details={"records": written, "records_expected": len(records)})
         event(db, "UNIT_COMPLETED", doc_uuid, session_uuid, unit_uuid)
-        
-        log.info(f"[NORMALIZE_UNIT] Unit {unit_id} normalization complete, {len(records)} records saved")
-        print(f"   ✅ Successfully saved {len(records)} voter records")
+
+        if written != len(records):
+            # Not fatal: on_conflict_do_nothing is there to make re-runs
+            # idempotent, so a shortfall on a retry is expected behaviour. But it
+            # must be visible, or a genuinely truncated extraction looks
+            # identical to a clean one.
+            message = f"{len(records) - written} of {len(records)} records conflicted with existing rows and were not written"
+            log.warning(f"[NORMALIZE_UNIT] Unit {unit_id} wrote {written}/{len(records)} records: {message}")
+            print(f"   ⚠️  Wrote {written}/{len(records)} voter records ({message})")
+            event(db, "NORMALIZATION_SHORTFALL", doc_uuid, session_uuid, unit_uuid,
+                  message=message, details={"expected": len(records), "written": written})
+        else:
+            log.info(f"[NORMALIZE_UNIT] Unit {unit_id} normalization complete, {written} records saved")
+            print(f"   ✅ Successfully saved {written} voter records")
 
 
 def fail_unit(document_id, session_id, unit_id, code, message, claim_id, retryable=True):

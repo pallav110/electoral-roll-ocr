@@ -29,6 +29,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+def _repo_file(name: str) -> Path:
+    """Resolve a repo-root file, skipping if this environment does not carry it.
+
+    The compose image bakes in `app/` only -- not ocr_pdf_api.py, not
+    pyproject.toml, not package_for_team.py. Tests that read those files are
+    real and must run, but they cannot run where the file does not exist, and
+    failing there would train everyone to ignore red.
+    """
+    path = REPO_ROOT / name
+    if not path.exists():
+        pytest.skip(f"{name} is not present in this checkout (image has app/ only)")
+    return path
+
+
 class _StubResponse:
     """Just enough of httpx.Response for extract()'s .json() call."""
 
@@ -54,7 +68,7 @@ def _extract_common(monkeypatch, roll_metadata: dict) -> dict:
     # read succeeds and only the OCR call is stubbed.
     result = extractor.extract(
         document_id="00000000-0000-0000-0000-000000000000",
-        document_location=str(REPO_ROOT / "pyproject.toml"),
+        document_location=str(_repo_file("pyproject.toml")),
         page_from=1,
         page_to=22,
     )
@@ -136,7 +150,7 @@ def test_ocr_roll_metadata_does_not_yet_carry_a_year():
     service gained a year, and the forward-path test above now exercises
     production data rather than a stub.
     """
-    source = (REPO_ROOT / "ocr_pdf_api.py").read_text(encoding="utf-8")
+    source = _repo_file("ocr_pdf_api.py").read_text(encoding="utf-8")
     start = source.index("def _extract_roll_header_metadata")
     body = source[start : start + 2500]
 
