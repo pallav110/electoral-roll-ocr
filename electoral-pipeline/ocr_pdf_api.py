@@ -731,17 +731,38 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]],
                 config=TESSERACT_CONFIG,
                 output_type=pytesseract.Output.DICT
             )
-            # Extract text lines and their confidences
+            # Extract text lines and their confidences.
+            #
+            # The line identity is (block_num, par_num, line_num), NOT line_num
+            # alone. Every one of those counters restarts at 1 in its own
+            # region, so on a voter card each printed row is a fresh paragraph
+            # whose first line is numbered 1. Grouping on line_num alone
+            # therefore concatenates every row that starts at 1:
+            #
+            #   blk par line  word   text
+            #     1   1   1     1    'नाम'
+            #     1   1   1     4    'मेता'
+            #     1   2   1     1    'पिता'      <- paragraph 2, line 1 again
+            #     1   2   1     4    'राजकुमार'
+            #
+            # which produced 'नाम : सचिन मेता पिता का नाम: राजकुमार' as ONE
+            # line and merged the voter's name into the relation field on 479
+            # of 531 records. Adding par_num restores the rows exactly; the
+            # three-part key reproduces image_to_string's lines verbatim.
             lines = []
             confs = []
             current_line = []
             current_line_confs = []
-            last_line_num = -1
+            last_line_key = None
             for i, text in enumerate(data['text']):
-                line_num = data['line_num'][i]
+                line_key = (
+                    data['block_num'][i],
+                    data['par_num'][i],
+                    data['line_num'][i],
+                )
                 conf = data['conf'][i]
                 if text.strip():
-                    if line_num != last_line_num and current_line:
+                    if line_key != last_line_key and current_line:
                         lines.append(" ".join(current_line))
                         if current_line_confs:
                             confs.append(sum(current_line_confs) / len(current_line_confs))
@@ -750,7 +771,7 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]],
                     current_line.append(text.strip())
                     if conf >= 0:  # -1 means no confidence
                         current_line_confs.append(conf)
-                    last_line_num = line_num
+                    last_line_key = line_key
             if current_line:
                 lines.append(" ".join(current_line))
                 if current_line_confs:
@@ -899,6 +920,17 @@ def _extract_serial_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
 # and voted on; reads that don't match are only used as a fallback.
 EPIC_SHAPE_RE = re.compile(r"^[A-Z]{3}\d{7}$")
 
+# How close the 8 EPIC readers must be before the record is flagged for human
+# review. At 4, a 4-4 tie is flagged and a 5-3 or better majority is not.
+#
+# Flagging every split flagged the vote working rather than a problem: 15 of
+# 180 EPICs in pages 3-8 had a reader disagree, 12 of those on a single glyph
+# (5 read as 8, or X as Y). On the seven splits the verified ground truth
+# covers, the majority was correct every time and the minority wrong every
+# time -- one bad reader out of eight, not a close call. Below this bar the
+# record is left unflagged; the dissent still goes to the debug log.
+EPIC_SPLIT_REVIEW_TOP_VOTES = 4
+
 # Scratch slot for the last EPIC vote's disagreement, consumed by the caller
 # immediately after the read. A bare return value would force both call sites
 # to re-run the 8 readers to recover the split. Thread-local, not global:
@@ -938,14 +970,34 @@ def _extract_epic_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
         valid = [r for r in reads if EPIC_SHAPE_RE.match(r)]
         pool = valid or reads
         votes = Counter(pool)
-        # Ties break on length, then on insertion order. The insertion-order
-        # step is arbitrary, which is exactly why a split is worth flagging.
+        # Ties break on length, then on insertion order.
         best = max(votes, key=lambda r: (votes[r], len(r)))
-        if len(votes) > 1:
+        top = votes[best]
+
+        # A split is only worth a human's attention when the 8 readers were
+        # genuinely undecided. Flagging every split flagged the vote working:
+        # 15 of 180 EPICs in pages 3-8 had at least one reader disagree, and 12
+        # of those were a single glyph, 5 read as 8 (or X read as Y). On the
+        # seven splits ground truth covers, the majority was right every single
+        # time and the minority wrong every single time -- the disagreement was
+        # one bad reader out of eight, not a close call.
+        #
+        # So the bar is a genuine contest. Below it, the dissent is recorded
+        # for the audit trail but the record is not flagged: 6-1 and 7-1 both
+        # mean the mechanism resolved the card, and raising needs_review for
+        # them pushed otherwise-clean records into manual review for nothing.
+        # Above it, the winner really is a coin-flip between two shapes and the
+        # chosen ID may well not be this voter's.
+        if len(votes) > 1 and top <= EPIC_SPLIT_REVIEW_TOP_VOTES:
             _EPIC_VOTE_SPLIT.data = [
                 {"value": value, "votes": count}
                 for value, count in votes.most_common()
             ]
+        elif len(votes) > 1:
+            log.debug(
+                "EPIC readers split %s; majority %d/8 resolved it, not flagged",
+                dict(votes), top,
+            )
         return [best]
     except Exception as exc:
         log.debug("EPIC OCR failed: %s", exc)
@@ -1972,7 +2024,96 @@ def parse_voter_box_from_ocr_lines(
          "अन्य", "voter_other_name"),
     )
 
-    for line in lines:
+    # --- Merged name+relation lines -------------------------------------
+    #
+    # The roll prints the voter's name and the relation on separate rows, but
+    # Tesseract often returns them as ONE line:
+    #
+    #   'नाम : सचिन मेता पिता का नाम: राजकुमार'
+    #
+    # The voter-name branch below deliberately declines any line carrying a
+    # relation label, and after_colon splits at the FIRST colon -- so the
+    # whole thing used to land in voter_father_name with the voter's own name
+    # glued to the front of it, and voter_first_name stayed empty. On the
+    # live roll that was 479 of 531 records.
+    #
+    # Both values are already present in the text, so this expands the line
+    # into synthetic lines and lets every existing branch below run unchanged.
+
+    # Relation label bodies, without the shared 'का नाम' tail, for positional
+    # scanning. Spelled out rather than derived by splitting _RELATIONS on
+    # its own format string, which would silently rot if that format changed.
+    # 'Old' is omitted: 0 occurrences in the roll, and it matches Latin noise.
+    _REL_BODY = (
+        r"(?:पिता|पेता|पित|प्रिता"
+        r"|पति|पत्ति|प्रति|प्रत्ति|पत|क्वा"
+        r"|माता|मात|मोता|m[aā]t[aā]"
+        r"|अन्य|अनय|anya|anye)"
+    )
+    # Anchored to a word boundary. The lookbehind is what keeps
+    # 'धनपति देवी' -- a real voter whose name contains 'पति' -- from being
+    # read as a husband label.
+    _REL_SCAN = re.compile(
+        rf"(?<![ऀ-ॿA-Za-z]){_REL_BODY}"
+        rf"\s*(?:का)?\s*(?:{_नाम_LBL})?\s*[:：;ः!]"
+    )
+
+    # The bare voter-name label, ANCHORED to the start of the line. An
+    # unanchored search is wrong here: the 'नाम' inside 'पिता का नाम' is
+    # itself a नाम label, so an unanchored test matches nearly every pure
+    # relation line (524 lines in the roll's own text layer, vs 18 anchored)
+    # and would push the 'फोटो उपलब्ध है' watermark into voter_first_name.
+    _BARE_NAME_LBL = re.compile(rf"^\s*{_नाम_LBL}\s*[:：;ः!]")
+
+    # 'फोटो उपलब्ध है' ("photo available") is stamped over the photo box and
+    # bleeds into neighbouring text rows. It is never part of a name.
+    _PHOTO_JUNK = re.compile(r"फोटो\s*(?:उपलब्ध\s*(?:है।?|हे?)?)?")
+    # Field labels that can share a line with a relation row. Cutting the
+    # remainder into its own line is what lets the house/age/gender branches
+    # below see them -- today the relation branch claims the line and
+    # continue()s, so a house number sharing the row is lost (13 rows of
+    # this roll print it that way).
+    _FIELD_TAIL = re.compile(r"(?:फोटो|मकान\s*संख्या|आयु|लिंग)")
+
+    def _expand_line(line: str) -> list[str]:
+        """Split a merged line into the pieces the branches below expect."""
+        stripped = _PHOTO_JUNK.sub(" ", line)
+        # Strip trailing separators left behind by the watermark removal, so
+        # they are not mistaken for a real colon further down.
+        stripped = stripped.strip().strip(":").strip()
+
+        lead = _BARE_NAME_LBL.match(stripped)
+        rel = _REL_SCAN.search(stripped)
+        if not rel or (lead and rel.start() < lead.end()):
+            return [stripped]
+
+        out = []
+        if lead:
+            left = stripped[lead.end():rel.start()]
+            # A second relation label on one line ('पिता कानाम इंद्र पाल पिता
+            # का नाम:') would otherwise write a label plus a colon into the
+            # voter's name, which is worse than leaving it blank.
+            if left.strip() and not _REL_SCAN.search(left) and ":" not in left:
+                # A literal label, not _नाम_LBL -- that is a pattern string,
+                # and interpolating it would emit "(?:नाम|नाग|nama): ..." as
+                # the text, whose first colon sits inside the pattern.
+                out.append(f"नाम: {left.strip()}")
+
+        # Everything from the relation label onward. Cut at the first
+        # following field label so the house/age/gender branches get a line.
+        tail = _FIELD_TAIL.search(stripped, rel.end())
+        if tail:
+            out.append(stripped[rel.start():tail.start()])
+            out.append(stripped[tail.start():])
+        else:
+            out.append(stripped[rel.start():])
+        return out
+
+    expanded: list[str] = []
+    for raw in lines:
+        expanded.extend(_expand_line(raw))
+
+    for line in expanded:
         line = line.strip()
         if not line:
             continue

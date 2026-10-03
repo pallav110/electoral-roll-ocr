@@ -41,6 +41,32 @@ There is **no focused re-read pass for names or relations**. `RELATION_REGION` i
 
 **Per-card cost** (measured): Tesseract ~21–25 subprocess calls, PaddleOCR 9 (1 stacked + 8 deleted-vote readers).
 
+## Tesseract Line Grouping
+
+`image_to_string` returns Tesseract's own lines. When `image_to_data` is used instead (it is, to carry per-word confidence) the lines must be **rebuilt**, and the grouping key is the composite `(block_num, par_num, line_num)` — not `line_num`.
+
+Each of those three counters restarts at 1 inside its parent, and on a voter card **every printed row is its own paragraph**, so every row's first line carries `line_num == 1`:
+
+```
+blk par line  word   text
+  1   1   1     1    'नाम'
+  1   1   1     4    'मेता'
+  1   2   1     1    'पिता'      <- paragraph 2, line 1 again
+  1   2   1     4    'राजकुमार'
+```
+
+Grouping on `line_num` alone concatenated every such row into one line — `'नाम : सचिन मेता पिता का नाम: राजकुमार'` — which merged the voter's name into the relation field on **479 of 531** records. `word_num` is equally wrong in the other direction (it restarts per line, splitting every word). The three-part key reproduces `image_to_string`'s lines verbatim; `tests/test_tesseract_line_grouping.py` pins this, and pins the *source* text, so a revert fails loudly rather than passing while the pipeline breaks.
+
+`_expand_line()` inside the parser still splits genuinely merged lines and is worth keeping as a safety net, but it is no longer the primary defence — the grouping key is.
+
+## Serial Numbers
+
+`voter_sr_no` comes from **one** Tesseract read of the serial box (voting over 3 scale targets), with no validation of the value against anything. There is no sequence check: `serial_corrections` is initialised and never appended to.
+
+Measured on pages 3–8 (180 cards): **one** genuinely wrong read in 180 (page 6 card 26 returned `118` where `115` is correct). Everything else is exact.
+
+**Do not validate serials by checking that they ascend.** They do ascend even when wrong — a systematic offset is perfectly monotonic, so a self-consistency check passes it. A bad read also shows up as an apparent duplicate or gap, which is how this one was found, but a shift that preserves ordering would slip through entirely. Align against ground truth or a known first serial, and align on a field that cannot collide (the EPIC), never on row position alone: `whole_pdf_6-8_results.json` carries one extra leading row (the tail card of page 5), so row *N* of ground truth is card *N+1* of page 6.
+
 ## The Deleted Mark
 
 This is the one field with a dedicated voting mechanism, so it is worth stating precisely.
@@ -65,6 +91,10 @@ The rules are strict, and deliberately so: broad replacement caused 265 house-nu
 - A Paddle run may never be **shorter** than the Tesseract read it is merged with.
 - A leading `1` is prepended only on an **exact** match (`paddle_house == "1" + cur_digits`).
 - EPIC shape-invalid reads are fallback-only; a split vote **flags `_needs_review` but never rewrites the value**.
+
+**The EPIC split vote, and when it flags.** Eight readers vote; the winner is the plurality, ties broken on length then insertion order. The chosen value is **never** changed by a disagreement — a split asks for a human check, it does not authorise substituting a different voter's ID.
+
+A split only raises `_needs_review` when the readers were genuinely undecided: `EPIC_SPLIT_REVIEW_TOP_VOTES = 4`, so a 4-4 tie flags and 5-3 or better does not. Flagging every split flagged the mechanism *working* rather than a problem — 15 of 180 EPICs in pages 3–8 had a reader disagree, 12 of them on a single glyph (5 read as 8). On the seven splits ground truth covers, the majority was right **7 of 7** and the minority wrong **7 of 7**: one bad reader out of eight, not a close call. Resolved splits still go to `log.debug`. Do not lower this bar without new evidence that a majority can be wrong.
 
 **Age is the exception.** Once Paddle's age crop is stacked — i.e. Tesseract's age was missing, non-digit, or under 18 — any in-range Paddle digit run **overwrites unconditionally**. There is no leading-`1` evidence rule for age; that documented rule does not exist in the code.
 
