@@ -362,6 +362,22 @@ def dispatch_documents(limit=100):
             doc.attempt_count += 1
             doc.next_retry_at = None
             doc.current_session_id = None
+            # Stamped here, in the same transaction as the "queued" transition,
+            # rather than only inside recover()'s republish branch.
+            #
+            # recover() compares this against a 60-second cutoff to tell a publish
+            # the broker dropped from one still in flight. Nothing used to write
+            # it, so the comparison was against NULL and never true: a document
+            # whose message was lost stayed "queued" forever, with no worker and
+            # no timer, waiting on a future dispatch that selects only "pending"
+            # and "retry".
+            #
+            # The worker does not stamp it on pickup. locked_at means "last handed
+            # to the broker", and that is what recover()'s cutoff is comparing --
+            # a document whose worker is alive shows status "processing" and
+            # leaves this branch entirely.
+            doc.locked_at = now()
+            doc.locked_by = WORKER_ID
             session = ExtractionSession(document_id=doc.id, attempt_number=doc.attempt_count, status="created")
             db.add(session)
             db.flush()
@@ -937,10 +953,34 @@ def recover():
         docs = db.scalars(select(Document).where(Document.status.in_(["queued", "processing"])).with_for_update(skip_locked=True)).all()
         for doc in docs:
             session = db.get(ExtractionSession, doc.current_session_id) if doc.current_session_id else None
-            if doc.status == "queued" and doc.locked_at and doc.locked_at < queued_cutoff and session and session.status == "created":
+            # A "queued" document whose session has done no work, published
+            # longer ago than queued_cutoff, is a publish the broker dropped --
+            # not one still in flight. Republish it.
+            #
+            # This branch required `doc.locked_at` to be non-NULL, and nothing in
+            # the codebase ever wrote it, so the value was always NULL and the
+            # condition was always False. A document whose message was lost
+            # between publish and pickup stayed "queued" for good: no worker was
+            # coming, and dispatch_documents() only selects "pending" and
+            # "retry", so nothing would ever pick it up again.
+            #
+            # dispatch_documents() now stamps locked_at when it publishes, which
+            # is what makes the comparison meaningful. The refresh below is what
+            # the original code intended and it is kept: it moves the deadline
+            # forward on each republish, so a document whose broker stays down
+            # is retried once per beat rather than once per document per second.
+            #
+            # Duplicate messages are harmless. process_document_job() re-checks
+            # `doc.status == "queued" and session.status == "created"` under
+            # SELECT FOR UPDATE at :405 and returns if another worker got there
+            # first, so only the first delivery processes the document.
+            if (doc.status == "queued" and doc.locked_at and doc.locked_at < queued_cutoff
+                    and session and session.status == "created"):
                 doc.locked_at = now()
                 republish_docs.append((str(doc.id), str(session.id)))
-            elif doc.status == "processing" and session and session.pages_total is None and (session.heartbeat_at or session.started_at) < cutoff_doc:
+            elif (doc.status == "processing" and session and session.pages_total is None
+                    and (session.heartbeat_at or session.started_at)
+                    and (session.heartbeat_at or session.started_at) < cutoff_doc):
                 # Lost document worker before unit creation: fail this session and retry the PDF.
                 session.status = "abandoned"
                 session.completed_at = now()
@@ -950,6 +990,22 @@ def recover():
                 doc.last_error_code, doc.last_error = "WORKER_LOST", "Document worker heartbeat expired"
                 event(db, "WORKER_LOST", doc.id, session.id)
         units = db.scalars(select(ExtractionUnit).where(ExtractionUnit.status.in_(["queued", "processing"])).with_for_update(skip_locked=True)).all()
+        # NOTE on the timestamp guards below. `(x or y) < cutoff` raises
+        # TypeError when BOTH are NULL -- `None < datetime` has no ordering --
+        # and this whole function runs in one SessionLocal.begin(), so a raise
+        # anywhere rolls back every republish it had queued and the beat is lost
+        # entirely. Both timestamps being NULL is not hypothetical: any unit
+        # claimed before it stamps started_at has that shape, and four such rows
+        # were sitting in the live table when this was found.
+        #
+        # The guard is deliberately `is truthy`, not `is not None`, so it also
+        # drops the empty-string case a datetime column cannot really hold.
+        #
+        # These units are left alone rather than failed. A row with no timestamps
+        # is a unit that never really started, and nothing here can tell whether
+        # a worker is attached to it -- dispatch_units() may have claimed it in
+        # this same beat. Failing it would be a guess that can kill live work.
+        # It costs one row per deployment in a schema bug that should not recur.
         for unit in units:
             session = db.get(ExtractionSession, unit.session_id)
             if session.status != "processing":
@@ -958,7 +1014,8 @@ def recover():
             if unit.status == "queued" and unit.queued_at and unit.queued_at < queued_cutoff:
                 unit.queued_at = now()
                 republish_units.append((str(doc.id), str(session.id), str(unit.id)))
-            elif unit.status == "processing" and (unit.heartbeat_at or unit.started_at) < cutoff_unit:
+            elif (unit.status == "processing" and (unit.heartbeat_at or unit.started_at)
+                    and (unit.heartbeat_at or unit.started_at) < cutoff_unit):
                 unit.status = "retry" if unit.attempt_count < config.MAX_UNIT_ATTEMPTS else "failed"
                 unit.next_retry_at = now() if unit.status == "retry" else None
                 unit.error_code, unit.error_message = "WORKER_LOST", "Unit worker heartbeat expired"

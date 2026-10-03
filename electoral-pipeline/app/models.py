@@ -29,6 +29,14 @@ class Document(Base):
     max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     current_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When this document was last handed to the broker, and by whom.
+    #
+    # recover() reads this to decide whether a "queued" document whose session has
+    # done no work is a lost publish rather than one still in flight. dispatch_documents()
+    # sets it on publish and recover() refreshes it on each republish, so the
+    # column is a real deadline rather than the NULL it always was -- the branch
+    # was previously unreachable and a document whose message the broker dropped
+    # stayed "queued" forever.
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(String(100))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
