@@ -16,6 +16,7 @@ Three things this replaces:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,46 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # y` at import time, and pytest imports them before running conftest fixtures.
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+def _load_env_file() -> None:
+    """Seed os.environ from .env for values the shell did not already provide.
+
+    The app reads configuration from the process environment only. In Docker
+    that works because every service carries `env_file: .env` in
+    docker-compose.yml. Outside Docker -- `pytest`, or `uvicorn app.main:app` on
+    a laptop -- nothing loads .env, so every variable falls back to its default
+    in app/config.py.
+
+    That was survivable while the defaults were all real working values. It is
+    not now: ADMIN_TOKEN has no default on purpose, and app/config.py raises at
+    import when it is missing. An unset ADMIN_TOKEN then aborts `import
+    app.config`, which aborts collection of every test module -- the whole
+    suite errors out before a single fixture runs, so this conftest's own
+    state-restoration fixture never gets the chance to help.
+
+    This reads .env without overriding anything already in the environment, so
+    a real shell variable always wins. It deliberately does not parse quoted
+    values, expand variables, or handle multiline entries -- it exists to make
+    the test run see the same configuration the container sees, not to be a
+    dotenv implementation.
+    """
+    env_path = REPO_ROOT / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip("'\"")
+
+
+_load_env_file()
 
 
 def pytest_ignore_collect(collection_path, config):

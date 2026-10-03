@@ -73,15 +73,32 @@ print(f"[MAIN] FastAPI app initialized with title={app.title}, version={app.vers
 
 def admin(credentials: HTTPBasicCredentials = Depends(security)):
     log.debug(f"[MAIN] Admin authentication attempt for username={credentials.username}")
-    print(f"[MAIN] Admin authentication attempt for username={credentials.username}")
-    
-    if not (secrets.compare_digest(credentials.username, "admin") and secrets.compare_digest(credentials.password, config.ADMIN_TOKEN)):
+
+    # secrets.compare_digest accepts only ASCII str. Given any non-ASCII input
+    # it raises TypeError rather than returning False, and because this is a
+    # FastAPI dependency with no global exception handler the TypeError escapes
+    # as a 500 on all 23 routes that carry Depends(admin) -- so a token
+    # containing one accented or non-Latin character (a password manager will
+    # produce one without effort) locks the operator out of the entire app
+    # except /health, with a 500 that reads like a broken service rather than a
+    # bad credential.
+    #
+    # Comparing the utf-8 encodings makes both operands bytes, which
+    # compare_digest accepts unconditionally. The comparison stays
+    # constant-time with respect to content.
+    username_ok = secrets.compare_digest(
+        credentials.username.encode("utf-8"), b"admin"
+    )
+    password_ok = secrets.compare_digest(
+        credentials.password.encode("utf-8"),
+        config.ADMIN_TOKEN.encode("utf-8"),
+    )
+
+    if not (username_ok and password_ok):
         log.warning(f"[MAIN] Admin authentication failed for username={credentials.username}")
-        print(f"[MAIN] Admin authentication failed for username={credentials.username}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, headers={"WWW-Authenticate": "Basic"})
-    
+
     log.debug(f"[MAIN] Admin authentication successful for username={credentials.username}")
-    print(f"[MAIN] Admin authentication successful for username={credentials.username}")
 
 
 def parse_uuid(value: str):

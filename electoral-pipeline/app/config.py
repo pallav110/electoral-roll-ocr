@@ -63,4 +63,49 @@ MAX_UNIT_ATTEMPTS = max(1, int(os.getenv("MAX_UNIT_ATTEMPTS", "3")))
 UNIT_STALE_SECONDS = int(os.getenv("UNIT_STALE_SECONDS", "600"))
 DOCUMENT_STALE_SECONDS = int(os.getenv("DOCUMENT_STALE_SECONDS", "600"))
 RETRY_BASE_SECONDS = int(os.getenv("RETRY_BASE_SECONDS", "30"))
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me-before-deployment")
+
+# The admin credential for every route carrying Depends(admin) -- which is all
+# of them except /health.
+#
+# There is deliberately no default. This used to fall back to the literal
+# 'change-me-before-deployment', which .env.example also ships: if the variable
+# were ever absent from a deployment, every route authenticated against a
+# password published in the repository. A weak default for a security control
+# is worse than none, because it looks configured and survives a deploy.
+#
+# Refusing to start is the correct failure mode. A missing token is an operator
+# error that should surface immediately and unmistakably at boot, not as a
+# service that runs all week serving voter records behind a guessable password.
+#
+# ALLOW_INSECURE_DEFAULT_ADMIN is an explicit escape hatch for local runs that
+# need to boot without a token. It is never set in docker-compose.yml, and
+# setting it is itself a deliberate act rather than an omission.
+_ADMIN_DEFAULT = "change-me-before-deployment"
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+if not ADMIN_TOKEN:
+    if os.getenv("ALLOW_INSECURE_DEFAULT_ADMIN", "").strip().lower() in ("1", "true", "yes"):
+        ADMIN_TOKEN = _ADMIN_DEFAULT
+        import warnings
+
+        warnings.warn(
+            "ADMIN_TOKEN is unset; falling back to the published placeholder "
+            "'change-me-before-deployment'. Every admin route is protected by a "
+            "password that is in the public repository. Set ADMIN_TOKEN, or set "
+            "ALLOW_INSECURE_DEFAULT_ADMIN=1 to silence this.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    else:
+        raise RuntimeError(
+            "ADMIN_TOKEN is not set. Every route except /health requires it. "
+            "Generate one with:\n"
+            "    python -c \"import secrets; print(secrets.token_urlsafe(24))\"\n"
+            "and put it in .env. To run deliberately without one (local only):\n"
+            "    ALLOW_INSECURE_DEFAULT_ADMIN=1"
+        )
+elif ADMIN_TOKEN == _ADMIN_DEFAULT:
+    raise RuntimeError(
+        "ADMIN_TOKEN is still the published placeholder "
+        "'change-me-before-deployment', which is in the public repository. "
+        "Replace it in .env with a generated value."
+    )
