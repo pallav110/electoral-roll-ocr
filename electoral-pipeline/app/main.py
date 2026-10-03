@@ -16,6 +16,7 @@ from app import config
 from app.db import SessionLocal, get_db
 from app.extractor import mock_extract
 from app.models import Document, ElectoralRecord, ExtractionSession, ExtractionUnit, ProcessingEvent, RawResponse, ScanRoot
+from app.record_scope import count_records_for_document, records_for_document
 from app.presentation import (
     describe_error,
     document_progress,
@@ -184,23 +185,22 @@ def document_detail(request: Request, document_id: str, db: Session = Depends(ge
     sessions = db.scalars(select(ExtractionSession).where(ExtractionSession.document_id == doc.id).order_by(ExtractionSession.attempt_number.desc())).all()
     events = db.scalars(select(ProcessingEvent).where(ProcessingEvent.document_id == doc.id).order_by(ProcessingEvent.id.desc()).limit(100)).all()
 
-    # Voter records for this document, newest session first. The point of the
-    # bilingual work is seeing names in Hindi and English, so the table belongs
-    # on the document page rather than only three clicks away on a unit page.
-    records = db.scalars(
-        select(ElectoralRecord)
-        .where(ElectoralRecord.document_id == doc.id)
-        .order_by(ElectoralRecord.page_number, ElectoralRecord.source_row_number)
-        .limit(100)
-    ).all()
-    total_records = db.scalar(
-        select(func.count()).select_from(ElectoralRecord).where(ElectoralRecord.document_id == doc.id)
-    ) or 0
+    # Voter records for this document, from ONE extraction attempt. The point of
+    # the bilingual work is seeing names in Hindi and English, so the table
+    # belongs on the document page rather than only three clicks away on a unit
+    # page.
+    #
+    # Scoped to a single session, not to document_id. Every retry opens a new
+    # session and writes a fresh copy of every card, so filtering on document_id
+    # alone lists each voter once per attempt ever made -- twice over for a
+    # document that has been retried once, with no way to tell the copies apart.
+    records, record_session = records_for_document(db, doc.id, limit=100)
+    total_records = count_records_for_document(db, doc.id)
 
-    log.info(f"[MAIN] Returning document {document_id} with {len(sessions)} sessions, {len(events)} events, {len(records)}/{total_records} records")
-    print(f"[MAIN] Returning document {document_id} with {len(sessions)} sessions, {len(events)} events, {len(records)}/{total_records} records")
+    log.info(f"[MAIN] Returning document {document_id} with {len(sessions)} sessions, {len(events)} events, {len(records)}/{total_records} records from attempt {record_session.attempt_number if record_session else None}")
+    print(f"[MAIN] Returning document {document_id} with {len(sessions)} sessions, {len(events)} events, {len(records)}/{total_records} records from attempt {record_session.attempt_number if record_session else None}")
 
-    return render(request, "document.html", doc=doc, sessions=sessions, events=events, records=records, total_records=total_records)
+    return render(request, "document.html", doc=doc, sessions=sessions, events=events, records=records, total_records=total_records, record_session=record_session)
 
 
 @app.get("/sessions/{session_id}", response_class=HTMLResponse, dependencies=[Depends(admin)])
@@ -423,12 +423,11 @@ def export_csv(document_id: str, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(404)
 
-    # Get all records for this document
-    records = db.scalars(
-        select(ElectoralRecord)
-        .where(ElectoralRecord.document_id == doc.id)
-        .order_by(ElectoralRecord.page_number, ElectoralRecord.source_row_number)
-    ).all()
+    # All records for this document, from ONE extraction attempt. See
+    # app/record_scope.py for why the session must be pinned: a retried
+    # document holds a full copy of its roll per attempt, and an unscoped
+    # export writes every copy -- 1062 CSV lines for a 531-voter roll.
+    records, record_session = records_for_document(db, doc.id)
 
     def generate_csv():
         output = io.StringIO()
@@ -436,9 +435,14 @@ def export_csv(document_id: str, db: Session = Depends(get_db)):
         output.write('﻿')
         writer = csv.writer(output)
 
-        # Write header with all fields
+        # Write header with all fields.
+        #
+        # attempt_number is prepended so the file says which extraction pass it
+        # came from. Without it a reader comparing two exports has no way to
+        # tell a re-extraction from a genuine change in the roll.
+        attempt = record_session.attempt_number if record_session else ""
         headers = [
-            'sno', 'page_number', 'card_index', 'voter_sr_no', 'id_card_no',
+            'attempt', 'sno', 'page_number', 'card_index', 'voter_sr_no', 'id_card_no',
             'gender', 'age', 'house_no',
             'voter_first_name', 'voter_middle_name', 'voter_sur_name',
             'relation_name',
@@ -471,6 +475,7 @@ def export_csv(document_id: str, db: Session = Depends(get_db)):
             field_sources_str = json.dumps(r.field_sources) if r.field_sources else ''
             
             row = [
+                attempt,
                 r.sno or '',
                 r.page_number or '',
                 r.card_index or '',
