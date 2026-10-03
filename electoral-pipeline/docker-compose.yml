@@ -61,7 +61,7 @@ services:
       # min(8, cpu_count), which would leave half the box idle. Each worker
       # runs one card through Tesseract subprocesses, and OMP_THREAD_LIMIT=1
       # keeps those from nesting threads, so one core per worker is the unit.
-      - OCR_CARD_WORKERS=12
+      - OCR_CARD_WORKERS=14
     volumes:
       # The service module is bind-mounted so a `docker compose up` can never
       # silently revert to an older copy baked into the image. Previously the
@@ -70,6 +70,12 @@ services:
       # while looking perfectly healthy.
       - ./ocr_pdf_api.py:/app/ocr_pdf_api.py:ro
       - ./sample-pdfs:/data/pdfs
+      # PaddleOCR downloads ~16 MB of model weights into /root/.paddleocr on
+      # first use. Without a mount that path is part of the container's
+      # writable layer, so every `docker compose up` re-downloads all three
+      # models before page 1 can start. This volume keeps them across
+      # restarts. Sized for the model cache only -- nothing else writes here.
+      - ocr-paddle-cache:/root/.paddleocr
       # Mounted where ocr_pdf_api.py actually writes. OCR_OUTPUT_DIR defaults to
       # <parent of the module's dir>/results, which inside the container is
       # /results -- mounting it under the office path instead left every saved
@@ -149,3 +155,4 @@ volumes:
   pgdata:
   redisdata:
   ocr-results:
+  ocr-paddle-cache:

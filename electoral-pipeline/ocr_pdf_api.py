@@ -3287,6 +3287,13 @@ async def ocr_extract_endpoint(
     skip_non_voter_pages: bool = Form(default=True, description="Skip pages without EPICs in the expected card grid"),
 ) -> Response:
     """Extract OCR from uploaded PDF. Validates file, processes pages, returns JSON results with voter records."""
+    # Rebase the progress clock on the request, not on the process. _PROGRESS_START
+    # is module-level, so a long-lived server made every log line report process
+    # age -- the first page logged "+438.9s" having done no work at all, which
+    # made real per-request cost impossible to read.
+    global _PROGRESS_START
+    _PROGRESS_START = time.time()
+
     filename = pdf_file.filename or "document.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(415, "Only PDF files are supported")
