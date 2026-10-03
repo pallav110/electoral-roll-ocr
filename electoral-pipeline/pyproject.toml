@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "electoral-pipeline"
+version = "0.1.0"
+description = "Electoral-roll OCR extraction pipeline"
+requires-python = ">=3.12"
+
+# Tool configuration only -- dependencies stay in ocr_api_requirements.txt and
+# the Dockerfiles, which is where the image build reads them from. Declaring
+# them here as well would create a second, drifting source of truth.
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+# Without testpaths, a bare `pytest` collects the whole repository -- including
+# OCR/tests/, which resolves a stale scripts/ocr_pdf_api.py path and aborts
+# collection with INTERNALERROR before a single test runs. Pointing testpaths at
+# tests/ makes the bare command a working command.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "slow: exercises real OCR or the filesystem; deselect with -m 'not slow'",
+    "ocr: requires cv2 and fitz, which only the ocr image installs",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["OCR/", "input/", "debug_cards/", "ingest/"]
+
+[tool.ruff.lint]
+# E501 (line length) is left off deliberately: the existing code has long lines
+# in explanatory comments and reformatting them would bury the diff.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# ocr_pdf_api.py redefines cv2/numpy inside functions on purpose (see the
+# lazy-import comments) and does its own import ordering around the
+# OMP_THREAD_LIMIT guard, which must stay before the cv2 import.
+"ocr_pdf_api.py" = ["E402", "F811"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+ignore_missing_imports = true
+# Untyped defs dominate the codebase today; turning this on unblocks the
+# incremental typing work in the review's Tier 4 without flagging all of it now.
+check_untyped_defs = false
+disallow_untyped_defs = false
+files = ["app"]
+
+[[tool.mypy.overrides]]
+# These three talk to Postgres/Celery/FastAPI objects whose types are dynamic.
+module = ["app.migrate", "app.tasks", "app.db_browse"]
+ignore_errors = true

@@ -1,0 +1,112 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The app half: no cv2/fitz/paddle needed, so it installs in seconds.
+  app-tests:
+    name: app tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12"]
+    defaults:
+      run:
+        working-directory: electoral-pipeline
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: electoral-pipeline/*requirements*.txt
+
+      - name: Install app dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check .
+
+      - name: Test
+        run: pytest tests/ -q --maxfail=1
+
+  # The OCR half needs Tesseract + Hindi data and the CV stack. It runs in the
+  # container image the service actually ships, because the deleted-mark vote
+  # and the house-number arbitration depend on the exact Tesseract build --
+  # Dockerfile.ocr asserts its version and traineddata md5 at build time for
+  # that reason. Testing against a different Tesseract than production runs
+  # would make these tests actively misleading.
+  ocr-tests:
+    name: ocr tests (docker)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: electoral-pipeline
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the OCR image
+        run: docker compose build ocr
+
+      - name: Run the OCR-side tests
+        run: |
+          docker compose run --rm --no-deps \
+            -v "$PWD/tests:/code/tests:ro" \
+            --entrypoint python ocr -m pytest tests/ -q -p no:cacheprovider \
+            --ignore=tests/test_scripts
+
+      # A cheap guard on the invariants that have bitten twice: the card grid is
+      # 3 columns x 10 rows and must yield 30 positions per page unconditionally,
+      # and the deleted-mark vote must still be 8 readers with a 5-hit bar.
+      # Both are constants, not behaviour, so a regression here is a refactor
+      # that changed a number nobody intended to change.
+      - name: Assert pipeline invariants
+        run: |
+          docker compose run --rm --no-deps \
+            --entrypoint python ocr -c "
+          from ocr_pdf_api import (
+              DELETED_VOTE_HEIGHTS_PX, DELETED_VOTE_MIN_HITS,
+              VOTER_CARD_ROW_BOUNDS, VOTER_CARD_COLUMN_GAP,
+              _voter_card_rects,
+          )
+          # 4 pixel heights x {plain, Otsu} -- derived, not hardcoded, so adding
+          # a height cannot silently break the bar.
+          readers = len(DELETED_VOTE_HEIGHTS_PX) * 2
+          assert readers == 8, readers
+          assert DELETED_VOTE_MIN_HITS == 5, DELETED_VOTE_MIN_HITS
+          assert len(VOTER_CARD_ROW_BOUNDS) == 10, len(VOTER_CARD_ROW_BOUNDS)
+          print('invariants ok:', 3, 'cols x', len(VOTER_CARD_ROW_BOUNDS),
+                'rows = 30 positions |', readers, 'readers,',
+                DELETED_VOTE_MIN_HITS, 'hits needed')
+          "
+
+  # Ruff on the OCR file only needs the source, not the runtime.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: electoral-pipeline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+          ruff check .
