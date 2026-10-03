@@ -2516,33 +2516,128 @@ def _split_person_name(full_name: str) -> tuple[str, str, str]:
 def _compute_confidence(
     tesseract_conf: Optional[float],
     paddle_conf: Optional[dict[str, float]]
-) -> Optional[float]:
-    """Combine Tesseract and PaddleOCR confidences into a single 0-1 score.
+) -> tuple[Optional[float], Optional[float]]:
+    """Combine Tesseract and PaddleOCR confidences into a 0-1 score.
+
+    Returns (confidence, coverage).
 
     Tesseract confidence is 0-100 (word-level mean).
     PaddleOCR confidence is 0-1 per field (serial, house, age).
 
-    Strategy:
-    - If both available, average them (normalize Tesseract to 0-1)
-    - If only one available, use that
-    - If neither, return None
-    """
-    tess_norm = tesseract_conf / 100.0 if tesseract_conf is not None else None
+    Two separate numbers, because they answer different questions:
 
-    # Average PaddleOCR field confidences
-    paddle_avg = None
-    if paddle_conf and isinstance(paddle_conf, dict) and paddle_conf:
+    - **confidence** -- of the text that was actually read, how much do we
+      trust it?
+    - **coverage** -- what fraction of the card did we even attempt, and
+      how much of that produced a usable read?
+
+    Reporting confidence alone cannot distinguish "read everything and got
+    it right" from "read one field, got it right." Both are a mean over
+    the same single correct value, so both came back as 1.0.
+
+    Zeros are evidence. PaddleOCR records a field it could not read as 0.0
+    (see the `if field_confs else 0.0` in the sequential pass), and that is
+    a *worse* result than a low-confidence read, not an absent one. The
+    previous version filtered those zeros out before averaging --
+
         valid_confs = [c for c in paddle_conf.values() if c > 0]
-        if valid_confs:
-            paddle_avg = sum(valid_confs) / len(valid_confs)
+
+    -- which rewarded failure twice over. A card PaddleOCR recognised
+    nothing on scored as well as one it recognised everything on, because
+    the fields that failed contributed nothing to the mean. And when every
+    field scored 0.0 the filtered list came back empty, `paddle_avg`
+    became None, and the function returned `tess_norm` at full weight: a
+    total Paddle failure was indistinguishable from Paddle never running,
+    and both were indistinguishable from Paddle agreeing.
+
+    So a field's presence in the dict is the record of whether we *tried*
+    it, and its value is the record of what we *got*:
+
+    - key absent  -> not attempted; no evidence either way.
+    - key = 0.0   -> attempted and missed; drags the mean and the coverage.
+
+    Coverage is the fraction of attempted fields that returned a read. It
+    is reported alongside the score rather than folded into it, because a
+    single number cannot carry both meanings: weighting a missed field at
+    zero drags the average down, but it drags it the same way whether the
+    card had one field or five, so a card read badly-but-broadly and a card
+    read well-but-briefly both land mid-scale.
+
+    Coverage is measured over the Paddle fields alone, and is None when
+    there are none. Tesseract is excluded on purpose: we know *that* it
+    read, but not how many fields it should have found, so counting it as
+    one unit would let it dilute the ratio with a number we cannot
+    subdivide -- and would report 1.0, "everything was read", for a card
+    where a whole engine contributed nothing. None means "no per-field
+    evidence", which is the honest answer there.
+
+    Returns (None, None) when neither engine produced anything at all --
+    there is no evidence to be confident or unconfident about.
+    """
+    # Normalise Tesseract's 0-100 into 0-1. Clamped because the raw value is
+    # a mean of Tesseract's own per-word scores and a malformed one would
+    # otherwise leave the response outside the 0-1 contract that
+    # normalize._confidence() has to clamp on the way into the database.
+    #
+    # NaN is checked before the clamp, not by the clamp. `min(1.0, nan)` and
+    # `max(0.0, nan)` are both nan in CPython, and `min` returns its first
+    # argument when the comparison is False, so `max(0.0, min(1.0, nan))`
+    # quietly yields 0.0 -- which would report a read we could not evaluate
+    # as the *worst possible* result rather than as no result at all. A
+    # garbage Tesseract score is no evidence, so the engine drops out
+    # entirely and Paddle alone carries the result.
+    tess_norm: Optional[float] = None
+    if tesseract_conf is not None:
+        try:
+            number = float(tesseract_conf)
+        except (TypeError, ValueError):
+            number = None
+        if number is not None and number == number:  # not NaN
+            tess_norm = max(0.0, min(1.0, number / 100.0))
+
+    # Mean over every field we attempted, zeros included. Not filtered.
+    paddle_avg: Optional[float] = None
+    paddle_fields = 0
+    paddle_hits = 0
+    if isinstance(paddle_conf, dict) and paddle_conf:
+        values = []
+        for value in paddle_conf.values():
+            # An unparseable value is not "not attempted" -- it is a number
+            # we could not read, so it counts as a field we tried and did
+            # not get. Dropping it would shrink the denominator and quietly
+            # re-create the mean-over-successes that this function exists to
+            # stop computing.
+            number = 0.0
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                number = 0.0
+            if number != number or number in (float("inf"), float("-inf")):
+                # NaN and the infinities are valid floats that survive
+                # float(), so they reach the clamp. NaN would come out the
+                # other side as 0.0 and infinity as 1.0 -- and a bare clamp
+                # turning "the producer emitted infinity" into the *maximum*
+                # possible confidence is the most misleading value available.
+                # normalize._confidence() rejects these for the same reason.
+                number = 0.0
+            values.append(max(0.0, min(1.0, number)))
+        if values:
+            paddle_fields = len(values)
+            paddle_hits = sum(1 for v in values if v > 0)
+            paddle_avg = sum(values) / len(values)
 
     if tess_norm is not None and paddle_avg is not None:
-        return (tess_norm + paddle_avg) / 2.0
+        confidence = (tess_norm + paddle_avg) / 2.0
     elif tess_norm is not None:
-        return tess_norm
+        confidence = tess_norm
     elif paddle_avg is not None:
-        return paddle_avg
-    return None
+        confidence = paddle_avg
+    else:
+        return None, None
+
+    if paddle_fields == 0:
+        return confidence, None
+    return confidence, paddle_hits / paddle_fields
 
 
 def _public_record(
@@ -2568,6 +2663,11 @@ def _public_record(
         page_number,
     )
     vf, vm, vs = _split_person_name(voter_name)
+
+    confidence, coverage = _compute_confidence(
+        record.get("_tesseract_conf"),
+        record.get("_paddle_conf")
+    )
 
     return {
         "sno": counter,
@@ -2598,11 +2698,13 @@ def _public_record(
         "needs_review": bool(record.get("_needs_review", False)),
         "review_reasons": list(record.get("_review_reasons", [])),
         "field_sources": dict(record.get("_field_sources", {})),
-        # Confidence: combine Tesseract and PaddleOCR confidences
-        "confidence": _compute_confidence(
-            record.get("_tesseract_conf"),
-            record.get("_paddle_conf")
-        ),
+        # Confidence: combine Tesseract and PaddleOCR confidences.
+        # `confidence` is how much to trust the text that was read;
+        # `confidence_coverage` is how much of the card was read at all.
+        # A high score over a thin read is not a good extraction, and one
+        # number cannot say both things -- see _compute_confidence().
+        "confidence": confidence,
+        "confidence_coverage": coverage,
     }
 
 def _page_looks_like_voter_grid(page: fitz.Page) -> bool:
