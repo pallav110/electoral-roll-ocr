@@ -248,7 +248,36 @@ class ElectoralRecord(Base):
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     validation_errors: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
-    __table_args__ = (Index("uq_electoral_record_source", "session_id", "page_number", "source_row_number", unique=True, postgresql_where=text("page_number IS NOT NULL AND source_row_number IS NOT NULL")), Index("idx_records_epic", "epic_number"), Index("idx_records_name_en", "name_en"), Index("idx_records_unit", "extraction_unit_id"))
+    __table_args__ = (
+        # The natural key of an extracted voter: which attempt produced it, which
+        # page it was printed on, which card on that page. The unique constraint
+        # on it makes re-normalising the same unit idempotent.
+        #
+        # The partial WHERE matters: a card position can be NULL when the row
+        # comes from a partial tail page, so without it two NULL-bearing rows
+        # would not conflict with each other and a re-run would duplicate them.
+        Index(
+            "uq_electoral_record_source",
+            "session_id",
+            "page_number",
+            "source_row_number",
+            unique=True,
+            postgresql_where=text("page_number IS NOT NULL AND source_row_number IS NOT NULL"),
+        ),
+        Index("idx_records_epic", "epic_number"),
+        Index("idx_records_name_en", "name_en"),
+        Index("idx_records_unit", "extraction_unit_id"),
+        # Covers the shape of the three record queries that dominate this app:
+        # "records for this document", ordered by page then row. Without it each
+        # of them sequential-scans the whole table -- the largest one in the
+        # schema -- and then sorts the result.
+        #
+        # (document_id, page_number) rather than (document_id, page_number,
+        # source_row_number): the leading two columns are what every one of those
+        # queries filters and orders on, and including the third would stop
+        # PostgreSQL from using this index to satisfy an ORDER BY that omits it.
+        Index("idx_records_document", "document_id", "page_number"),
+    )
 
 
 class ProcessingEvent(Base):
