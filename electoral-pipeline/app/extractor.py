@@ -162,7 +162,13 @@ def mock_extract(request: dict) -> dict:
     result = {
         "extractor_version": "mock-1.0.0",
         "page_from": start, "page_to": end,
-        "document_metadata": {"hindi": {"state": "नमूना राज्य", "district": "नमूना जिला"}, "english": {"state": "Sample State", "district": "Sample District"}, "common": {"roll_year": 2026}},
+        # roll_year is None for the same reason as in extract(): nothing read a year off
+        # a document. mock_extract reads no document at all, so a plausible-looking
+        # 2026 here would only lend the mock's fabricated data an air of realism it
+        # has no claim to -- and would leave this literal as the last place the
+        # hardcoded year survives, where it would be indistinguishable from the
+        # real bug if this line were ever copied.
+        "document_metadata": {"hindi": {"state": "नमूना राज्य", "district": "नमूना जिला"}, "english": {"state": "Sample State", "district": "Sample District"}, "common": {"roll_year": None}},
         "records": rows,
     }
     
@@ -258,7 +264,27 @@ def extract(document_id: str, document_location: str, page_from: int, page_to: i
                     "polling_station_address": "",
                 },
                 "common": {
-                    "roll_year": 2026,
+                    # Read from the OCR service when it reports one, NULL when
+                    # it does not.
+                    #
+                    # This was the literal 2026. Nothing read a year off the PDF:
+                    # the value was simply asserted, and then stamped onto every
+                    # row of every roll the system will ever process, forever. A
+                    # voter list dated 2019, 2027 or 2031 would be stored as 2026
+                    # with no field anywhere recording that it was a guess.
+                    #
+                    # NULL is the honest value for "not read". It is visibly
+                    # absent, so a row can never be mistaken for one whose year
+                    # was actually recovered from the document. The column is
+                    # already nullable, so nothing downstream has to change.
+                    #
+                    # The OCR service does not currently report a year --
+                    # _extract_roll_header_metadata returns only state_code,
+                    # ac_code, anubhag_code, anubhag_name and booth_code -- so
+                    # today this is consistently None. That is correct, and it
+                    # becomes correct-and-populated for free if the header ever
+                    # gains a year, without touching this file again.
+                    "roll_year": safe_int(roll_metadata.get("roll_year")),
                     "assembly_constituency_number": safe_int(roll_metadata.get("ac_code")),
                     "part_number": safe_int(roll_metadata.get("anubhag_code")),
                 }
