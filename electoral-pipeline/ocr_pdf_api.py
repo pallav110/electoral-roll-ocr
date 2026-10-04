@@ -2684,6 +2684,179 @@ def _compute_confidence(
     return confidence, paddle_hits / paddle_fields
 
 
+# ── Review triggers ────────────────────────────────────────────────────────
+#
+# Until now `_needs_review` was set in exactly one place: inside `if
+# epic_split:`. Every other field had no path to a flag at all, so 3 of 531
+# records were marked and the flag measured the EPIC vote rather than the
+# pipeline's uncertainty. That undercounts -- a record can be unflagged simply
+# because nobody ever looked at it.
+#
+# These triggers do NOT correct anything. They only say "a human should look at
+# this field", which is a different claim from "this value is wrong". Each one
+# fires on an observable condition rather than on a confidence score, because a
+# score is not a threshold anyone has ever validated against real errors.
+#
+# The rules are deliberately conservative. A trigger that fires on healthy
+# records trains people to ignore the flag, which costs more than a miss: the
+# one signal this system has for "check me" stops meaning anything.
+#
+#   age_absent        no age at all -- either engine found no digits
+#   age_out_of_range  age outside 18..120 -- the two in-voter bounds
+#   age_not_integer   age is present but not a plain integer
+#   house_absent      no house number at all
+#   house_devanagari  house carries Devanagari that is neither a known label
+#                     word nor a single-consonant plot letter -- i.e. OCR junk
+#                     the arbitration did not resolve.
+#   house_leading_1   a leading 1 was PREPENDED rather than read. This is a
+#                     reconstruction: the digits now present include one no
+#                     read ever saw. See below.
+#
+# Why leading-1 is flagged. `if paddle_house == "1" + cur_digits` at the merge
+# site fabricates a digit to reconcile two engines. It is right often enough to
+# keep, but the value it returns was never printed on the card -- so it needs a
+# human more than any other value does, not less.
+
+AGE_MIN, AGE_MAX = 18, 120
+
+# House values that are Devanagari by design rather than by OCR failure.
+#
+# The roll prints free-text addresses, and two requirements pull in opposite
+# directions on them:
+#   "we can ignore these values हाऊस ने॑ एचएनओ ... all we want is number"
+#   "we want english letters preserved like E represented as choti e ki matra"
+# So neither shape is an error: label words are noise to be dropped, and a
+# letter beside a number is data to be kept. Flagging either as a defect would
+# put a large share of CORRECT records into the review queue.
+#
+# What IS a defect is Devanagari that is neither -- unknown junk. That is the
+# only house shape this flags, and it is why the count is small.
+_HOUSE_FILLER_TOKENS = (
+    "हाऊस", "मकान", "एचएनओ", "एचएनजीओ", "प्लॉट", "ख", "नं", "न॑", "ने॑",
+    "संख्या", "वार्ड", "मोहल्ला", "पता", "गली", "कॉलोनी", "सं", "सं0",
+)
+
+# Devanagari code points that ATTACH to a consonant rather than being one:
+# matras, the virama, nukta, and the accents. Excluded from the consonant
+# count, or 'बी' (b + ii-matra) counts as two consonants and every plot letter
+# in the roll reads as a word.
+_DEVA_RUN = re.compile(r"[ऀ-ॿ]+")
+_DEVA_MARK = re.compile(r"[ऀ-ऄऺ-॑ॕॢॣ]")
+
+# Punctuation is replaced by a SPACE, never deleted outright. Deleting it
+# glues two separate plot letters together and the result reads as a word:
+#   'पी. नं-बी 190, ख नं-701'  -> deleting '.', '-' and ',' leaves
+#                                'पीबी'  -> 2 consonants -> flagged as junk.
+# That value is plot 190 / khasra 701, a real two-part address the user
+# confirmed. Space-separated, 'पी' and 'बी' are each one consonant, which is
+# what makes them plot letters.
+_DEVA_GLUE = re.compile(r"[\s.,\-–/:]+")
+
+
+def _devanagari_consonants(run: str) -> int:
+    """Count consonants in a Devanagari run, ignoring marks.
+
+    'बी' -> 1 (a plot letter). 'व्दव' -> 3 (v, virama, d, v -- junk). The
+    virama is the case that decides this: counting it made the confirmed-bad
+    'व्दव 1141' classify as a single plot letter, so the rule missed the one
+    house defect that has actually been confirmed against the pixels.
+    """
+    return sum(1 for ch in run if not _DEVA_MARK.match(ch))
+
+
+def _classify_devanagari_house(house: str) -> tuple[str, list[str]]:
+    """Split a Devanagari house value into (verdict, leftover runs).
+
+    verdict:
+      "clean"   only label words remained -- 'हाऊस नं- 453'
+      "plot"    only single-consonant plot letters remained -- 'इ-8/496',
+                '7 बी', 'सी-22', '47-ई-7'. Correct values that must be kept.
+      "unknown" something else remained -- 'व्दव 1141', 'तर 42', 'छ्लो-9'.
+                OCR junk, and the only verdict worth a human's time.
+
+    Measured over the 89 Devanagari house values in the 531-record capture:
+    8 clean, 70 plot, 11 unknown. The unknown group contains every confirmed
+    house defect; the plot group is entirely values the user asked to preserve.
+
+    Note the two bugs this function had before it worked, because both fail
+    SILENTLY -- the verdict comes back plausible either way:
+      * `findall(r"[ऀ-ॿ]")` with no `+` yields single CHARACTERS, not runs, so
+        every run looked like one consonant and 'व्दव' classified as 'plot'.
+      * counting the virama as a consonant did the same thing by hand.
+    """
+    residue = house
+    for token in sorted(_HOUSE_FILLER_TOKENS, key=len, reverse=True):
+        if token in residue:
+            residue = residue.replace(token, " ")
+    residue = _DEVA_GLUE.sub(" ", residue)
+    runs = _DEVA_RUN.findall(residue)
+    if not runs:
+        return "clean", []
+    unknown = [r for r in runs if _devanagari_consonants(r) > 1]
+    if unknown:
+        return "unknown", unknown
+    return "plot", runs
+
+
+def _mark_review(record: dict[str, Any], reason: str) -> None:
+    """Attach a review reason to a record, once, without touching its values.
+
+    Deliberately separate from any correction path. Every caller in this file
+    uses it the same way: decide, then ask for a human. A trigger that also
+    rewrote the value would make "flagged" mean "changed", and the two are not
+    the same claim.
+    """
+    record["_needs_review"] = True
+    reasons = record.setdefault("_review_reasons", [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def _review_record(record: dict[str, Any]) -> None:
+    """Run every review trigger over one finished record. Adds flags only.
+
+    Called once per record, after all OCR and arbitration is complete, so a
+    trigger sees the value that will actually be emitted rather than an
+    intermediate that later gets replaced.
+    """
+    # ── age ──
+    age = record.get("age", "")
+    if age is None or str(age).strip() == "":
+        _mark_review(record, "age_absent")
+    else:
+        age_text = str(age).strip()
+        if not age_text.isdigit():
+            _mark_review(record, "age_not_integer")
+        else:
+            age_int = int(age_text)
+            if not (AGE_MIN <= age_int <= AGE_MAX):
+                _mark_review(
+                    record,
+                    "age_out_of_range: %d not in %d..%d"
+                    % (age_int, AGE_MIN, AGE_MAX),
+                )
+
+    # ── house ──
+    house = record.get("house_no", "")
+    house_text = str(house).strip() if house is not None else ""
+    if not house_text:
+        _mark_review(record, "house_absent")
+    elif re.search(r"[ऀ-ॿ]", house_text):
+        # Devanagari alone is not a defect: most of it is correct (see the
+        # filler-token comment above). Only the unknown shape is flagged.
+        verdict, runs = _classify_devanagari_house(house_text)
+        if verdict == "unknown":
+            _mark_review(
+                record,
+                "house_devanagari_unknown: %s in %r"
+                % ("/".join(runs[:3]), house_text),
+            )
+
+    # ── the reconstructed leading 1 ──
+    if record.get("_house_leading_1_prepended"):
+        _mark_review(record, "house_leading_1_prepended: %r" % house_text)
+
+
 def _public_record(
     record: dict[str, Any], counter: int, pdf_name: str,
     roll_metadata: dict[str, str],
@@ -3176,6 +3349,11 @@ def _extract_pdf_ocr_unlocked(
                                                 r"[^\d]", "", cur.split()[0]) if cur else ""
                                             if cur_digits and paddle_house == "1" + cur_digits:
                                                 rec["house_no"] = "1" + cur
+                                                # A digit was reconstructed, not
+                                                # read. Flag it so the value a
+                                                # human checks is the one that
+                                                # needs checking.
+                                                rec["_house_leading_1_prepended"] = True
 
                             elif field == "age" and field_texts:
                                 paddle_ages = []
@@ -3220,6 +3398,12 @@ def _extract_pdf_ocr_unlocked(
             for (card_index, _), record in zip(indexed_rects, extracted_records):
                 if record is None:
                     continue
+                # Run the review triggers here, not inside the card thread: this
+                # is the first point at which every engine and every arbitration
+                # has finished with the record, so a trigger sees the value that
+                # will actually be emitted. Inside the pool it would inspect an
+                # intermediate that the Paddle pass still rewrites.
+                _review_record(record)
                 record["_page_number"] = page_number
                 record["_card_index"] = card_index
                 page_records.append(record)

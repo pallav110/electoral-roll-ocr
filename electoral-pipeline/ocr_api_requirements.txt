@@ -45,3 +45,18 @@ openpyxl==3.1.5
 
 # For name translation (optional)
 deep-translator>=1.11.4
+
+# The OCR suite runs in THIS image (see .github/workflows/tests.yml, ocr-tests
+# job), and tests/test_transliterate.py, test_scheme_contract.py,
+# test_house_number.py and test_name_lexicon.py all import app.transliterate.
+#
+# Without this library app/transliterate.py degrades -- it prints a warning and
+# returns the Devanagari input unchanged instead of Latin. Every test comparing
+# transliterate() output to a Latin expectation then fails on its face:
+#
+#     assert 'राजीव' == 'Rajiv'
+#
+# which reads like a broken romaniser but is a missing dependency. The failure
+# count was 87 across those four files before this line existed. It is pinned to
+# the same version as requirements.txt so the two images romanise identically.
+indic-transliteration==2.3.82

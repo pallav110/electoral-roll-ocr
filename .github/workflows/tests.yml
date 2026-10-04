@@ -35,6 +35,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # tests/test_confidence_coverage.py, test_hindi_name_relation_split.py
+          # and test_outer_line_removal.py import ocr_pdf_api, which imports cv2
+          # and numpy at module scope. Without these, collection aborts on those
+          # three files and the whole app job errors out -- which is what it did
+          # before this line. Deliberately NOT opencv-contrib or paddleocr: the
+          # three tests only need cv2 and numpy to import, and the engine itself
+          # is optional (ocr_pdf_api degrades to Tesseract-only without it). The
+          # ocr-tests job below covers the real engine.
+          pip install opencv-python-headless==4.10.0.84 numpy==2.2.6
 
       - name: Lint
         run: |
@@ -42,7 +51,10 @@ jobs:
           ruff check .
 
       - name: Test
-        run: pytest tests/ -q --maxfail=1
+        # No --maxfail=1: it hides every failure after the first, so a
+        # single broken import reports as one failure instead of naming all
+        # three files that could not be collected.
+        run: pytest tests/ -q
 
   # The OCR half needs Tesseract + Hindi data and the CV stack. It runs in the
   # container image the service actually ships, because the deleted-mark vote
