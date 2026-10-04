@@ -159,6 +159,95 @@ def _progress_start() -> None:
 _progress_start()
 
 
+# ── Card progress counter (in-memory, read-only) ────────────────────────────
+# Separate from the stdout logger above on purpose. Logging is line-oriented
+# and lossy by design: _PROGRESS_MIN_INTERVAL can drop lines, and the
+# heartbeat interleaves with real work. A counter needs to be exact, because
+# the UI presents it as "N cards scanned" and an undercount reads as a stall.
+#
+# Read-only and observational. Nothing here is consulted by the extraction
+# path: the counter is incremented strictly *after* a card has finished, so
+# it cannot influence what any engine produces. Reset per request, never
+# persisted, so a stale count cannot leak into a later run.
+
+_PROGRESS_SNAPSHOT: dict[str, Any] = {
+    "cards_done": 0,
+    "pages_done": 0,
+    "cards_total": 0,
+    "pages_total": 0,
+    "cards_records": 0,
+    "started_at": 0.0,
+    "updated_at": 0.0,
+    "active_page": None,
+    "done": False,
+}
+
+
+def _progress_reset(pages_total: int = 0) -> None:
+    """Zero the counter at the start of a request."""
+    now_ts = time.time()
+    with _PROGRESS_LOCK:
+        _PROGRESS_SNAPSHOT.update({
+            "cards_done": 0,
+            "pages_done": 0,
+            "cards_total": 0,
+            "pages_total": int(pages_total or 0),
+            "cards_records": 0,
+            "started_at": now_ts,
+            "updated_at": now_ts,
+            "active_page": None,
+            "done": False,
+        })
+
+
+def _progress_card_done(*, page_number: int, records: int) -> None:
+    """One card finished. Increments only; never touches a record."""
+    now_ts = time.time()
+    with _PROGRESS_LOCK:
+        _PROGRESS_SNAPSHOT["cards_done"] += 1
+        _PROGRESS_SNAPSHOT["cards_records"] += max(0, int(records or 0))
+        _PROGRESS_SNAPSHOT["active_page"] = page_number
+        _PROGRESS_SNAPSHOT["updated_at"] = now_ts
+
+
+def _progress_page_done(page_number: int, cards_on_page: int) -> None:
+    """One page finished. Adds to the known card total, so `cards_total` is a
+    denominator the UI can divide by once the first page lands."""
+    now_ts = time.time()
+    with _PROGRESS_LOCK:
+        _PROGRESS_SNAPSHOT["pages_done"] += 1
+        _PROGRESS_SNAPSHOT["cards_total"] += max(0, int(cards_on_page or 0))
+        _PROGRESS_SNAPSHOT["active_page"] = page_number
+        _PROGRESS_SNAPSHOT["updated_at"] = now_ts
+
+
+def _progress_finish() -> None:
+    """Mark the run complete. Counts are already final; this only stops the
+    UI projecting a moving number for work that has ended."""
+    now_ts = time.time()
+    with _PROGRESS_LOCK:
+        _PROGRESS_SNAPSHOT["done"] = True
+        _PROGRESS_SNAPSHOT["updated_at"] = now_ts
+
+
+def _progress_snapshot() -> dict[str, Any]:
+    """A copy of the counter, safe to serialise. Never raises.
+
+    A copy rather than the live dict on purpose: handing out the real object
+    would let a serialiser mutate the counter's internals, or let a caller
+    hold a reference across a reset and keep writing into the next run.
+    """
+    with _PROGRESS_LOCK:
+        snap = dict(_PROGRESS_SNAPSHOT)
+    snap["elapsed_s"] = round(
+        max(0.0, snap["updated_at"] - snap["started_at"]), 1
+    ) if snap["started_at"] else 0.0
+    snap["idle_s"] = round(
+        max(0.0, time.time() - snap["updated_at"]), 1
+    ) if snap["updated_at"] else 0.0
+    return snap
+
+
 def _load_name_token_corrections() -> dict[str, str]:
     """Load dataset-specific OCR glyph corrections from env var JSON.
 
@@ -3108,6 +3197,11 @@ def _extract_pdf_ocr_unlocked(
         first, last, mode = _resolve_page_range(page_count, start_page, end_page, whole_pdf)
         print(f"[OCR] selection mode={mode} pages={first}-{last} skip_non_voter_pages={skip_non_voter_pages}", flush=True)
 
+        # Reset the card counter now that the page range is known. Done before
+        # the first page so a poller arriving mid-run never sees a count left
+        # over from the previous request.
+        _progress_reset(pages_total=max(0, last - first + 1))
+
         metadata_page_number = 3 if page_count >= 3 else 1
         metadata_started = time.perf_counter()
         roll_metadata = _extract_roll_header_metadata(document[metadata_page_number - 1])
@@ -3178,6 +3272,14 @@ def _extract_pdf_ocr_unlocked(
                         f"card {index:2d}/{len(card_rects)} done in "
                         f"{time.perf_counter() - card_started:5.2f}s"
                         + ("" if rec else " (no record)")
+                    )
+                    # Counted after _extract_card has fully returned, so the
+                    # counter cannot influence what it produced. This is the
+                    # only success path; the except below re-raises without
+                    # counting, which is correct -- a card that raised produced
+                    # nothing, and the page-level total still reflects it.
+                    _progress_card_done(
+                        page_number=page_number, records=1 if rec else 0
                     )
                     return rec
                 except Exception as _card_exc:
@@ -3414,6 +3516,9 @@ def _extract_pdf_ocr_unlocked(
             _progress(f"page {page_number} COMPLETE cards={len(card_rects)} "
                       f"records={len(page_records)} in {page_elapsed:.2f}s", force=True)
             print(f"[OCR] page={page_number} complete cards={len(card_rects)} records={len(page_records)} elapsed={page_elapsed:.2f}s", flush=True)
+            # Adds the page's 30 lattice slots to the denominator, so the UI
+            # can show "N of M" from the second page onward.
+            _progress_page_done(page_number, len(card_rects))
 
     record_numbers = {
         (record["_page_number"], record["_card_index"]): counter
@@ -3435,6 +3540,11 @@ def _extract_pdf_ocr_unlocked(
         for record in public_records
         for reason in record["review_reasons"]
     )
+
+    # Every card has now been counted, so the run is over as far as any poller
+    # is concerned. Set before the final progress line so a client that reacts
+    # to that line already sees done=True rather than a stalled-looking count.
+    _progress_finish()
 
     elapsed = time.perf_counter() - started
     _progress_set_phase("request")
@@ -3507,6 +3617,34 @@ async def health() -> dict[str, Any]:
         "max_pdf_mb": MAX_PDF_BYTES // (1024 * 1024),
         "paddleocr_available": PaddleOCR is not None,
         "batch_max_files": MAX_BATCH_FILES,
+    }
+
+
+@app.get("/ocr/progress")
+async def ocr_progress() -> dict[str, Any]:
+    """Live card progress for the request currently running.
+
+    Read-only and observational: it reads the in-memory counter and changes
+    nothing. The counter is reset at the start of every /ocr/extract call, so
+    a caller arriving between requests sees zeros rather than a stale count
+    from the previous run.
+
+    cards_done counts grid *positions* processed, which is not the same as
+    records found: _voter_card_rects() returns 30 positions per page whether
+    or not a cell holds a card, so a roll of 600 positions can yield 531
+    records. Both numbers are reported separately and must not be conflated
+    under one label.
+
+    Known limitation: _OCR_LOCK serialises whole requests, so this describes
+    *a* run, not necessarily the caller's. With the single worker this
+    service runs by default there is never more than one run in flight, so
+    the distinction does not arise. Distinguishing them would mean threading
+    a job id through the extraction path, which is not a read-only change.
+    """
+    snap = _progress_snapshot()
+    return {
+        **snap,
+        "running": not snap["done"] and snap["updated_at"] > 0,
     }
 
 @app.post("/ocr/extract")

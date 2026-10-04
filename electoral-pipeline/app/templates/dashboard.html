@@ -118,7 +118,7 @@
             <tr class="hover:bg-gray-50 transition-colors">
               <td class="px-6 py-3 text-sm text-gray-600">{{ short_time(e.created_at) }}</td>
               <td class="px-6 py-3 text-sm font-medium text-gray-900">{{ event_label(e.event_type) }}</td>
-              <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ e.details or '—' }}{% if e.message %} · {{ e.message }}{% endif %}</td>
+              <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ event_detail(e.details, e.message) or '—' }}</td>
             </tr>
           {% else %}
             <tr>

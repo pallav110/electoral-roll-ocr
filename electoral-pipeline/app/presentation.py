@@ -188,6 +188,350 @@ def duration_summary(ms: int | None) -> str:
     return f"{hours} hr" + (f" {rem} min" if rem else "")
 
 
+def event_detail(details=None, message: str | None = None) -> str | None:
+    """The Details cell for an event row, as one readable phrase.
+
+    The three history tables disagreed about which column held the detail:
+    dashboard.html rendered `details`, unit.html and document.html rendered
+    `message`. That made the same events look informative on one page and
+    blank on another. Both are read here so every page agrees.
+
+    `message` is NULL for 8 of the 10 event types in a live roll -- the
+    payloads live in `details` -- which is why two of the three tables were
+    almost entirely dashes. Details first because it is the structured
+    record; message second because it is the free-text one, and only when
+    details has nothing to say.
+    """
+    parts: list[str] = []
+
+    if isinstance(details, dict):
+        for key, value in details.items():
+            # A nested object is not worth a cell; the readable part is the
+            # top-level counts (records, records_expected).
+            if isinstance(value, (dict, list)):
+                continue
+            label = str(key).replace("_", " ")
+            parts.append(f"{label}: {value}")
+    elif details is not None and str(details).strip() not in {"", "None", "null"}:
+        # `not in (None, "", {})` looks like it drops empty values but does
+        # not: 0 is falsy and fails the membership test, so it rendered "0".
+        # Comparing the stringified form drops blanks without swallowing a
+        # legitimate zero.
+        parts.append(str(details))
+
+    text = (message or "").strip()
+    if text and text not in {"None", "null"}:
+        parts.append(text)
+
+    return " · ".join(parts) if parts else None
+
+
+def duration_between(started: datetime | None, completed: datetime | None) -> str | None:
+    """Readable elapsed time for a job, computed from the timestamps it has.
+
+    `duration_summary(ms)` takes a stored millisecond count, and only
+    ExtractionSession has that column. ExtractionUnit has no such column --
+    models.py declares processing_time_ms on the *session*, and the unit class
+    begins below it -- so every template that asked a unit for
+    `processing_time_ms` got Jinja's Undefined, which is falsy, and the
+    `or '--'` fallback rendered a dash for all 11 units. The timings were
+    never missing: started_at and completed_at are both populated.
+
+    Returns None when the job has not finished, so a running unit reads
+    "still going" rather than a misleading "0 sec". Sub-second work rounds
+    up to "under a second" instead of "0 sec", because 0 sec reads as a
+    failure rather than as speed.
+    """
+    if not started or not completed:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if completed.tzinfo is None:
+        completed = completed.replace(tzinfo=timezone.utc)
+    ms = int((completed - started).total_seconds() * 1000)
+    if ms < 0:
+        # Clock skew between the two writes, or a host whose clock moved.
+        # A negative duration is meaningless; reporting nothing beats
+        # reporting "-3 sec".
+        return None
+    if ms < 1000:
+        return "under a second"
+    return duration_summary(ms)
+
+
+def _aware(value: datetime | str | None) -> datetime | None:
+    """A timestamp as an aware UTC datetime, whatever shape it arrived in.
+
+    Postgres hands these columns back naive on some paths and the JSON status
+    endpoint sends strings, so both have to be accepted. Mixing a naive and an
+    aware datetime raises TypeError, and a helper that raises inside a Jinja
+    render is a blank page for the operator.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+# A unit in one of these states has stopped doing work, so its pages are
+# settled. `retry` is deliberately absent: a retrying unit will run again.
+_SETTLED = {"completed"}
+
+
+def live_progress(units, pages_total=None, at: datetime | None = None) -> dict:
+    """How far a session has actually got, from per-unit state, right now.
+
+    Why this exists rather than reading session.pages_processed: both
+    `pages_processed` and `records_extracted` on ExtractionSession are
+    written in exactly one place -- finalize(), which runs at the very end.
+    A page bound to those columns shows 0 for the whole run and then jumps
+    to the total, which is the same complaint as showing 90 records after
+    three pages, only slower.
+
+    So the numbers here are built from the unit rows instead, and they come
+    in two clearly separated flavours:
+
+      *_settled   -- really happened. Counted, committed, past tense.
+      *_estimate  -- how far the running batch has got, worked out from the
+                     rate the finished batches actually achieved.
+
+    The distinction is the whole point. workflow.py already refuses to
+    present a derived number as a stored one, and a counter that ticks up
+    every five seconds while nothing has been written must not sit under a
+    label saying "saved". So the estimate drives the headline; the settled
+    count rides underneath it, and is what the word "saved" is attached to.
+
+    The rate is measured, not assumed: seconds-per-page and records-per-page
+    both come from batches that have actually finished in this same session.
+    Before the first batch finishes there is no rate, so there is no
+    estimate either -- reporting a real number there would mean inventing
+    one, and `can_estimate` says so explicitly rather than showing 0.
+    """
+    now = _aware(at) if at else datetime.now(timezone.utc)
+    units = list(units or [])
+
+    total_pages = pages_total or sum(
+        (u.page_to - u.page_from + 1) for u in units if u.page_from and u.page_to
+    ) or None
+
+    settled = [u for u in units if str(getattr(u, "status", "")) in _SETTLED]
+    running = [u for u in units if str(getattr(u, "status", "")) == "processing"]
+
+    pages_settled = sum(u.page_to - u.page_from + 1 for u in settled)
+    records_settled = sum(int(getattr(u, "records_extracted", 0) or 0) for u in settled)
+
+    # Rate comes only from batches that actually finished. A batch that
+    # failed says nothing about how fast a good one runs.
+    #
+    # Both rates are weighted totals over a denominator, never a sum of
+    # per-batch ratios. Summing ratios double-counts: two finished batches of
+    # 90 records over 10 pages each give 9 + 9 = 18 records per page, which
+    # would inflate every projection from the second batch onwards.
+    seconds_per_page = None
+    records_per_page = None
+    timed_pages = timed_seconds = 0
+    record_pages = record_total = 0
+    for u in settled:
+        pages = (u.page_to - u.page_from + 1) if (u.page_from and u.page_to) else 0
+        if pages <= 0:
+            continue
+        records_in_unit = int(getattr(u, "records_extracted", 0) or 0)
+        if records_in_unit:
+            record_pages += pages
+            record_total += records_in_unit
+        start, end = _aware(getattr(u, "started_at", None)), _aware(getattr(u, "completed_at", None))
+        if start and end:
+            elapsed = (end - start).total_seconds()
+            if elapsed >= 0:
+                timed_pages += pages
+                timed_seconds += elapsed
+    if timed_pages and timed_seconds > 0:
+        seconds_per_page = timed_seconds / timed_pages
+    if record_pages:
+        records_per_page = record_total / record_pages
+
+    running_unit = running[0] if running else None
+    running_pages = 0
+    elapsed_seconds = None
+    fraction = None
+
+    if running_unit is not None:
+        running_pages = running_unit.page_to - running_unit.page_from + 1
+        start = _aware(getattr(running_unit, "started_at", None))
+        if start:
+            elapsed_seconds = max(0.0, (now - start).total_seconds())
+
+    if seconds_per_page and running_pages and elapsed_seconds is not None:
+        expected = seconds_per_page * running_pages
+        if expected > 0:
+            fraction = min(0.95, elapsed_seconds / expected)
+            # 0.95 rather than 1.0: a batch that is 100% of the way through
+            # its expected time is not finished, it is due. Letting the bar
+            # reach full before the row actually flips would overstate the
+            # work done, which is the one thing this function must not do.
+
+    pages_estimate = pages_settled + (fraction * running_pages if fraction else 0)
+    records_estimate = None
+    if records_per_page and fraction:
+        records_estimate = int(records_settled + fraction * running_pages * records_per_page)
+
+    eta_seconds = None
+    if seconds_per_page and total_pages:
+        remaining = max(0, total_pages - pages_estimate)
+        eta_seconds = int(remaining * seconds_per_page)
+
+    done = bool(units) and not running and len(settled) == len(units)
+    if done:
+        state = "done"
+    elif running:
+        state = "working"
+    elif settled:
+        state = "between"
+    else:
+        state = "waiting"
+
+    return {
+        "state": state,
+        "pages_total": total_pages,
+        "pages_settled": pages_settled,
+        "pages_estimate": round(pages_estimate, 1),
+        "records_settled": records_settled,
+        "records_estimate": records_estimate,
+        "can_estimate": bool(fraction),
+        "running_unit_number": getattr(running_unit, "unit_number", None) if running_unit else None,
+        "running_pages": running_pages,
+        "elapsed_seconds": int(elapsed_seconds) if elapsed_seconds is not None else None,
+        "seconds_per_page": round(seconds_per_page, 2) if seconds_per_page else None,
+        "records_per_page": round(records_per_page, 2) if records_per_page else None,
+        "eta_seconds": eta_seconds,
+    }
+
+
+def fuse_progress(progress: dict | None, scan: dict | None,
+                  page_from: int | None = None,
+                  page_to: int | None = None) -> dict:
+    """Merge the OCR card counter into the database's batch numbers.
+
+    Two services, two clocks, and no way for either to see the other's state.
+    Postgres knows batches; the OCR process knows cards. The database numbers
+    are the truth about what has been *saved*; the OCR counter is the only
+    thing that moves between two database writes, because it is written per
+    card and the database only hears about a unit when all ten pages of it are
+    done.
+
+    So the OCR counter is used for motion and the database for accuracy, and
+    they are only allowed to be combined when the two are provably about the
+    same work. A session page open for a session whose units are all still
+    queued would otherwise display another session's climbing card count --
+    a wrong number shown confidently, which is what workflow.py:840-844
+    refuses to do anywhere else in this codebase.
+
+    The binding is checked, not assumed:
+
+      1. the OCR run must be live (not `done`), and must have actually started;
+      2. `active_page` must fall inside this running unit's page range.
+
+    With the worker at --concurrency=1 there is exactly one unit in flight in
+    the whole system, so a page inside that range is this session's work and
+    nothing else. The staleness guard below closes the remaining gap: a
+    finished counter left over from an earlier request still names its last
+    page, so it still passes the range test after the unit ends.
+    """
+
+    base = dict(progress or {})
+    if not base:
+        base = {
+            "state": "waiting", "pages_total": None, "pages_settled": 0,
+            "pages_estimate": 0, "records_settled": 0, "records_estimate": None,
+            "can_estimate": False, "running_unit_number": None,
+            "running_pages": 0, "elapsed_seconds": None,
+            "seconds_per_page": None, "records_per_page": None,
+            "eta_seconds": None,
+        }
+
+    scan = scan or {}
+    # Read the OCR snapshot defensively. Anything unexpected in the payload
+    # degrades to "no card motion" rather than propagating into a render.
+    cards_done = _int_or_none(scan.get("cards_done")) or 0
+    cards_records = _int_or_none(scan.get("cards_records")) or 0
+    cards_total = _int_or_none(scan.get("cards_total")) or 0
+    active_page = scan.get("active_page")
+    idle_s = _int_or_none(scan.get("idle_s"))
+    if idle_s is not None and float(idle_s) != idle_s:
+        idle_s = None
+    ocr_done = bool(scan.get("done"))
+
+    # `ocr_done` alone is not enough to reject a snapshot. Between two units
+    # `_OCR_LOCK` releases and the next request resets the counter: at that
+    # moment `done` is False again while `active_page` still names the
+    # *previous* unit's last page, which is inside that previous unit's range.
+    # And a counter never exercised at all reads done=False, idle_s=0.0,
+    # cards_done=0. Requiring both `not done` and a fresh timestamp rejects
+    # all three: a leftover counter, a between-units gap, and a cold one.
+    fresh = idle_s is not None and float(idle_s) <= 30
+    ocr_live = (not ocr_done) and fresh
+
+    # The page test. With the worker at --concurrency=1 there is exactly one
+    # unit in flight in the whole system, so a page inside this running unit's
+    # range is this session's work and nothing else.
+    in_range = (
+        page_from is not None and page_to is not None
+        and isinstance(active_page, int)
+        and page_from <= active_page <= page_to
+    )
+
+    base["cards_live"] = bool(ocr_live and in_range)
+    base["cards_done"] = cards_done if base["cards_live"] else 0
+    base["cards_records"] = cards_records if base["cards_live"] else 0
+    base["cards_total"] = cards_total if base["cards_live"] else 0
+    base["active_page"] = active_page if base["cards_live"] else None
+
+    # A card count is worth showing only once there is a denominator. Until
+    # the first page of a unit has finished, `cards_total` is 0 because
+    # `_progress_page_done` is what adds to it -- dividing by it would be a
+    # division by zero presented as a progress bar.
+    base["cards_known_total"] = base["cards_total"] if base["cards_total"] > 0 else None
+
+    # The headline number. Cards read is the honest live figure; it counts work
+    # that genuinely happened, unlike the rate-projected `records_estimate`.
+    # They are not the same unit: a blank lattice slot is a card read that
+    # produces no record, so cards_done >= cards_records always, and on a tail
+    # page the two diverge sharply (page 22 yields 30 cards and 0 records).
+    base["records_headline"] = (
+        base["cards_records"] if base["cards_live"]
+        else base.get("records_estimate") if base.get("can_estimate")
+        else base.get("records_settled") or 0
+    )
+    base["headline_is_estimate"] = bool(
+        not base["cards_live"] and base.get("can_estimate")
+    )
+    return base
+
+
+def eta_summary(seconds: int | None) -> str | None:
+    """'about 4 min left' / 'less than a minute left' / None when unknown.
+
+    Deliberately hedged with "about". The number is a projection from the
+    rate so far, and the first batch of a session is not representative of
+    the rest -- a roll that opens with a slow page reads fast afterwards.
+    """
+    if seconds is None or seconds < 0:
+        return None
+    if seconds < 60:
+        return "less than a minute left"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"about {minutes} min left"
+    hours, rem = divmod(minutes, 60)
+    return f"about {hours} hr {rem} min left" if rem else f"about {hours} hr left"
+
+
 def time_ago(value: datetime | None) -> str | None:
     """'3 min ago' relative to now.
 

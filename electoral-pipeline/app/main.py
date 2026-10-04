@@ -18,14 +18,19 @@ from app.extractor import mock_extract
 from app.models import Document, ElectoralRecord, ExtractionSession, ExtractionUnit, ProcessingEvent, RawResponse, ScanRoot
 from app.record_scope import count_records_for_document, records_for_document
 from app.presentation import (
+    duration_between,
+    event_detail,
     describe_error,
     document_progress,
     document_records_summary,
     duration_summary,
+    eta_summary,
     event_label,
     file_size_summary,
     friendly_error,
+    fuse_progress,
     has_devanagari,
+    live_progress,
     progress_summary,
     records_summary,
     short_id,
@@ -59,6 +64,11 @@ templates.env.globals.update(
     progress_summary=progress_summary,
     records_summary=records_summary,
     duration_summary=duration_summary,
+    duration_between=duration_between,
+    event_detail=event_detail,
+    live_progress=live_progress,
+    fuse_progress=fuse_progress,
+    eta_summary=eta_summary,
     time_ago=time_ago,
     short_time=short_time,
     file_size_summary=file_size_summary,
@@ -107,6 +117,35 @@ def parse_uuid(value: str):
         return uuid.UUID(value)
     except ValueError:
         raise HTTPException(404, "Invalid ID")
+
+
+def ocr_progress_snapshot() -> dict | None:
+    """The OCR service's card counter, or None if it cannot be reached.
+
+    Never raises. This is called while rendering a page, and an exception here
+    would turn "the reader is down" into a 500 on every session page -- which
+    is exactly the wrong failure: the page's real job is to report that the
+    reader is down.
+
+    A short timeout for the same reason. The counter is refreshed every few
+    seconds by the browser; if OCR is wedged, holding the render open for the
+    full 120s extractor timeout would make the dashboard look broken rather
+    than busy. Losing the counter costs motion, not correctness -- the
+    database-derived numbers are the authority and they are always present.
+    """
+    base = config.EXTRACTOR_URL.rsplit("/", 1)[0] + "/progress"
+    try:
+        import httpx
+
+        response = httpx.get(base, timeout=2.0)
+        if response.status_code != 200:
+            log.warning(f"[MAIN] OCR progress unavailable: HTTP {response.status_code}")
+            return None
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:  # noqa: BLE001 -- any failure means "no counter"
+        log.warning(f"[MAIN] OCR progress unavailable: {type(exc).__name__}")
+        return None
 
 
 def render(request, name, **context):
@@ -203,6 +242,25 @@ def document_detail(request: Request, document_id: str, db: Session = Depends(ge
     return render(request, "document.html", doc=doc, sessions=sessions, events=events, records=records, total_records=total_records, record_session=record_session)
 
 
+def _fused(units, session) -> dict:
+    """live_progress() for a session, with the OCR card counter merged in.
+
+    The merge is scoped to the session's *running* unit. A session page left
+    open while other sessions come and go would otherwise show whatever the
+    OCR process happens to be reading, and `fuse_progress` rejects that on the
+    page-range test -- but only if it is handed a range to test against, so
+    the range always comes from the unit that is actually in flight.
+    """
+    progress = live_progress(units, pages_total=getattr(session, "pages_total", None))
+    running = [
+        u for u in units if str(getattr(u, "status", "")) == "processing"
+    ]
+    page_from = page_to = None
+    if running:
+        page_from, page_to = running[0].page_from, running[0].page_to
+    return fuse_progress(progress, ocr_progress_snapshot(), page_from, page_to)
+
+
 @app.get("/sessions/{session_id}", response_class=HTMLResponse, dependencies=[Depends(admin)])
 def session_detail(request: Request, session_id: str, db: Session = Depends(get_db)):
     log.info(f"[MAIN] Session detail requested for session_id={session_id}")
@@ -219,7 +277,9 @@ def session_detail(request: Request, session_id: str, db: Session = Depends(get_
     log.info(f"[MAIN] Returning session {session_id} with {len(units)} units")
     print(f"[MAIN] Returning session {session_id} with {len(units)} units")
     
-    return render(request, "session.html", session=session, doc=db.get(Document, session.document_id), units=units)
+    return render(request, "session.html", session=session,
+                  doc=db.get(Document, session.document_id), units=units,
+                  progress=_fused(units, session))
 
 
 @app.get("/units/{unit_id}", response_class=HTMLResponse, dependencies=[Depends(admin)])
@@ -570,11 +630,25 @@ def session_status(session_id: str, db: Session = Depends(get_db)):
         "records_failed": session.records_failed,
         "processing_time_ms": session.processing_time_ms,
         "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+        # session.pages_processed and session.records_extracted are written
+        # only by finalize(), so they stay at 0 for the entire run. `progress`
+        # is built from the unit rows instead and does move while work is
+        # happening. The session-level pair is left in the payload: the
+        # document browser and any other consumer still read it, and dropping
+        # a field from a response someone already reads is a silent break.
+        "progress": _fused(units, session),
         "units": [
             {
                 "id": str(u.id),
+                "unit_number": u.unit_number,
                 "status": u.status,
                 "records_extracted": u.records_extracted,
+                # Sent so the table's How long column can be recomputed in the
+                # browser. It cannot read processing_time_ms: that column is
+                # declared on ExtractionSession, not ExtractionUnit, so the
+                # value it used to send was always null.
+                "started_at": u.started_at.isoformat() if u.started_at else None,
+                "completed_at": u.completed_at.isoformat() if u.completed_at else None,
                 "error_code": u.error_code,
                 "error_message": u.error_message,
             }

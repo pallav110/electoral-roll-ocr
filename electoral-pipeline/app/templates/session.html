@@ -34,9 +34,24 @@
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
   <h2 class="text-lg font-semibold text-gray-900 mb-4">How far it got</h2>
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+    {# The big counter. The number under "Voter records" is an estimate while a
+       batch is running, worked out from how fast the finished batches actually
+       went -- session.records_extracted cannot be used here because it is
+       written only at the very end of a session and stays at 0 throughout. The
+       exact saved count rides underneath, and is what the word "saved" is
+       attached to. See live_progress() in presentation.py. #}
+    <div class="col-span-1 sm:col-span-2 lg:col-span-2">
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Voter records scanned</dt>
+      <dd class="mt-1">
+        <span class="text-4xl font-bold text-gray-900 tabular-nums" id="records-scan">{{ '{:,}'.format(progress.records_estimate if progress.can_estimate and progress.records_estimate is not none else progress.records_settled) }}</span>
+        <span class="block mt-1 text-sm text-gray-500" id="records-total"></span>
+        <span class="block mt-1 text-sm text-gray-500" id="records-note"></span>
+      </dd>
+    </div>
     <div>
-      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Pages done</dt>
+      <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Pages read</dt>
       <dd class="mt-1 text-2xl font-bold text-gray-900" id="pages-done">{{ progress_summary(session.pages_processed, session.pages_total) }}</dd>
+      <span class="block mt-1 text-sm text-gray-500" id="pages-note"></span>
     </div>
     <div>
       <dt class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Voter records saved</dt>
@@ -59,11 +74,10 @@
       <dd class="mt-1 text-gray-900" id="finished-at">{{ short_time(session.completed_at) or 'Not finished' }}</dd>
     </div>
   </div>
-  {% if session.pages_total %}
-    <div class="mt-6">
-      <progress max="{{ session.pages_total }}" value="{{ session.pages_processed }}" aria-label="Pages done" id="progress-bar" class="w-full h-2 bg-gray-200 rounded-lg overflow-hidden"></progress>
-    </div>
-  {% endif %}
+  <div class="mt-6">
+    <progress max="{{ progress.pages_total or 1 }}" value="{{ progress.pages_estimate }}" aria-label="Pages read" id="progress-bar" class="w-full h-2 bg-gray-200 rounded-lg overflow-hidden"></progress>
+    <p class="mt-2 text-sm text-gray-500" id="progress-detail"></p>
+  </div>
 </div>
 
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
@@ -100,7 +114,7 @@
               </span>
             </td>
             <td class="px-4 py-3 text-right font-mono text-sm text-gray-900">{{ u.records_extracted }}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">{{ duration_summary(u.processing_time_ms) or '—' }}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">{{ duration_between(u.started_at, u.completed_at) or '—' }}</td>
             <td class="px-4 py-3 text-sm">
               {% if u.error_message %}
                 <span class="text-red-600" title="Technical detail: {{ u.error_code }} — {{ u.error_message }}">{{ friendly_error(u.error_code, u.error_message) }}</span>
@@ -122,23 +136,27 @@
   </div>
 </div>
 
-{% if session.status == 'processing' %}
+{# Unconditional, not gated on status == 'processing'. Gating it meant a
+   finished session rendered a bare "—" in the counter, because the script
+   that fills it in never ran. The polling below is the only part that needs
+   a running session; the first render is not. #}
 <script>
-// Live updates for processing session
+// Live updates for a session (draws the counter immediately, then polls)
 (function() {
   var sessionId = '{{ session.id }}';
   var intervalId = null;
+  var tickId = null;
   var lastRecordCount = {{ session.records_extracted or 0 }};
   var lastPageCount = {{ session.pages_processed or 0 }};
 
   function updateFromServer(data) {
+    // The live counter. `progress` is built from the unit rows on the server
+    // (live_progress() in presentation.py), because session.pages_processed
+    // and session.records_extracted are both written only by finalize() and
+    // read 0 for the whole run.
+    if (data.progress) { updateLiveProgress(data.progress); }
+
     // Update session-level stats
-    if (data.pages_processed !== undefined) {
-      document.getElementById('pages-done').textContent =
-        (data.pages_processed + '/' + data.pages_total) + (data.pages_total ? ' (' + Math.round(data.pages_processed/data.pages_total*100) + '%)' : '');
-      document.getElementById('progress-bar').value = data.pages_processed;
-      document.getElementById('progress-bar').max = data.pages_total;
-    }
     if (data.records_extracted !== undefined) {
       // Only update display if count is multiple of 5 or changed significantly
       if (data.records_extracted % 5 === 0 || data.records_extracted !== lastRecordCount) {
@@ -195,8 +213,8 @@
           }
           // Update duration
           var durationCell = row.querySelector('td:nth-child(5)');
-          if (durationCell && unit.processing_time_ms !== undefined) {
-            durationCell.textContent = durationSummary(unit.processing_time_ms) || '—';
+          if (durationCell && unit.started_at !== undefined) {
+            durationCell.textContent = durationBetween(unit.started_at, unit.completed_at) || 'Still running';
           }
           // Update error
           var errorCell = row.querySelector('td:nth-child(6)');
@@ -206,6 +224,127 @@
         }
       });
     }
+  }
+
+  // Draws the live counter. Two numbers, deliberately kept apart:
+  //   estimate -- advances every second while a batch runs, from the rate the
+  //               finished batches actually achieved
+  //   settled  -- really written to the database
+  // The headline is the estimate; the line under it is the truth. Labelling
+  // the estimate "saved" would be the one thing this must never do.
+  var lastProgress = null;
+
+  function updateLiveProgress(p) {
+    lastProgress = p;
+    var scanEl = document.getElementById('records-scan');
+    var totalEl = document.getElementById('records-total');
+    var noteEl = document.getElementById('records-note');
+    var pagesEl = document.getElementById('pages-done');
+    var pagesNoteEl = document.getElementById('pages-note');
+    var detailEl = document.getElementById('progress-detail');
+    if (!scanEl) return;
+
+    var saved = p.records_settled || 0;
+
+    if (p.state === 'done') {
+      scanEl.textContent = saved.toLocaleString();
+      if (totalEl) totalEl.textContent = '';
+      noteEl.textContent = saved === 1 ? '1 record saved' : saved.toLocaleString() + ' records saved';
+    } else if (p.cards_live) {
+      // The OCR counter is the only figure that moves between two database
+      // writes, because it ticks per card and Postgres only hears about a unit
+      // once all ten of its pages are done. So when it is live it *is* the
+      // headline: a counted-up number rather than a projection.
+      //
+      // `cards_live` is set server-side only after the page-range check, so
+      // this cannot show another session's cards. It counts records produced,
+      // not grid positions read, which is why the label says records.
+      var read = p.cards_records || 0;
+      scanEl.textContent = read.toLocaleString();
+      if (totalEl) {
+        totalEl.textContent = p.cards_known_total
+          ? 'of about ' + p.cards_known_total.toLocaleString() + ' cards on the pages read so far'
+          : '';
+      }
+      var readingPage = p.active_page ? ', reading page ' + p.active_page : '';
+      noteEl.textContent = saved.toLocaleString() + ' saved' +
+        (read > saved ? ', ' + (read - saved).toLocaleString() + ' being read now' + readingPage
+                      : readingPage || ' — every card so far produced a record');
+    } else if (p.can_estimate && p.records_estimate !== null && p.records_estimate !== undefined) {
+      scanEl.textContent = p.records_estimate.toLocaleString();
+      noteEl.textContent = saved.toLocaleString() + ' saved so far, about ' +
+        Math.max(0, p.records_estimate - saved).toLocaleString() + ' more being read';
+    } else {
+      // No rate yet: the first batch has not finished, so there is nothing
+      // honest to project from. Showing 0 here would be inventing a number.
+      scanEl.textContent = saved.toLocaleString();
+      noteEl.textContent = p.state === 'working'
+        ? 'Reading the first batch — no pace to measure yet'
+        : 'Waiting to start';
+    }
+
+    if (pagesEl) {
+      if (p.state === 'done') {
+        pagesEl.textContent = 'All ' + (p.pages_total || '?') + ' pages read';
+      } else if (p.pages_total) {
+        pagesEl.textContent = Math.floor(p.pages_estimate) + ' of ' + p.pages_total + ' pages read';
+      } else {
+        pagesEl.textContent = p.pages_estimate + ' pages read';
+      }
+    }
+
+    var bar = document.getElementById('progress-bar');
+    if (bar) {
+      bar.max = p.pages_total || 1;
+      bar.value = p.can_estimate ? p.pages_estimate : p.pages_settled;
+    }
+
+    var bits = [];
+    if (p.state === 'working' && p.running_unit_number) {
+      bits.push('On batch ' + p.running_unit_number + ' (pages ' +
+        p.pages_settled + '–' + Math.min(p.pages_total || 0, p.pages_settled + p.running_pages) + ')');
+    } else if (p.state === 'between') {
+      bits.push('Starting the next batch');
+    }
+    var eta = etaSummary(p.eta_seconds);
+    if (eta && p.state !== 'done') bits.push(eta);
+    if (detailEl) detailEl.textContent = bits.join(' · ');
+
+    if (pagesNoteEl && p.seconds_per_page) {
+      pagesNoteEl.textContent = 'about ' + p.seconds_per_page + ' sec per page';
+    }
+  }
+
+  function etaSummary(seconds) {
+    if (seconds === null || seconds === undefined || seconds < 0) return null;
+    if (seconds < 60) return 'less than a minute left';
+    var m = Math.round(seconds / 60);
+    if (m < 60) return 'about ' + m + ' min left';
+    var h = Math.floor(m / 60);
+    return m % 60 ? ('about ' + h + ' hr ' + (m % 60) + ' min left') : ('about ' + h + ' hr left');
+  }
+
+  // Between polls the counter should still creep upward, or it reads as frozen
+  // for four seconds out of every five. This advances the estimate from the
+  // same rate the server measured, using the wall clock the browser already
+  // has; the next poll overwrites it with the server's own figure, so drift
+  // here can never persist.
+  function tickEstimate() {
+    if (!lastProgress || !lastProgress.can_estimate) return;
+    if (lastProgress.state !== 'working') return;
+    // When the OCR counter is live it already moved on its own, once per card,
+    // and it is a count rather than a projection. Advancing the estimate here
+    // would overwrite a real number with an invented one.
+    if (lastProgress.cards_live) return;
+    var p = lastProgress;
+    var rate = p.seconds_per_page;
+    if (!rate) return;
+    p.elapsed_seconds = (p.elapsed_seconds || 0) + 1;
+    var expected = rate * p.running_pages;
+    if (!expected) return;
+    var fraction = Math.min(0.95, p.elapsed_seconds / expected);
+    p.pages_estimate = p.pages_settled + fraction * p.running_pages;
+    updateLiveProgress(p);
   }
 
   function fetchUpdates() {
@@ -219,6 +358,9 @@
     if (intervalId) return;
     fetchUpdates(); // Initial fetch
     intervalId = setInterval(fetchUpdates, 5000);
+    // One second, not five: the estimate is a smooth function of elapsed
+    // time, so at five-second steps it would visibly jump.
+    tickId = setInterval(tickEstimate, 1000);
     console.log('Live updates started for session', sessionId);
   }
 
@@ -227,6 +369,10 @@
       clearInterval(intervalId);
       intervalId = null;
       console.log('Live updates stopped for session', sessionId);
+    }
+    if (tickId) {
+      clearInterval(tickId);
+      tickId = null;
     }
   }
 
@@ -240,6 +386,17 @@
     if (m < 60) return m + 'm ' + r + 's';
     var h = Math.floor(m / 60);
     return h + 'h ' + (m % 60) + 'm';
+  }
+
+  // Mirrors duration_between() in presentation.py. The browser cannot reuse
+  // the Python helper, so the two are kept in step deliberately: same rounding,
+  // same "under a second", same refusal to show a negative span.
+  function durationBetween(started, completed) {
+    if (!started || !completed) return null;
+    var ms = new Date(completed).getTime() - new Date(started).getTime();
+    if (isNaN(ms) || ms < 0) return null;
+    if (ms < 1000) return 'under a second';
+    return durationSummary(ms);
   }
 
   function statusLabel(code) {
@@ -292,8 +449,15 @@
     return map[code] || code;
   }
 
-  // Start live updates
-  startLiveUpdates();
+  // Draw the counter from the server's own figures straight away, so the page
+  // is correct on first paint rather than blank until the first poll lands.
+  updateLiveProgress({{ progress | tojson }});
+
+  // Only a running session needs polling. A finished one would just re-fetch
+  // the same numbers every 5 seconds for nothing.
+  if ({{ 'true' if session.status == 'processing' else 'false' }}) {
+    startLiveUpdates();
+  }
 
   // Clean up on page unload
   window.addEventListener('beforeunload', stopLiveUpdates);
@@ -314,6 +478,5 @@
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
-{% endif %}
 
 {% endblock %}
