@@ -23,6 +23,10 @@ Note: paths in this file are repo-relative. The service itself lives in `elector
 
 Tesseract with Hindi language data must be installed: `tesseract-ocr` and `tesseract-ocr-hin`. Python deps in `ocr_api_requirements.txt`.
 
+**The two containers have complementary dependencies, and neither runs the full suite alone.** The `ocr` image has `cv2` and `paddleocr` but lacks `indic_transliteration`; the `web` image has `indic_transliteration` but lacks `cv2`. Run OCR-dependent tests in `ocr` and transliteration tests in `web`.
+
+The failure mode here is **silent**. Without `indic_transliteration`, `app/transliterate.py` prints a warning and returns Devanagari unchanged — so every transliteration test fails as `assert 'राजीव' == 'Rajiv'`. That reads like a broken romaniser; it is a missing dependency. `ocr_api_requirements.txt` now pins `indic-transliteration==2.3.82` for exactly this reason.
+
 ## Architecture
 
 **Dual OCR engine design**: Tesseract handles Hindi+English text (voter names, relations, addresses) at 200 DPI. PaddleOCR handles numeric metadata (house numbers, ages, the deleted mark) and is `lang="en"` only, with the angle classifier **off**.
@@ -107,6 +111,35 @@ Verified absent from the source; do not go looking for these:
 - `RELATION_REGION` — defined, never referenced
 - `/tmp/ocr_pdf_api.lock` — replaced by the `asyncio` lock
 - `card_img` parameter of `_detect_deleted_watermark` — never referenced in the body
+
+## Review Triggers
+
+Beyond `epic_readers_disagree` (above), records are flagged for human review by `_review_record()`, which runs after the Paddle pass drains. It **only ever flags** — it never rewrites a value. `tests/test_review_triggers.py::test_trigger_never_changes_a_value` pins that separation, because "flagged" and "corrected" are different claims and conflating them would be the worst possible failure mode for a review queue.
+
+Flags: `age_absent`, `age_not_integer`, `age_out_of_range`, `house_absent`, `house_devanagari_unknown`, `house_leading_1_prepended`, `epic_readers_disagree`. `_public_record` copies both `needs_review` (bool) and `review_reasons` (list) through to output.
+
+The Devanagari house-number classifier (`_classify_devanagari_house`) strips known filler tokens (`हाऊस`, `मकान`, `एचएनओ`, `प्लॉट`, …) and then classifies what's left as `clean`, `plot` (a single-consonant plot letter like `स`), or `unknown`. `unknown` means 2+ consecutive consonants remain — real unrecognised text, not filler. **Filler is ignored, not an error**; a plot letter is preserved, not stripped; a plot+khasra pair keeps both numbers.
+
+Measured on the 531-record roll: **11 flags (2.1%)** — 10 `house_devanagari_unknown`, 1 `age_absent`.
+
+**Two bugs here were silent and are now pinned by tests.** Using `re.findall(r"[ऀ-ॿ]")` without `+` yields single *characters*, not runs, so the "is this 2+ consonants?" test silently answered about one character at a time. And counting the virama (U+094D) as a consonant makes every conjunct look like filler. Both returned plausible verdicts; neither raised. The classifier now uses `_DEVA_RUN = re.compile(r"[ऀ-ॿ]+")` and `_DEVA_MARK` to exclude combining marks, and substitutes **space** for glue rather than deleting it — deleting can weld two neighbours into one bogus run.
+
+To review the flagged set: `python tests/test_scripts/render_flagged_cards.py` renders the flagged cards to PNG at 400 DPI with a manifest listing our value beside (never on) the image. It **imports** the triggers from `ocr_pdf_api` rather than reimplementing them, so the picture and the flag cannot disagree.
+
+## Celery Orchestration
+
+The `app/` service is live, not scaffolding: `app/tasks.py` registers 6 tasks, `workflow.py` dispatches into it, and beat schedules them.
+
+| Beat task | Interval |
+|---|---|
+| `discover-hourly` | 3600 s |
+| `dispatch-documents` | 15 s |
+| `dispatch-units` | 10 s |
+| `recover-stale-jobs` | 60 s |
+
+Documents are split into `ExtractionUnit`s of **`PAGES_PER_UNIT=10`** pages (`config.py`), so a 22-page roll is 3 units and a failure loses at most 10 pages, not 22. `MAX_UNIT_ATTEMPTS=3` with `RETRY_BASE_SECONDS=30` and `30 * 2^(attempt-1)` backoff. `recover-stale-jobs` re-queues units stranded by a worker restart (`UNIT_STALE_SECONDS=600`). Raw responses are committed before normalisation, so a retry reuses the raw response instead of re-invoking extraction.
+
+The worker runs `--concurrency=1` deliberately: two units at once put an 8-core box at load 40.
 
 ## Key Environment Variables
 

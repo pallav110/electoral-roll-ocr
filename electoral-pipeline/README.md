@@ -1,6 +1,8 @@
 # Electoral PDF Processing Pipeline
 
-This is a runnable first implementation of the team plan. PostgreSQL owns all document, session and unit state; Redis/Celery carries ID-only jobs. The included extraction adapter returns **synthetic sample voters** so you can exercise the whole pipeline before connecting your existing extraction service. No sample record is derived from the PDF.
+PostgreSQL owns all document, session and unit state; Redis/Celery carries ID-only jobs. Extraction is delegated to the in-network OCR service (`http://ocr:8082/ocr/extract`), which the shipped `.env.example` already points at — see [the OCR API docs](DOCS/OCR_API_USAGE.md).
+
+A mock adapter is also available for contract testing, set with `EXTRACTOR_MODE=mock`. **Its records are synthetic and are derived from no PDF whatsoever** — never mistake mock output for extracted data.
 
 ## Start
 
@@ -26,7 +28,7 @@ This is a runnable first implementation of the team plan. PostgreSQL owns all do
 
 The dashboard listens on `127.0.0.1:8088` by default. Change `WEB_PORT` if occupied. Run `docker compose logs -f worker beat web` to follow processing. Run `docker compose down` to stop; the database and Redis data remain in Docker volumes. `docker compose down -v` also deletes those volumes.
 
-For a concise team handoff, see [TEAM_HANDBOOK.md](TEAM_HANDBOOK.md). Run `python package_for_team.py` (`python3` on Linux) to create a ZIP that excludes the local `.env` password.
+For a concise team handoff, see [TEAM_HANDBOOK.md](DOCS/TEAM_HANDBOOK.md). Run `python package_for_team.py` (`python3` on Linux) to create a ZIP that excludes the local `.env` password.
 
 ## Pointing at PDFs on either OS
 
