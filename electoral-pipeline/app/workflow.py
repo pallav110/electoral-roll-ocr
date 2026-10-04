@@ -146,10 +146,19 @@ def discover(roots: list[str] | None = None) -> int:
     discoverable without needing a new mount. This is what makes "any path"
     work.
     """
+    # (path -> scan_root_id). The id rides along because a document must
+    # record WHICH folder produced it, and re-querying per file inside the
+    # walk would mean one round trip per PDF -- thousands for a large roll.
+    # A one-off scan (roots passed in explicitly) has no ScanRoot row to
+    # point at, so its id stays absent and the documents it finds land in
+    # "no folder", which is the honest answer rather than a guess.
+    root_ids: dict[str, int | None] = {}
+
     if roots is None:
         with SessionLocal() as db:
             rows = db.scalars(select(ScanRoot).where(ScanRoot.enabled.is_(True)).order_by(ScanRoot.id)).all()
             roots = [r.path for r in rows]
+            root_ids = {r.path: r.id for r in rows}
 
         if not roots:
             log.info("[DISCOVER] No scan roots configured, falling back to %s", config.DOCUMENT_ROOT)
@@ -163,6 +172,7 @@ def discover(roots: list[str] | None = None) -> int:
             except OSError:
                 log.exception("[DISCOVER] Could not create fallback root %s", config.DOCUMENT_ROOT)
             roots = [str(config.DOCUMENT_ROOT)]
+            root_ids = {str(config.DOCUMENT_ROOT): None}
         else:
             log.info("[DISCOVER] Scanning %d configured folder(s)", len(roots))
             print(f"[DISCOVER] Scanning {len(roots)} configured folder(s)")
@@ -174,6 +184,8 @@ def discover(roots: list[str] | None = None) -> int:
         except ValueError:
             log.warning("[DISCOVER] Ignoring blank scan root")
             continue
+
+        scan_root_id = root_ids.get(raw)
 
         # PurePosixPath carries no filesystem methods; Path is what actually
         # walks. The conversion happens here, once, at the boundary between
@@ -193,13 +205,13 @@ def discover(roots: list[str] | None = None) -> int:
             if copied:
                 # The copied files are now under INGEST_ROOT; scan that instead.
                 ingest_root = config.INGEST_ROOT / _safe_name(raw)
-                found += _discover_under(ingest_root, raw)
+                found += _discover_under(ingest_root, raw, scan_root_id=scan_root_id)
                 _record_scan_result(raw, copied, None)
             else:
                 _record_scan_result(raw, 0, "no PDFs found to copy")
             continue
 
-        found += _discover_under(root, raw)
+        found += _discover_under(root, raw, scan_root_id=scan_root_id)
         # _discover_under already recorded this root's outcome, including any
         # unreadable files. Recording it AGAIN here with no error message
         # overwrote that warning with a clean result, which is why a folder of
@@ -277,12 +289,17 @@ def _record_scan_result(raw: str, count: int, error: str | None = None) -> None:
         log.exception("[DISCOVER] Could not record scan result for %s", raw)
 
 
-def _discover_under(root: Path, label: str) -> int:
+def _discover_under(root: Path, label: str, scan_root_id: int | None = None) -> int:
     """Walk one resolved root and register every PDF beneath it.
 
     Unreadable files are reported, not silently dropped. A file that cannot be
     opened and a folder containing no PDFs both used to surface as "found=0",
     which the UI renders identically to success.
+
+    `scan_root_id` is the folder this walk belongs to, recorded on every
+    document so a folder view can group by it exactly rather than by guessing
+    from source_path. It is None for a one-off scan of an unregistered path,
+    which is why the column is nullable.
     """
     log.info("[DISCOVER] Walking %s (from %r)", root, label)
     print(f"[DISCOVER] Walking {root}")
@@ -300,7 +317,7 @@ def _discover_under(root: Path, label: str) -> int:
                     digest.update(chunk)
             stat = path.stat()
             values = dict(source_type="local", source_document_id=None, source_path=str(path.resolve()), file_name=path.name,
-                          file_hash=digest.hexdigest(), file_size=stat.st_size, source_modified_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc), status="pending")
+                          file_hash=digest.hexdigest(), file_size=stat.st_size, source_modified_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc), status="pending", scan_root_id=scan_root_id)
 
             log.debug(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={digest.hexdigest()[:16]}...")
             print(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={digest.hexdigest()[:16]}...")

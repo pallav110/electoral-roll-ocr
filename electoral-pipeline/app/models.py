@@ -22,6 +22,16 @@ class Document(Base):
     file_hash: Mapped[str | None] = mapped_column(String(64))
     file_size: Mapped[int | None] = mapped_column(BigInteger)
     source_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Which registered folder this file was found under. Deliberately NOT
+    # derived from source_path at read time: for a path that is not bind-
+    # mounted, discovery copies the PDFs into the ingest folder and scans
+    # them from there, so source_path then points inside the container and
+    # has no prefix relationship to the path the user typed. Storing the
+    # link is what makes a folder view exact rather than approximately
+    # right. NULL on rows discovered before this column existed, which is
+    # why folder queries treat NULL as "belongs to no folder" instead of
+    # dropping the row.
+    scan_root_id: Mapped[int | None] = mapped_column(ForeignKey("scan_roots.id"))
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
     priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
@@ -50,6 +60,7 @@ class Document(Base):
     __table_args__ = (
         CheckConstraint("status IN ('pending','dispatched','queued','processing','completed','retry','failed','cancelled')", name="documents_status"),
         Index("idx_documents_status", "status"),
+        Index("idx_documents_scan_root", "scan_root_id"),
         Index("idx_documents_pending", "priority", "discovered_at", postgresql_where=text("status IN ('pending','retry')")),
         Index("uq_documents_source", "source_type", "source_document_id", unique=True, postgresql_where=text("source_document_id IS NOT NULL")),
         Index("uq_documents_hash", "source_type", "file_hash", unique=True, postgresql_where=text("source_document_id IS NULL AND file_hash IS NOT NULL")),
