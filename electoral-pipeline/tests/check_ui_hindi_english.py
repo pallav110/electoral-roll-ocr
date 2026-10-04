@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 from app.extractor import _join_name_parts, _join_relation_name, _relation_key  # noqa: E402
 from app.normalize import map_record  # noqa: E402
 
-GROUND_TRUTH = ROOT / "OCR/ground_truth_per_page_values_verified/json_files/page3_results.json"
+GROUND_TRUTH = ROOT / "ground_truth/json_files/page3_results.json"
 
 
 def safe_int(value):

@@ -85,16 +85,20 @@ INCLUDE_SUFFIXES = (
     ".sh",
 )
 
-# OCR/ is excluded as a directory -- it holds 23 copies of the roll under
-# OCR/input/, 35 files of verified ground-truth voter records, and a broken
-# test tree. But three genuine source documents live there, so they are
-# allowlisted by exact path. Listing them individually keeps the data excluded
-# by default while the documentation still reaches the team.
-INCLUDE_EXACT = (
-    "OCR/CLAUDE.md",
-    "OCR/README.md",
-    "OCR/ocr_api_requirements.txt",
-)
+# OCR/ held 23 copies of the roll, 35 files of verified ground-truth voter
+# records, and three genuine source documents, so the directory was excluded
+# with those three allowlisted by exact path.
+#
+# OCR/ no longer exists. It was gitignored with nothing tracked in it, so its
+# contents were not recoverable when it was removed; the ground-truth records
+# were copied to ground_truth/ first (also gitignored -- see its README), and
+# the OCR service's own documentation now lives in DOCS/ alongside the rest.
+#
+# INCLUDE_EXACT is kept, and the test that guards it kept, because the property
+# being protected is the real one: an allowlist must name the exact files that
+# are source rather than shipping a whole directory of voter data. Deleting the
+# entries without deleting the test would have left a test that can never pass.
+INCLUDE_EXACT: tuple[str, ...] = ()
 
 # Never ship these regardless of anything above. .env is handled correctly on
 # the other two distribution paths (untracked in git, excluded by

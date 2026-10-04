@@ -1,7 +1,30 @@
-.env
+# Debug card crops from boundary/geometry inspection — regenerated on demand.
+debug_cards/
+
+# Python bytecode
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Local environment and source PDFs — not part of the repo.
+.venv/
+input/
+
+# Secrets. The OCR service refuses to start if EXTRACTOR_API_KEY or ADMIN_TOKEN
+# are unset, so a committed .env is both a leak and a false sense of a
+# configured deployment. .env.example is the tracked template.
+.env
+
+# Source electoral rolls. These are real voter data and ~4.8 MB each; a
+# directory of them would bloat every clone. sample-pdfs/.gitkeep keeps the
+# directory itself tracked.
 sample-pdfs/*.pdf
-OCR/
+
+# Human-verified ground-truth records, derived from a real roll. They are the
+# evidence behind every accuracy claim, so they are kept out of git for the
+# same reason as the PDFs — but see ground_truth/README.md: this folder is NOT
+# recoverable from git. Back it up separately.
+ground_truth/
+
+# Agent scratch directories.
 .claude/

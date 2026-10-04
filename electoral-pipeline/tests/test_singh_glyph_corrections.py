@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 OCR_PY = Path(__file__).resolve().parents[1] / "ocr_pdf_api.py"
-GT_GLOB = "**/ground_truth_per_page_values_verified/whole_pdf_6-8_results.json"
+GT_GLOB = "ground_truth/whole_pdf_6-8_results.json"
 
 
 def _literal_dict(name: str) -> dict:
