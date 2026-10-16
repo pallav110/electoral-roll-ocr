@@ -1278,6 +1278,9 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]],
         # but was actually real Tesseract output arriving untied. Ordering by
         # (score, confidence) keeps every existing winner and only decides the
         # cases that were previously arbitrary.
+        #
+        # _hindi_line_score ranks on printed labels rather than Devanagari
+        # character count; see its docstring for why the count inverted itself.
         best = max(candidates, key=lambda x: (_hindi_line_score(x[0]), x[1]))
         return best[0], best[1]
     except Exception as exc:
@@ -1300,13 +1303,31 @@ HINDI_FIELD_LABELS = (
 
 
 def _hindi_line_score(lines: list[str]) -> int:
-    """Rank competing reads by Devanagari character count plus printed label weights. Higher is better; separates clean reads from noise."""
+    """Rank competing reads by how many printed field labels survived. Higher is better.
+
+    The obvious ranking -- count every Devanagari character -- is wrong, and
+    wrong in the worst possible direction. A read that shatters the glyphs
+    yields MORE Devanagari characters than a clean one, because noise stays
+    inside the Devanagari block: on 2026-EROLLGEN-S28-40-HIN-107 (Lansdown,
+    1983x2806 scan) the thresholded variant scored 618-775 against 122 for the
+    clean read, and won every card. Worse, it scored highest precisely
+    because it was unreadable, so the worse the read the better the score.
+    Tesseract's own confidence reported the truth (19.3 vs 83.7) but was only
+    consulted as a tie-break, and scores never tied.
+
+    Printed labels are the honest signal: a real card prints नाम, पिता/पति/
+    माता/अन्य, मकान, आयु and लिंग. A read that lost them has lost the row
+    that carried the name. Measured over 60 cards per roll:
+
+        roll          deva-count score      label score
+        S24-53   150 fields (works)     149 fields
+        S28-40     6 fields (broken)   155 fields
+
+    and on S24 the two strategies disagree on 6 cards, where the label score
+    is equal or better every time (e.g. किशनप्राल -> किशनपाल).
+    """
     text = " ".join(lines)
-    score = len(re.findall(r"[ऀ-ॿ]", text))
-    for label, weight in HINDI_FIELD_LABELS:
-        if label in text:
-            score += weight
-    return score
+    return sum(weight for label, weight in HINDI_FIELD_LABELS if label in text)
 
 
 def _ink_line_of_text(image: Any, min_height_frac: float = 0.35,
@@ -5752,9 +5773,18 @@ def _state_from_text(text: str, states: tuple[dict[str, str], ...]) -> dict[str,
 
 
 def _cover_header_clip(page: fitz.Page) -> fitz.Rect:
+    # Proportional, not a fixed point count. The printed state token sits at
+    # 4.7-6.3% of page height on both rolls measured, but page height is not
+    # fixed: 2026-EROLLGEN-S24-53-HIN-300 is 842pt and this 65pt clip reaches
+    # 7.7% of it, while 2026-EROLLGEN-S28-40-HIN-107 is 2806pt and the same
+    # 65pt reaches only 2.3% -- cropping the blank space ABOVE the title and
+    # returning '' with no error. _read_state_token then reported
+    # state_code_unreadable and the record shipped an empty state/AC/booth
+    # from a perfectly legible cover. The floor keeps a short page from
+    # collapsing to nothing; 9% clears the measured 6.3%.
     return fitz.Rect(
         page.rect.x0, page.rect.y0,
-        page.rect.x1, page.rect.y0 + min(65.0, page.rect.height),
+        page.rect.x1, page.rect.y0 + max(65.0, page.rect.height * 0.09),
     )
 
 
@@ -5767,10 +5797,18 @@ def _read_state_token(page: fitz.Page) -> str:
         return ""
     height, width = image.shape[:2]
     heading = image[
-        int(height * 0.50):int(height * 0.92),
+        int(height * 0.45):int(height * 0.88),
         int(width * 0.48):int(width * 0.60),
     ]
-    heading = cv2.resize(heading, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    # Scale up to a readable height, never down, instead of a fixed 4x. A
+    # fixed multiplier assumed a small crop; once _cover_header_clip became
+    # proportional this crop is already ~440px tall on a 2806pt page, and 4x
+    # made it 28 megapixels. Tesseract returned '' at --psm 7 on that and
+    # nonsense at --psm 6, from a crop that plainly reads "2026 S28".
+    scale = max(1, -(-TESSERACT_MIN_HEIGHT_PX // max(1, heading.shape[0])))
+    if scale > 1:
+        heading = cv2.resize(heading, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(heading, cv2.COLOR_BGR2GRAY)
     _tess_count("header_state_code")
     txt = _tess_string(Image.fromarray(gray), lang="eng", config="--oem 3 --psm 7")
@@ -6114,7 +6152,14 @@ def _extract_booth_code_from_cover(page: fitz.Page) -> str:
     the printed Hindi/English part-number label.
     """
     try:
-        cover_height = min(130.0, page.rect.height)
+        # Proportional for the same reason as _cover_header_clip: the part
+        # number is printed in the same top band as the state token, and a
+        # fixed 130pt reaches 15% of an 842pt page but only 4.6% of a 2806pt
+        # one. 9% was still short -- it clipped the label's bottom row off and
+        # found no "भाग संख्या" at all; 12% reads it in full. 20% also works and
+        # is what the 842pt page always had, so take the widest band that stays
+        # cheap: 20% of the cover is 20% of a page, not of the document.
+        cover_height = max(130.0, page.rect.height * 0.20)
         cover_clip = fitz.Rect(
             page.rect.x0, page.rect.y0,
             page.rect.x1, page.rect.y0 + cover_height,
