@@ -5863,6 +5863,132 @@ def _extract_state_code(page: fitz.Page) -> tuple[str, str, str, str]:
     return "", "", "", "state_code_unreadable"
 
 
+# The printed section label, matched only when a roll omits the ':' or ';'
+# separator between it and the value.  Anchored on अनुभाग -- the label's own
+# first word -- and non-greedy through the first नाम after it, so a locality
+# that merely contains नाम is never truncated.  See `_split_anubhag_label`.
+_ANUBHAG_LABEL_PREFIX = re.compile(r"^\s*अनुभाग.*?नाम\s*[:;]?\s*", re.DOTALL)
+
+
+# How far down the page the section line can plausibly sit, as a fraction.
+# Wide enough for every measured template (Lansdown's starts at 1.96%, S24's at
+# 1.87%) and still far above the first card row (~11%).
+_ANUBHAG_SCAN_TOP_FRACTION = 0.08
+
+# The word that identifies the section line's band, and so the query the
+# locator asks of each candidate band.
+_ANUBHAG_BAND_LABEL = "अनुभाग"
+
+
+def _header_ink_bands(gray: np.ndarray) -> list[tuple[int, int]]:
+    """Group the rows of a rendered strip that carry ink into text bands.
+
+    Pure geometry -- no OCR -- so it can be exercised on a synthetic image
+    anywhere.  Every threshold scales with the strip height rather than being an
+    absolute pixel count, so bands break apart the same way on a 2806pt page and
+    an 842pt one.  That is the whole point: a fixed pixel gap on a 624px render
+    of Lansdown and a 188px render of S24 groups the same printed line together
+    on one and splits it on the other.
+    """
+    strip_px = gray.shape[0]
+    if strip_px < 4:
+        return []
+    dark = (gray < 140).sum(axis=1)
+    rows = np.where(dark > 2)[0]
+    if not len(rows):
+        return []
+    gap = max(4, strip_px // 100)
+    min_band = max(2, strip_px // 200)
+    groups: list[list[int]] = [[int(rows[0])]]
+    for row in rows[1:]:
+        row = int(row)
+        if row - groups[-1][-1] <= gap:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    return [(g[0], g[-1]) for g in groups if g[-1] - g[0] >= min_band]
+
+
+def _find_anubhag_header_band(
+    page: fitz.Page,
+) -> Optional[tuple[fitz.Rect, str]]:
+    """Locate the printed section line by its label, not by its position.
+
+    Why this exists
+    ---------------
+    Every previous reader of this field cropped a fixed region: a pair of
+    y-fractions of the header window, or an absolute 40pt / 52pt strip.  Both
+    encode one template's layout.  Measured as a fraction of page height, the
+    section line occupies 1.96-3.05% on the 2806pt S28-40 Lansdown roll and
+    1.87-2.89% on the 842pt S24-53 roll, and the first card row starts at a
+    different offset on each, so no single constant serves both -- 52pt left
+    Lansdown with `anubhag_code=''` from a header that plainly prints one, and
+    the 33-68% sub-fractions of the header window read *below* the line, into
+    card content, which is how S24 came to report the section name as the
+    voter's own name.
+
+    What this does instead
+    ---------------------
+    Finds the ink bands in the top strip, reads each on its own, and returns
+    the one carrying the printed label.  Nothing here knows where the line
+    sits: a band is a band at any page height, and the label is printed on
+    every roll.  This is the same principle as ranking reads by
+    `_hindi_line_score` rather than by confidence -- match on printed
+    structure, which is invariant, instead of on geometry, which is not.
+
+    Returns ``None`` when no band carries the label, which is the correct
+    answer for a cover, a supplement or any page that prints no section line.
+    That matters: returning some other band would let voter-card text be
+    promoted to roll-wide metadata copied into every record.
+    """
+    try:
+        height = page.rect.height
+        if height <= 0:
+            return None
+        clip = fitz.Rect(
+            page.rect.x0, page.rect.y0,
+            page.rect.x1, page.rect.y0 + height * _ANUBHAG_SCAN_TOP_FRACTION,
+        )
+        raw = page.get_pixmap(dpi=200, clip=clip, alpha=False).tobytes("png")
+        image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return None
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        bands = _header_ink_bands(gray)
+        if not bands:
+            return None
+        strip_px = gray.shape[0]
+
+        dpi_scale = 200.0 / 72.0
+        for y0, y1 in bands:
+            band = gray[y0:y1 + 1, :]
+            columns = np.where((band < 140).sum(axis=0) > 0)[0]
+            if not len(columns):
+                continue
+            crop = band[:, columns[0]:columns[-1] + 1]
+            # Scale to a readable height, never down -- the idiom the house and
+            # EPIC readers already use, so a band reads the same at any scale.
+            scale = max(1, -(-TESSERACT_MIN_HEIGHT_PX // max(1, crop.shape[0])))
+            if scale > 1:
+                crop = cv2.resize(crop, None, fx=scale, fy=scale,
+                                  interpolation=cv2.INTER_CUBIC)
+            text = " ".join(pytesseract.image_to_string(
+                Image.fromarray(crop), lang="hin",
+                config="--oem 3 --psm 7").split())
+            if _ANUBHAG_BAND_LABEL not in text:
+                continue
+            # Pad for ascenders and the shirorekha, which the dark-pixel rows
+            # can under-report, and never outside the page.
+            pad = max(2, strip_px // 40)
+            top = max(page.rect.y0, clip.y0 + (y0 - pad) / dpi_scale)
+            bottom = min(clip.y1, clip.y0 + (y1 + pad) / dpi_scale)
+            return fitz.Rect(page.rect.x0, top, page.rect.x1, bottom), text
+        return None
+    except Exception as exc:
+        log.warning("Anubhag header band location failed: %s", exc)
+        return None
+
+
 def _split_anubhag_label(text: str) -> str:
     """Drop the printed label, returning only what follows it.
 
@@ -5872,14 +5998,44 @@ def _split_anubhag_label(text: str) -> str:
     `_anubhag_code_from_header_text` could fire.
 
     Both separators are honoured, earliest occurrence wins -- so a line
-    containing both splits exactly where it did under ':'-only. A line with
-    neither is returned unchanged, which is what an already-bare value needs.
+    containing both splits exactly where it did under ':'-only.
+
+    Separator, or no separator at all?
+    ---------------------------------
+    Not every roll prints the separator. The S28-40 Lansdown 2026 SIR header
+    prints the label and the value with only the value's own hyphen between
+    them::
+
+        अनुभाग संख्या व नाम ॥-कोचियार
+
+    (and note ``व``, not ``और`` -- the label itself is abbreviated). With no
+    ':' or ';' on the line, a separator-only split returns the line *unchanged*,
+    label included. Every parser downstream is anchored at ``^`` --
+    `_anubhag_code_from_header_text` requires a digit in the leading position,
+    and `_clean_anubhag_name_candidate` requires a Devanagari letter in the
+    leading position -- so both saw ``अनुभाग...`` where they expected ``1-``
+    or a bare locality, and both returned blank. The text was perfectly
+    legible; only the separator the parser insisted on was absent.
+
+    So when no separator is printed, the label itself is removed instead. The
+    pattern is anchored on ``अनुभाग`` -- the label's own first word -- rather
+    than on ``नाम`` alone, so a bare locality that merely contains ``नाम``
+    (``नाम का पेड़ विहार``) is never truncated. Every already-bare value this
+    function receives -- ``1-प्रगति विहार``, ``प्रगति विहार``, ``सरस्वती नगर``
+    -- does not start with ``अनुभाग`` and is returned unchanged, as before.
+
+    Measured over the header-line shapes these readers accept, this branch
+    alters exactly one line: the one that was returning blank.
     """
     label_end = min(
         (i for i in (text.find(":"), text.find(";")) if i != -1),
         default=-1,
     )
-    return text[label_end + 1:] if label_end != -1 else text
+    if label_end != -1:
+        return text[label_end + 1:]
+    # No separator printed: drop the label itself so the anchored parsers see
+    # the value. Anchored on अनुभाग, and a no-op when the label is absent.
+    return _ANUBHAG_LABEL_PREFIX.sub("", text, count=1) or text
 
 
 def _anubhag_code_from_header_text(text: str) -> str:
@@ -6000,6 +6156,18 @@ def _select_anubhag_name(*reads: str) -> tuple[str, str]:
         "", "anubhag_name_conflicting_header_reads")
 
 
+def _render_region(page: fitz.Page, rect: fitz.Rect, dpi: int) -> Any:
+    """Render an arbitrary page rectangle to a BGR array at `dpi`.
+
+    Every other crop in this module is expressed as a fraction of a page, which
+    is what makes it template-specific.  The section-line readers need to crop
+    wherever the line was actually *found*, so they render the located rectangle
+    directly instead of reconstructing it from guessed fractions.
+    """
+    raw = page.get_pixmap(dpi=dpi, clip=rect, alpha=False).tobytes("png")
+    return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+
+
 def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
     """Extract roll-wide codes (ac, anubhag, booth) and Hindi section name from page 3 header. Returns empty dict on failure."""
     empty = {
@@ -6015,7 +6183,19 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
         # Include the full baseline of the second header line.  A 40-point
         # clip cut descenders on some scans (HIN-138/HIN-265) and made the
         # otherwise readable labelled line disappear entirely.
-        header_height = min(52.0, page.rect.height)
+        #
+        # Proportional, for the same reason as _cover_header_clip. The printed
+        # strip ("विधानसभा क्षेत्र की संख्या ... : 40", "भाग संख्या : 107") is
+        # not at a fixed height either: measured as a fraction of page height
+        # it spans 0.78-1.77% (codes) and 1.96-3.05% (section) on the 2806pt
+        # S28-40 page, but on the 842pt S24-53 page the same 52pt window covers
+        # 0-6.2%. A single absolute clip therefore serves one roll and misses
+        # the other -- 52pt gave S28-40 ac_code='' and booth_code='' from a
+        # header that plainly prints both. The window below is wide enough to
+        # hold either layout's header and to keep the sub-crop fractions below
+        # meaningful; the anubhag sub-crop is what the two templates still
+        # disagree on, and is measured separately.
+        header_height = max(52.0, page.rect.height * 0.10)
         header_clip = fitz.Rect(
             page.rect.x0, page.rect.y0,
             page.rect.x1, page.rect.y0 + header_height,
@@ -6061,16 +6241,32 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
         if not ac_code:
             ac_code = _extract_ac_code_from_header_fallback(page)
 
-        anubhag_region = crop(0.016, 0.33, 0.363, 0.68)
+        # Locating the section line by its printed label replaces the y-fraction
+        # pairs this reader used to carry.  Those fractions were absolute in
+        # disguise -- 0.33-0.68 of a max(52pt, 10% of page) window computes to
+        # 0.033-0.068 of the page -- and so fitted one template: on the 2806pt
+        # S28-40 Lansdown roll they landed at 3.3-6.8% of page height, while
+        # the printed section line occupies 1.96-3.05%, so the read fell below
+        # the line and into card content.  Measured before this change, that
+        # reader returned shredded text on Lansdown ('ऋण जल 5000796532 ...')
+        # and, on S24-53, the voter's own name in place of the locality.
+        located = _find_anubhag_header_band(page)
+        if located is not None:
+            band_rect, band_text = located
+            anubhag_code = _anubhag_code_from_header_text(
+                _split_anubhag_label(band_text))
+            anubhag_region = _render_region(page, band_rect, 300)
+            anubhag_name_region = _render_region(page, band_rect, 300)
+        else:
+            # No labelled band on this page.  Fall back to the positional crop,
+            # which is still correct for a template whose header sits where it
+            # was calibrated -- and the fallbacks below can still recover it.
+            anubhag_code = _extract_anubhag_code_from_header_fallback(page)
+            anubhag_region = crop(0.016, 0.33, 0.363, 0.68)
+            anubhag_name_region = crop(0.120, 0.33, 0.500, 0.68, scale=1.8)
         anubhag_gray = cv2.cvtColor(anubhag_region, cv2.COLOR_BGR2GRAY)
-        # The code crop stays narrow, but a locality name must not be clipped.
-        # The label and ``<section>-`` prefix occupy the far-left header
-        # band.  Giving that noise to the name recogniser made it consume the
-        # first locality word (for example, ``गढ़ी`` became ``778``).  Start
-        # immediately after the structural prefix; code extraction above
-        # remains independent and retains the full narrow crop.
-        anubhag_name_region = crop(0.120, 0.33, 0.500, 0.68, scale=1.8)
-        anubhag_name_gray = cv2.cvtColor(anubhag_name_region, cv2.COLOR_BGR2GRAY)
+        anubhag_name_gray = cv2.cvtColor(anubhag_name_region,
+                                         cv2.COLOR_BGR2GRAY)
 
         def anubhag_line(gray: Any, psm: int) -> str:
             text = pytesseract.image_to_string(
@@ -6103,8 +6299,6 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
         # adjacent text and return values such as ``14``/``113``.  Numeric
         # metadata therefore comes exclusively from the isolated,
         # English-only high-resolution glyph reader below.
-        anubhag_text = ""
-        anubhag_code = _extract_anubhag_code_from_header_fallback(page)
         # Two layout segmentations plus two contrast treatments give us four
         # independent reads of the exact same printed locality line.
         _threshold, otsu = cv2.threshold(
@@ -6120,8 +6314,23 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
             # leading locality word as part of the section-number prefix.
             for psm in (7, 6, 13)
         ]
+        if located is not None:
+            # The located band was read to *find* it, at the height Tesseract
+            # itself was given -- and it already carries the label, which is a
+            # stronger witness than any segmentation variant below.  It leads
+            # the vote rather than joining it, because the reads that follow are
+            # nine guesses at where a fixed fraction lands, not independent
+            # evidence.  Two agreeing reads still clear the quorum; one read
+            # alone does not, because a mislocated band is precisely the failure
+            # this reader is being changed to stop having.
+            name_reads = [band_text] + name_reads
         cleaned_name_reads = [_clean_anubhag_name_candidate(read) for read in name_reads]
         anubhag_name, anubhag_name_reason = _select_anubhag_name(*name_reads)
+        if anubhag_code == "" and located is not None:
+            # The isolated English glyph reader could not prove a digit, but the
+            # located line carries the printed label and a parseable prefix.
+            anubhag_code = _anubhag_code_from_header_text(
+                _split_anubhag_label(band_text))
 
         return {
             "state_code": "",
@@ -6478,8 +6687,26 @@ def _extract_anubhag_code_from_header_fallback(
     # cannot prove a code, return blank rather than borrowing an unlabelled
     # number from the rest of the header.
     try:
-        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y0 + min(52.0, page.rect.height))
-        image = cv2.imdecode(np.frombuffer(page.get_pixmap(dpi=1200, clip=clip, alpha=False).tobytes("png"), np.uint8), cv2.IMREAD_COLOR)
+        # Prefer the located band, at a moderate render.  1200 DPI is retained
+        # only for the narrow glyph crop below, where the leading digit is a
+        # fraction of the line and needs the resolution.
+        located = _find_anubhag_header_band(page)
+        if located is not None:
+            _rect, band_text = located
+            code = _anubhag_code_from_header_text(
+                _split_anubhag_label(band_text))
+            if code:
+                return code
+
+        # Proportional, because the old absolute 52pt was 1.85% of the 2806pt
+        # S28-40 page -- ending above a section line that starts at 1.96% -- and
+        # 6.18% of the 842pt S24-53 page.  The x-fractions below are positions
+        # within this strip, so widening it proportionally would move them;
+        # they are therefore only consulted when the band was not located.
+        header_height = max(52.0, page.rect.height * 0.05)
+        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1,
+                         page.rect.y0 + header_height)
+        image = _render_region(page, clip, 1200)
         if image is not None:
             h, w = image.shape[:2]
             candidates: set[str] = set()
@@ -6592,17 +6819,29 @@ def _extract_anubhag_name_from_header_fallback(page: fitz.Page) -> str:
     voter card below the header.
     """
     try:
-        # Keep this identical to the clean diagnostic/header rendering path.
+        # Prefer the located band: it is the section line by its own printed
+        # label, at whatever height this roll prints it.
+        located = _find_anubhag_header_band(page)
+        if located is not None:
+            _rect, band_text = located
+            name = _clean_anubhag_name_candidate(band_text)
+            if name:
+                return name
+
         # Upscaling this strip to 600 DPI and cropping it a second time was
         # measured to turn clear text such as ``अमित विहार-1`` into repeated
-        # garbage (``॥ल्अमितविहारनज``).  At 300 DPI the complete labelled
-        # line is preserved and Tesseract's page segmentation has enough
-        # context to recognise it correctly.
-        header_height = min(40.0, page.rect.height)
+        # garbage (``॥ल्अमितविहारनज``).  At 300 DPI the complete labelled line is
+        # preserved and Tesseract's page segmentation has enough context to
+        # recognise it correctly.
+        #
+        # Proportional, because the old absolute 40pt was 1.43% of the 2806pt
+        # S28-40 page -- ending *above* the section line, which starts at 1.96% --
+        # while on the 842pt S24-53 page it covered 4.75%.  No single point
+        # value serves both.
+        header_height = max(40.0, page.rect.height * 0.06)
         clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1,
                          page.rect.y0 + header_height)
-        image_bytes = page.get_pixmap(dpi=300, clip=clip, alpha=False).tobytes("png")
-        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        image = _render_region(page, clip, 300)
         if image is None or image.size == 0:
             return ""
         # OCR the complete header, not a percentage crop.  Acceptance still
@@ -6722,7 +6961,11 @@ def _combine_anubhag_review_reasons(*reasons: str) -> str:
 def _extract_ac_code_from_header_fallback(page: fitz.Page) -> str:
     """Read an AC number only from its explicitly labelled header line."""
     try:
-        header_height = min(40.0, page.rect.height)
+        # Proportional, same reason as _extract_roll_header_metadata: 40pt is
+        # 4.8% of an 842pt page but 1.4% of the 2806pt S28-40 page, and the
+        # labelled AC line sits at 0.78-1.77% there -- inside the wider 40pt
+        # window, outside this one.
+        header_height = max(40.0, page.rect.height * 0.06)
         header_clip = fitz.Rect(
             page.rect.x0, page.rect.y0,
             page.rect.x1, page.rect.y0 + header_height,
@@ -6735,11 +6978,17 @@ def _extract_ac_code_from_header_fallback(page: fitz.Page) -> str:
         text = pytesseract.image_to_string(
             Image.fromarray(image), lang="hin+eng", config="--oem 3 --psm 6")
         text = text.translate(str.maketrans("०१२३४५६७८९", "0123456789"))
-        # The AC header is printed as "विधानसभा निर्वाचन क्षेत्र : 53-लोनी".
-        # The label is required, so no year, booth, or voter-count number can
-        # become an AC code by accident.
+        # The AC header is printed in two shapes across the rolls measured:
+        #   "विधानसभा निर्वाचन क्षेत्र: : 53-लोनी"      (S24-53, and OCR reads
+        #                                                    the printed colon
+        #                                                    twice)
+        #   "विधानसभा क्षेत्र की संख्या व नाम : 40 - ..."  (S28-40, no
+        #                                                    निर्वाचन)
+        # The label is still required, so no year, booth, or voter-count number
+        # can become an AC code by accident, and the trailing dash anchors the
+        # value as the constituency number rather than any other figure.
         match = re.search(
-            r"विधानसभा\s*निर्वाचन\s*क्षेत्र[^:\n;：]*[:;：]\s*(\d+)\s*[-–—]",
+            r"(?:विधानसभा|सांसदीय)[^:\n;]{0,40}क्षेत्र[^:\n;]{0,20}[:;]{1,2}\s*(\d+)\s*[-–—]",
             text,
         )
         return match.group(1) if match else ""
