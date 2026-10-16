@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Choose export columns{% endblock %}
+{% block content %}
+<a href="{{ return_to or '/uploads' }}" class="page-back">← Back</a>
+
+<h1 class="text-2xl font-bold text-gray-900 mb-2">Export options</h1>
+{% if not document_ids %}
+<div class="alert" style="margin-bottom:1rem">
+  No PDFs are selected. Open Documents, select one or more PDFs, then choose <strong>Export Excel</strong>.
+</div>
+<p><a href="/documents" class="btn btn-primary">Choose PDFs</a></p>
+{% else %}
+<p class="text-gray-600 text-sm mb-6">
+  {{ document_ids|length }} PDF{{ 's' if document_ids|length != 1 else '' }} selected.
+  
+</p>
+
+<form method="post" action="/uploads/export" id="export-options-form">
+  {% for did in document_ids %}
+    <input type="hidden" name="document_ids" value="{{ did }}">
+  {% endfor %}
+  {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
+
+  <div class="surface mb-4" style="padding:1rem 1.25rem">
+    <label class="field-label mb-2" style="display:block">Language</label>
+    <div class="flex gap-4">
+      <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.875rem">
+        <input type="radio" name="lang" value="both" {% if lang == 'both' %}checked{% endif %}> Hindi + English
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.875rem">
+        <input type="radio" name="lang" value="hi" {% if lang == 'hi' %}checked{% endif %}> Hindi only
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.875rem">
+        <input type="radio" name="lang" value="en" {% if lang == 'en' %}checked{% endif %}> English only
+      </label>
+    </div>
+    <p class="text-sm" style="margin:.625rem 0 0;color:var(--ink-500)">
+      Changing language updates the Hindi and English column selections below. Common fields stay selected.
+    </p>
+  </div>
+
+  <div class="surface mb-6" style="padding:1rem 1.25rem">
+    <div class="flex items-center gap-3 mb-3">
+      <label class="field-label" style="margin:0">Columns</label>
+      <button type="button" class="btn btn-quiet" id="check-all-cols" style="padding:.25rem .625rem;font-size:.8125rem">All</button>
+      <button type="button" class="btn btn-quiet" id="check-no-cols" style="padding:.25rem .625rem;font-size:.8125rem">None</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.375rem .75rem">
+      {% for label, attr in columns %}
+        <label style="display:flex;align-items:center;gap:.5rem;font-size:.8125rem;color:var(--ink-700);cursor:pointer">
+          <input type="checkbox" name="columns" value="{{ label }}" checked
+                 data-language="{% if attr.endswith('_hi') %}hi{% elif attr.endswith('_en') %}en{% else %}common{% endif %}">
+          <span>{{ label }}</span>
+        </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="flex gap-3 items-center">
+    <button type="submit" class="btn btn-primary">Download Excel file</button>
+    <a href="{{ return_to or '/uploads' }}" class="btn btn-quiet">Cancel</a>
+  </div>
+  <p id="column-error" class="text-red-600 text-sm" style="display:none;margin-top:.75rem" role="alert">
+    Choose at least one column before downloading.
+  </p>
+</form>
+
+<script>
+  document.getElementById('check-all-cols').addEventListener('click', function () {
+    document.querySelectorAll('input[name="columns"]').forEach(function (c) { c.checked = true; });
+  });
+  document.getElementById('check-no-cols').addEventListener('click', function () {
+    document.querySelectorAll('input[name="columns"]').forEach(function (c) { c.checked = false; });
+  });
+  function applyLanguageColumns(language) {
+    document.querySelectorAll('input[name="columns"]').forEach(function (column) {
+      if (column.dataset.language === 'hi') column.checked = language !== 'en';
+      if (column.dataset.language === 'en') column.checked = language !== 'hi';
+      if (column.dataset.language === 'common') column.checked = true;
+    });
+  }
+  document.querySelectorAll('input[name="lang"]').forEach(function (radio) {
+    radio.addEventListener('change', function () { applyLanguageColumns(radio.value); });
+  });
+  document.getElementById('export-options-form').addEventListener('submit', function (event) {
+    var selected = document.querySelector('input[name="columns"]:checked');
+    var error = document.getElementById('column-error');
+    if (!selected) {
+      event.preventDefault();
+      error.style.display = 'block';
+      return;
+    }
+    error.style.display = 'none';
+  });
+</script>
+{% endif %}
+{% endblock %}

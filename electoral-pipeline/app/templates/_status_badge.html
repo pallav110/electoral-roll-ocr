@@ -1,0 +1,28 @@
+{% macro pipeline_stage(stage) -%}
+{% if stage == 'ocr' %}<span class="log-stage ocr">OCR</span>{% elif stage == 'db' %}<span class="log-stage db">DB</span>{% elif stage == 'queued' %}<span class="log-stage queued">Worker</span>{% elif stage == 'pending' %}<span class="log-stage pending">Pending</span>{% elif stage == 'failed' %}<span class="log-stage failed">Failed</span>{% elif stage == 'done' %}<span class="log-stage done">Done</span>{% elif stage %}<span class="log-stage">{{ stage }}</span>{% endif %}
+{%- endmacro %}
+{% macro document_status(doc, detail=None) -%}
+{% set st = detail.ui_status if detail and detail.ui_status is defined else doc.ui_status %}
+{% if st == 'pending' %}
+<span class="badge pending">pending</span>
+{% if detail and detail.activity %}<div class="small muted">{{ detail.activity }}</div>{% endif %}
+{% elif st == 'retry' %}
+<span class="badge retry">retry</span>
+{% if detail and detail.activity %}<div class="small muted">{{ detail.activity }}</div>{% endif %}
+{% elif st in ['queued','processing'] %}
+<span class="badge processing">processing</span>
+{% if detail and detail.activity %}
+<div class="small muted">{{ detail.activity }}</div>
+{% elif st == 'queued' %}
+<div class="small muted">Worker starting…</div>
+{% else %}
+<div class="small muted">Extracting…</div>
+{% endif %}
+{% if detail and detail.worker_id %}<div class="small mono muted">Worker {{ detail.worker_id|truncate(28, True, '…') }}</div>{% endif %}
+{% elif st == 'failed' %}
+<span class="badge failed">failed</span>
+{% if detail and detail.error %}<div class="small error">{{ detail.error|truncate(120, True, '…') }}</div>{% elif doc.error_message %}<div class="small error">{{ doc.error_message|truncate(120, True, '…') }}</div>{% endif %}
+{% else %}
+<span class="badge {{ st }}">{{ st }}</span>
+{% endif %}
+{%- endmacro %}

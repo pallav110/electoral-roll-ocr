@@ -100,6 +100,13 @@ def stranded_document(monkeypatch):
                 file_name="test-stranded.pdf",
                 file_hash=file_hash,
                 status="pending",
+                # dispatch_documents() selects only approved rows. This module
+                # predates the column and its whole subject is the *locking*
+                # that dispatch stamps, so it opts the document in the same way
+                # pressing Extract does -- otherwise the fixture asserts on a
+                # document dispatch was always going to skip, and fails for a
+                # reason that has nothing to do with stranded jobs.
+                approved=True,
             )
         )
 

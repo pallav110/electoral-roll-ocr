@@ -1,0 +1,1537 @@
+{% extends "base.html" %}
+{% block title %}Upload · Electoral Roll Processing{% endblock %}
+
+{% block content %}
+
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   UPLOAD PAGE — local styles
+   All token names (--brand-*, --ink-*, --radius, etc.) come from base.html.
+   Nothing here creates a new design language.
+════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Layout ─────────────────────────────────────────────────────────────── */
+.up-shell {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  gap: 1.75rem;
+  align-items: start;
+  width: 100%;
+}
+.up-shell > [data-up-panels] { min-width: 0; }
+@media (max-width: 56rem) {
+  .up-shell { grid-template-columns: minmax(0, 1fr); }
+  .up-sidebar { position: static !important; }
+}
+
+/* ── Method selector sidebar ─────────────────────────────────────────────── */
+.up-sidebar {
+  position: sticky;
+  top: 1rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+.up-sidebar-head {
+  padding: .625rem 1rem .5rem;
+  font: 600 .6875rem/1.4 var(--sans);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-500);
+  background: var(--ink-50);
+  border-bottom: 1px solid var(--line);
+}
+.up-method {
+  display: flex;
+  align-items: flex-start;
+  gap: .75rem;
+  width: 100%;
+  padding: .875rem 1rem;
+  background: transparent;
+  border: 0;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  font-family: var(--sans);
+  text-align: left;
+  transition: background-color .12s, border-color .12s;
+  position: relative;
+}
+.up-method + .up-method { border-top: 1px solid var(--line); }
+.up-method:hover { background: var(--ink-50); }
+.up-method.is-active {
+  background: var(--brand-50);
+  border-left-color: var(--brand-600);
+}
+.up-method-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  background: var(--ink-100);
+  color: var(--ink-600);
+  flex-shrink: 0;
+  margin-top: .125rem;
+  transition: background-color .12s, color .12s;
+}
+.up-method.is-active .up-method-icon {
+  background: var(--brand-600);
+  color: #fff;
+}
+.up-method-body { min-width: 0; }
+.up-method-name {
+  display: block;
+  font: 600 .875rem/1.3 var(--sans);
+  color: var(--ink-800);
+}
+.up-method.is-active .up-method-name { color: var(--brand-800); }
+.up-method-hint {
+  display: block;
+  font: 400 .75rem/1.4 var(--sans);
+  color: var(--ink-500);
+  margin-top: .1875rem;
+}
+
+/* ── Main panel ──────────────────────────────────────────────────────────── */
+.up-panel {
+  width: 100%;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+.up-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.125rem 1.375rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--ink-50);
+}
+.up-panel-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 10px;
+  background: var(--brand-50);
+  color: var(--brand-700);
+  border: 1px solid var(--brand-100);
+  flex-shrink: 0;
+}
+.up-panel-title {
+  margin: 0;
+  font: 700 1rem/1.3 var(--sans);
+  color: var(--ink-900);
+}
+.up-panel-sub {
+  margin: .25rem 0 0;
+  font: 400 .8125rem/1.5 var(--sans);
+  color: var(--ink-600);
+}
+.up-panel-body { padding: 1.375rem; }
+
+/* ── Dropzone ────────────────────────────────────────────────────────────── */
+.up-dropzone {
+  position: relative;
+  border: 2px dashed var(--line-strong);
+  border-radius: 10px;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  background: var(--ink-50);
+  transition: border-color .15s, background-color .15s;
+  cursor: pointer;
+}
+.up-dropzone:hover,
+.up-dropzone.is-dragging {
+  border-color: var(--brand-500);
+  background: var(--brand-50);
+}
+.up-dropzone input[type=file] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+.up-dropzone input[type=file]:disabled { cursor: not-allowed; }
+.up-dz-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid var(--line);
+  color: var(--brand-600);
+  margin: 0 auto .875rem;
+  box-shadow: 0 1px 3px rgba(15,23,42,.08);
+}
+.up-dz-title {
+  font: 600 .9375rem/1.3 var(--sans);
+  color: var(--ink-800);
+  margin-bottom: .375rem;
+}
+.up-dz-hint {
+  font: 400 .8125rem/1.5 var(--sans);
+  color: var(--ink-500);
+}
+.up-dropzone.has-files {
+  text-align: left;
+  padding: 1.125rem 1.25rem;
+  cursor: default;
+}
+.up-dropzone.has-files input[type=file] {
+  inset: auto;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.up-dz-empty { transition: opacity .12s; }
+.up-dropzone.has-files .up-dz-empty { display: none; }
+.up-dz-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+.up-dz-item {
+  display: flex;
+  align-items: center;
+  gap: .625rem;
+  padding: .5625rem .75rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.up-dz-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 6px;
+  background: var(--brand-50);
+  color: var(--brand-700);
+  flex-shrink: 0;
+}
+.up-dz-item-name {
+  flex: 1;
+  min-width: 0;
+  font: 500 .8125rem/1.35 var(--sans);
+  color: var(--ink-800);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.up-dz-item-meta {
+  flex-shrink: 0;
+  font: 400 .75rem/1 var(--sans);
+  color: var(--ink-500);
+  font-variant-numeric: tabular-nums;
+}
+.up-dz-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink-500);
+  cursor: pointer;
+  flex-shrink: 0;
+  font: 600 1rem/1 var(--sans);
+  transition: background-color .12s, color .12s, border-color .12s;
+}
+.up-dz-remove:hover {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+.up-dz-foot {
+  margin-top: .875rem;
+  padding-top: .875rem;
+  border-top: 1px solid var(--line);
+  text-align: center;
+}
+.up-dz-add {
+  font: 600 .8125rem/1.4 var(--sans);
+  color: var(--brand-700);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.up-dz-add:hover { color: var(--brand-800); }
+
+/* ── Form row ────────────────────────────────────────────────────────────── */
+.up-form-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: .75rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+}
+@media (max-width: 36rem) { .up-form-row { grid-template-columns: minmax(0,1fr); } }
+
+/* ── MinIO how-to card ───────────────────────────────────────────────────── */
+.minio-card {
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 1.5rem;
+}
+.minio-card-steps {
+  padding: 1.125rem 1.375rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: #f0f7ff;
+}
+.minio-step {
+  display: flex;
+  align-items: flex-start;
+  gap: .875rem;
+  padding: .875rem 0;
+  border-bottom: 1px solid #dbeafe;
+}
+.minio-step:last-child { border-bottom: 0; padding-bottom: .25rem; }
+.minio-step-n {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 999px;
+  background: #1d4ed8;
+  color: #fff;
+  font: 700 .8125rem/1 var(--sans);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: .0625rem;
+}
+.minio-step-title {
+  display: block;
+  font: 600 .875rem/1.35 var(--sans);
+  color: var(--ink-900);
+}
+.minio-step-desc {
+  display: block;
+  font: 400 .8125rem/1.55 var(--sans);
+  color: var(--ink-600);
+  margin-top: .1875rem;
+}
+.minio-card-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .75rem;
+  padding: .875rem 1.375rem;
+  background: #1e293b;
+}
+.minio-status {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  min-width: 0;
+  font: 400 .8125rem/1.4 var(--sans);
+  color: rgba(148,163,184,.9);
+}
+.minio-status strong { color: #e2e8f0; font-weight: 600; }
+.minio-dot {
+  width: .5rem;
+  height: .5rem;
+  border-radius: 999px;
+  background: #4ade80;
+  flex-shrink: 0;
+  animation: minio-ping 2.2s ease-in-out infinite;
+}
+@keyframes minio-ping {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(74,222,128,.5); }
+  50%       { box-shadow: 0 0 0 5px rgba(74,222,128,0); }
+}
+@media (prefers-reduced-motion:reduce) { .minio-dot { animation: none; } }
+.minio-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .4375rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Direct ZIP upload ───────────────────────────────────────────────────── */
+.zipup {
+  border: 1px solid var(--ink-200);
+  background: #fff;
+  border-radius: 12px;
+  padding: 1.25rem 1.375rem 1rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 2px rgba(15,23,42,.04);
+}
+.zipup [hidden] { display: none !important; }
+.zipup-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: .875rem; }
+.zipup-title { font: 600 1rem/1.3 var(--sans); color: var(--ink-900); margin: 0; }
+.zipup-hint { font: 400 .8125rem/1.5 var(--sans); color: var(--ink-500); margin: .2rem 0 0; }
+.zipup-bucket {
+  font: 600 .75rem/1 var(--mono);
+  color: var(--ink-800);
+  background: var(--ink-100);
+  border: 1px solid var(--ink-200);
+  border-radius: 4px;
+  padding: .125rem .375rem;
+}
+
+.zipup-drop {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .375rem;
+  padding: 1.5rem 1rem;
+  border: 1.5px dashed var(--ink-300);
+  border-radius: 10px;
+  background: var(--ink-50);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color .15s, background .15s;
+}
+.zipup-drop:hover, .zipup-drop.is-dragging { border-color: #c72c48; background: #fdf2f4; }
+.zipup-drop input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.zipup-drop-icon {
+  width: 2.75rem; height: 2.75rem;
+  border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  background: #fff; color: #c72c48;
+  border: 1px solid var(--ink-200);
+}
+.zipup-drop-title { font: 600 .875rem/1.35 var(--sans); color: var(--ink-800); }
+.zipup-drop-title u { color: #c72c48; text-underline-offset: 2px; }
+.zipup-drop-hint { font: 400 .75rem/1.4 var(--sans); color: var(--ink-500); }
+
+.zipup-item {
+  border: 1px solid var(--ink-200);
+  border-radius: 10px;
+  padding: .875rem 1rem;
+  background: #fff;
+}
+.zipup-item-top { display: flex; align-items: center; gap: .75rem; }
+.zipup-file-icon {
+  flex-shrink: 0;
+  width: 2.5rem; height: 2.75rem;
+  border-radius: 6px;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding-bottom: .375rem;
+  background: linear-gradient(180deg, #fde4e9 0%, #f9c8d2 100%);
+  color: #a3203a;
+  font: 700 .625rem/1 var(--mono);
+  letter-spacing: .04em;
+}
+.zipup-file { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .125rem; }
+.zipup-file-name {
+  font: 600 .875rem/1.3 var(--sans); color: var(--ink-900);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.zipup-file-size { font: 400 .75rem/1.3 var(--mono); color: var(--ink-500); }
+.zipup-chip {
+  flex-shrink: 0;
+  font: 600 .6875rem/1 var(--sans);
+  text-transform: uppercase; letter-spacing: .05em;
+  padding: .3125rem .5rem;
+  border-radius: 999px;
+  background: var(--ink-100); color: var(--ink-600);
+}
+.zipup-chip[data-state=uploading] { background: #dbeafe; color: #1d4ed8; }
+.zipup-chip[data-state=finishing] { background: #fef3c7; color: #92400e; }
+.zipup-chip[data-state=done]      { background: #dcfce7; color: #166534; }
+.zipup-chip[data-state=failed]    { background: #fee2e2; color: #b91c1c; }
+.zipup-chip[data-state=cancelled] { background: var(--ink-100); color: var(--ink-500); }
+.zipup-x {
+  flex-shrink: 0;
+  width: 1.75rem; height: 1.75rem;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--ink-400);
+  font-size: 1.25rem; line-height: 1; cursor: pointer;
+}
+.zipup-x:hover { background: var(--ink-100); color: var(--ink-700); }
+
+.zipup-progress { display: flex; align-items: center; gap: .75rem; margin-top: .875rem; }
+.zipup-bar {
+  flex: 1;
+  height: .5rem;
+  border-radius: 999px;
+  background: var(--ink-100);
+  overflow: hidden;
+}
+.zipup-bar span {
+  display: block; height: 100%; width: 0;
+  border-radius: inherit;
+  background: #c72c48;
+  transition: width .25s linear;
+}
+.zipup-item[data-state=uploading] .zipup-bar span {
+  background-image: linear-gradient(45deg, rgba(255,255,255,.18) 25%, transparent 25%, transparent 50%,
+                    rgba(255,255,255,.18) 50%, rgba(255,255,255,.18) 75%, transparent 75%);
+  background-size: 1rem 1rem;
+  animation: zipup-stripes 1s linear infinite;
+}
+.zipup-item[data-state=done] .zipup-bar span { background: #16a34a; }
+.zipup-item[data-state=failed] .zipup-bar span { background: #dc2626; }
+@keyframes zipup-stripes { from { background-position: 1rem 0; } to { background-position: 0 0; } }
+@media (prefers-reduced-motion:reduce) { .zipup-item .zipup-bar span { animation: none !important; } }
+.zipup-pct {
+  min-width: 3.25rem; text-align: right;
+  font: 700 .875rem/1 var(--mono); color: var(--ink-900);
+  font-variant-numeric: tabular-nums;
+}
+
+.zipup-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0,1fr));
+  gap: .5rem;
+  margin: .875rem 0 0;
+}
+@media (max-width: 36rem) { .zipup-stats { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+.zipup-stats div {
+  background: var(--ink-50);
+  border: 1px solid var(--ink-100);
+  border-radius: 8px;
+  padding: .5rem .625rem;
+}
+.zipup-stats dt {
+  font: 600 .625rem/1 var(--sans);
+  text-transform: uppercase; letter-spacing: .06em;
+  color: var(--ink-500);
+}
+.zipup-stats dd {
+  margin: .3125rem 0 0;
+  font: 600 .8125rem/1.2 var(--mono); color: var(--ink-900);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.zipup-status { font: 400 .8125rem/1.5 var(--sans); color: var(--ink-600); margin: .75rem 0 0; }
+.zipup-status:empty { display: none; }
+.zipup-status.is-error { color: #b91c1c; }
+.zipup-status.is-done { color: #166534; }
+.zipup-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .875rem; }
+.zipup-foot { font: 400 .75rem/1.5 var(--sans); color: var(--ink-500); margin: .75rem 0 0; }
+
+/* ── Archive list ────────────────────────────────────────────────────────── */
+.archive-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .75rem;
+}
+.archive-list-title {
+  font: 700 .9375rem/1.3 var(--sans);
+  color: var(--ink-900);
+  margin: 0;
+}
+.archive-count-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: .1875rem .5625rem;
+  background: var(--ink-100);
+  border-radius: 999px;
+  font: 600 .75rem/1 var(--sans);
+  color: var(--ink-600);
+}
+.archive-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: .875rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  margin-bottom: .5rem;
+  transition: border-color .12s, box-shadow .12s;
+}
+.archive-row:last-child { margin-bottom: 0; }
+.archive-row:hover {
+  border-color: var(--brand-300);
+  box-shadow: 0 2px 8px rgba(59,130,246,.08);
+}
+.archive-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 8px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #c2410c;
+  flex-shrink: 0;
+}
+.archive-main { flex: 1; min-width: 0; }
+.archive-name {
+  font: 600 .875rem/1.3 var(--sans);
+  color: var(--ink-900);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.archive-key {
+  display: block;
+  font: 400 .75rem/1.4 var(--sans);
+  color: var(--ink-500);
+  margin-top: .125rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.archive-meta {
+  display: flex;
+  align-items: center;
+  gap: .875rem;
+  margin-top: .4375rem;
+  flex-wrap: wrap;
+}
+.archive-meta-item {
+  display: flex;
+  align-items: center;
+  gap: .3125rem;
+  font: 400 .75rem/1 var(--sans);
+  color: var(--ink-500);
+}
+.archive-meta-item strong {
+  font-weight: 600;
+  color: var(--ink-700);
+}
+.archive-action { flex-shrink: 0; align-self: center; }
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.up-empty {
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+}
+.up-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 12px;
+  background: var(--ink-100);
+  color: var(--ink-400);
+  margin: 0 auto .875rem;
+}
+.up-empty-title {
+  font: 600 .9375rem/1.3 var(--sans);
+  color: var(--ink-700);
+  margin: 0 0 .375rem;
+}
+.up-empty-body {
+  font: 400 .8125rem/1.55 var(--sans);
+  color: var(--ink-500);
+  margin: 0 auto;
+  max-width: 40ch;
+}
+</style>
+
+{% if error   %}<div class="alert alert-error mb-4">{{ error }}</div>{% endif %}
+{% if notice  %}<div class="alert alert-ok   mb-4">{{ notice }}</div>{% endif %}
+{% if uploaded %}
+  <div class="alert alert-info mb-4">
+    {{ uploaded }} PDF(s) uploaded successfully. Open the upload to start extraction.
+  </div>
+{% endif %}
+
+{# ── Two-column shell ─────────────────────────────────────────────────────── #}
+<div class="up-shell">
+
+  {# ── Left: method selector ───────────────────────────────────────────── #}
+  <nav class="up-sidebar" aria-label="Upload methods">
+    <div class="up-sidebar-head">How are you adding PDFs?</div>
+
+    <button type="button" class="up-method" data-up-method="files" aria-pressed="true">
+      <span class="up-method-icon" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+          <path d="M14 3v5h5"/>
+        </svg>
+      </span>
+      <span class="up-method-body">
+        <span class="up-method-name">PDF files</span>
+        <span class="up-method-hint">Pick one or many files from your computer</span>
+      </span>
+    </button>
+
+    <button type="button" class="up-method" data-up-method="folder" aria-pressed="false">
+      <span class="up-method-icon" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 7.5V6a2 2 0 0 1 2-2h3.5l2 2.5H19a2 2 0 0 1 2 2v1"/>
+          <path d="M3 11h17.5a1.5 1.5 0 0 1 1.5 1.7l-1.2 7A2 2 0 0 1 18.8 21H5.2a2 2 0 0 1-2-1.3l-1.2-7A1.5 1.5 0 0 1 3.5 11"/>
+        </svg>
+      </span>
+      <span class="up-method-body">
+        <span class="up-method-name">A folder</span>
+        <span class="up-method-hint">Upload an entire directory of PDFs</span>
+      </span>
+    </button>
+
+    <button type="button" class="up-method" data-up-method="minio" aria-pressed="false">
+      <span class="up-method-icon" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 8v9a2 2 0 0 1-1 1.7l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 17V8"/>
+          <path d="M3 8l9-5 9 5-9 5z"/><path d="M12 13v9"/>
+        </svg>
+      </span>
+      <span class="up-method-body">
+        <span class="up-method-name">ZIP via MinIO</span>
+        <span class="up-method-hint">Drop a ZIP archive in the file store</span>
+      </span>
+    </button>
+  </nav>
+
+  {# ── Right: active panel ─────────────────────────────────────────────── #}
+  <div data-up-panels>
+
+    {# ── PDF files panel ──────────────────────────────────────────────── #}
+    <div class="up-panel" data-up-panel="files">
+      <div class="up-panel-head">
+        <span class="up-panel-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+            <path d="M14 3v5h5"/>
+          </svg>
+        </span>
+        <div>
+          <h2 class="up-panel-title">Upload PDF files</h2>
+        </div>
+      </div>
+      <div class="up-panel-body">
+        <form method="post" action="/upload" enctype="multipart/form-data">
+          <input type="hidden" name="upload_source" value="files">
+          <div class="up-form-row">
+            <div>
+              <label class="field-label" for="batch-label-files">Batch name <span aria-hidden="true">*</span></label>
+              <input type="text" id="batch-label-files" name="batch_label" class="field"
+                     placeholder="e.g. Delhi North — 2026" required
+                     pattern=".*\S.*" title="Enter a batch name.">
+            </div>
+            <button type="submit" class="btn btn-primary" style="white-space:nowrap">
+              Extract Data
+            </button>
+          </div>
+          <div class="up-dropzone" data-dropzone data-dz-merge>
+            <input type="file" name="files" accept="application/pdf" multiple required
+                   aria-label="Choose PDF files">
+            <div class="up-dz-empty">
+              <div class="up-dz-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 15V3"/><path d="m7.5 7.5 4.5-4.5 4.5 4.5"/>
+                  <path d="M3 15v3.5A2.5 2.5 0 0 0 5.5 21h13a2.5 2.5 0 0 0 2.5-2.5V15"/>
+                </svg>
+              </div>
+              <p class="up-dz-title">Drop PDFs here, or click to browse</p>
+              <p class="up-dz-hint">All selected files go into one batch under the name above.</p>
+            </div>
+            <ul class="up-dz-list" data-dz-list hidden></ul>
+            <div class="up-dz-foot" data-dz-foot hidden>
+              <button type="button" class="up-dz-add" data-dz-add>Add more PDFs</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    {# ── Folder panel ─────────────────────────────────────────────────── #}
+    <div class="up-panel hidden" data-up-panel="folder">
+      <div class="up-panel-head">
+        <span class="up-panel-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7.5V6a2 2 0 0 1 2-2h3.5l2 2.5H19a2 2 0 0 1 2 2v1"/>
+            <path d="M3 11h17.5a1.5 1.5 0 0 1 1.5 1.7l-1.2 7A2 2 0 0 1 18.8 21H5.2a2 2 0 0 1-2-1.3l-1.2-7A1.5 1.5 0 0 1 3.5 11"/>
+          </svg>
+        </span>
+        <div>
+          <h2 class="up-panel-title">Upload a folder</h2>
+          <p class="up-panel-sub">Every PDF inside is taken, including sub-folders. Useful when rolls are already organised by booth.</p>
+        </div>
+      </div>
+      <div class="up-panel-body">
+        <form method="post" action="/upload" enctype="multipart/form-data">
+          <input type="hidden" name="upload_source" value="folder">
+          <div class="up-form-row">
+            <div>
+              <label class="field-label" for="batch-label-folder">Batch name <span aria-hidden="true">*</span></label>
+              <input type="text" id="batch-label-folder" name="batch_label" class="field"
+                     placeholder="e.g. Delhi North — 2026" required
+                     pattern=".*\S.*" title="Enter a batch name.">
+            </div>
+            <button type="submit" class="btn btn-primary" style="white-space:nowrap">
+              Upload folder
+            </button>
+          </div>
+          <div class="up-dropzone" data-dropzone>
+            <input type="file" name="files" accept="application/pdf" multiple required
+                   webkitdirectory directory aria-label="Choose a folder">
+            <div class="up-dz-empty">
+              <div class="up-dz-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2.5 7.5V5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8A1.5 1.5 0 0 1 19.5 7.5v1"/>
+                  <path d="M2.5 11h18.5a1 1 0 0 1 1 1.1l-.9 6.4a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1L1.1 12.1a1 1 0 0 1 1-1.1"/>
+                </svg>
+              </div>
+              <p class="up-dz-title">Drop a folder here, or click to choose</p>
+              <p class="up-dz-hint">Every PDF inside is uploaded. Sub-folders are included.</p>
+            </div>
+            <ul class="up-dz-list" data-dz-list hidden></ul>
+            <div class="up-dz-foot" data-dz-foot hidden>
+              <button type="button" class="up-dz-add" data-dz-add>Choose a different folder</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    {# ── MinIO / ZIP panel ────────────────────────────────────────────── #}
+    <div class="up-panel hidden" data-up-panel="minio">
+      <div class="up-panel-head">
+        <span class="up-panel-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 8v9a2 2 0 0 1-1 1.7l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 17V8"/>
+            <path d="M3 8l9-5 9 5-9 5z"/><path d="M12 13v9"/>
+          </svg>
+        </span>
+        <div>
+          <h2 class="up-panel-title">ZIP archive via MinIO</h2>
+          <p class="up-panel-sub">
+            {% if minio_enabled %}
+              Already have the roll as a ZIP? Put it in the file store — the pipeline
+              unpacks it automatically within 30 seconds.
+            {% else %}
+              Object storage is not enabled on this deployment.
+            {% endif %}
+          </p>
+        </div>
+      </div>
+
+      <div class="up-panel-body">
+        {% if not minio_enabled %}
+
+          <div class="up-empty">
+            <div class="up-empty-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+            </div>
+            <p class="up-empty-title">MinIO is not enabled</p>
+            <p class="up-empty-body">
+              Set <code>MINIO_ENABLED=true</code> in the environment and restart
+              the pipeline to activate the <strong>{{ minio_bucket }}</strong> bucket watcher.
+            </p>
+          </div>
+
+        {% else %}
+
+          {# ── Direct ZIP upload (multipart into the bucket, any size) ── #}
+          <div class="zipup" data-zipup>
+            <div class="zipup-head">
+              <div>
+                <p class="zipup-title">Upload a ZIP</p>
+                <p class="zipup-hint">Any size — 5–10 GB is fine. Goes straight into the
+                  <span class="zipup-bucket">{{ minio_bucket }}</span> bucket.</p>
+              </div>
+            </div>
+
+            <label class="zipup-drop" data-zipup-drop>
+              <input type="file" accept=".zip,application/zip" data-zipup-file aria-label="Choose a ZIP file">
+              <span class="zipup-drop-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 15V3"/><path d="m7 8 5-5 5 5"/>
+                  <path d="M3 15v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/>
+                </svg>
+              </span>
+              <span class="zipup-drop-title">Drag a ZIP here, or <u>browse</u></span>
+              <span class="zipup-drop-hint">One .zip file of electoral roll PDFs</span>
+            </label>
+
+            <div class="zipup-item" data-zipup-item hidden>
+              <div class="zipup-item-top">
+                <span class="zipup-file-icon" aria-hidden="true">ZIP</span>
+                <div class="zipup-file">
+                  <span class="zipup-file-name" data-zipup-name></span>
+                  <span class="zipup-file-size" data-zipup-size></span>
+                </div>
+                <span class="zipup-chip" data-zipup-chip>Ready</span>
+                <button type="button" class="zipup-x" data-zipup-clear aria-label="Remove file">&times;</button>
+              </div>
+
+              <div class="zipup-progress" data-zipup-progress hidden>
+                <div class="zipup-bar"><span data-zipup-fill></span></div>
+                <span class="zipup-pct" data-zipup-pct>0%</span>
+              </div>
+
+              <dl class="zipup-stats" data-zipup-stats hidden>
+                <div><dt>Uploaded</dt><dd data-zipup-sent>—</dd></div>
+                <div><dt>Speed</dt><dd data-zipup-rate>—</dd></div>
+                <div><dt>Time left</dt><dd data-zipup-eta>—</dd></div>
+                <div><dt>Pieces</dt><dd data-zipup-parts>—</dd></div>
+              </dl>
+
+              <p class="zipup-status" data-zipup-status aria-live="polite"></p>
+
+              <div class="zipup-actions">
+                <button type="button" class="btn" data-zipup-cancel hidden>Cancel upload</button>
+                <button type="button" class="btn btn-primary" data-zipup-go>Upload ZIP</button>
+              </div>
+            </div>
+
+            <p class="zipup-foot">Keep this tab open until it says <strong>Upload complete</strong>.
+              The archive then shows in "Recent ZIP uploads" below and processing starts on its own.</p>
+          </div>
+
+          {# ── How to use MinIO — combined guide + action card ── #}
+          <div class="minio-card">
+            <div class="minio-card-steps">
+
+              <div class="minio-step">
+                <span class="minio-step-n" aria-hidden="true">1</span>
+                <span>
+                  <strong class="minio-step-title">Open the MinIO file manager</strong>
+                  <span class="minio-step-desc">
+                    MinIO is like a Google Drive for this system. Click the button below
+                    to open it in a new tab — you are signed in automatically with your pipeline login.
+                  </span>
+                </span>
+              </div>
+
+              <div class="minio-step">
+                <span class="minio-step-n" aria-hidden="true">2</span>
+                <span>
+                  <strong class="minio-step-title">Upload your ZIP to the <em>{{ minio_bucket }}</em> bucket</strong>
+                  <span class="minio-step-desc">
+                    The ZIP should contain the electoral roll PDFs. There is no file size limit.
+                    The pipeline will spot it within 30 seconds and start unpacking.
+                  </span>
+                </span>
+              </div>
+
+              <div class="minio-step">
+                <span class="minio-step-n" aria-hidden="true">3</span>
+                <span>
+                  <strong class="minio-step-title">Come back — it appears below automatically</strong>
+                  <span class="minio-step-desc">
+                    Once the archive is found, a new entry appears in "Recent ZIP uploads" below.
+                    No extra steps — open it, then press Start extraction.
+                  </span>
+                </span>
+              </div>
+
+            </div>
+
+            <div class="minio-card-action">
+              <div class="minio-status">
+                <span class="minio-dot" aria-hidden="true"></span>
+                Watching <strong>{{ minio_bucket }}</strong> — new ZIPs detected within 30 s
+              </div>
+              <a href="{{ minio_console_url }}" target="_blank" rel="noopener"
+                 class="btn btn-primary minio-open-btn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="2" y="3" width="20" height="14" rx="2"/>
+                  <path d="M8 21h8M12 17v4"/>
+                </svg>
+                Open MinIO file manager
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                     aria-hidden="true" style="opacity:.65">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                </svg>
+              </a>
+            </div>
+          </div>
+
+          {# ── Recent ZIP uploads ── #}
+          {% if not archives %}
+
+            <div class="up-empty" style="padding:2rem 1rem">
+              <div class="up-empty-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 15v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+              </div>
+              <p class="up-empty-title">No ZIPs yet</p>
+              <p class="up-empty-body">
+                Nothing has arrived in <strong>{{ minio_bucket }}</strong> yet.
+                Drop an archive in the bucket and this list will update automatically.
+              </p>
+            </div>
+
+          {% else %}
+
+            <div class="archive-list-head">
+              <h3 class="archive-list-title">Recent ZIP uploads</h3>
+              <span class="archive-count-pill">
+                {{ archives|length }} archive{{ 's' if archives|length != 1 else '' }}
+              </span>
+            </div>
+
+            {% for a in archives %}
+              {% set batch = archive_uploads.get(a.id) %}
+              <div class="archive-row" data-archive-row {% if loop.index > 5 %}hidden{% endif %}>
+
+                <span class="archive-icon" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5" rx="1"/>
+                    <line x1="10" y1="12" x2="14" y2="12"/>
+                  </svg>
+                </span>
+
+                <div class="archive-main">
+                  <div class="archive-name">{{ a.output_directory or a.object_key }}</div>
+                  {% if a.object_key and a.output_directory %}
+                    <span class="archive-key">{{ a.object_key }}</span>
+                  {% endif %}
+                  <div class="archive-meta">
+                    <span class="archive-meta-item">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                      </svg>
+                      {{ time_ago(a.discovered_at) }}
+                    </span>
+                    <span class="archive-meta-item">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+                        <path d="M14 3v5h5"/>
+                      </svg>
+                      <strong>{{ a.pdf_count }}</strong> PDF{{ 's' if a.pdf_count != 1 else '' }}
+                    </span>
+                  </div>
+                </div>
+
+                <div class="archive-action">
+                  {% if batch %}
+                    <a href="/documents?upload={{ batch.id }}" class="btn btn-primary"
+                       style="font-size:.8125rem;padding:.4375rem .875rem">
+                      Open →
+                    </a>
+                  {% else %}
+                    <span style="font:.75rem/1 var(--sans);color:var(--ink-400)">Processing…</span>
+                  {% endif %}
+                </div>
+
+              </div>
+            {% endfor %}
+
+            {% if archives|length > 5 %}
+              <div style="margin-top:.875rem">
+                <button type="button" class="btn btn-ghost" id="zip-view-more">
+                  Show {{ archives|length - 5 }} more
+                </button>
+              </div>
+            {% endif %}
+
+          {% endif %}
+
+        {% endif %}
+      </div>{# /up-panel-body #}
+    </div>{# /minio panel #}
+
+  </div>{# /up-panels #}
+</div>{# /up-shell #}
+
+<script>
+(function () {
+  'use strict';
+
+  /* ── Method selector ────────────────────────────────────────────────────
+     Click a sidebar button → show the matching panel, persist the choice. */
+  var methods = Array.prototype.slice.call(
+    document.querySelectorAll('[data-up-method]'));
+  var panels  = document.querySelector('[data-up-panels]');
+  var KEY     = 'up-method';
+
+  function activateMethod(key) {
+    methods.forEach(function (btn) {
+      var on = btn.dataset.upMethod === key;
+      btn.classList.toggle('is-active', on);
+      btn.setAttribute('aria-pressed', String(on));
+    });
+    if (panels) {
+      panels.querySelectorAll('[data-up-panel]').forEach(function (p) {
+        p.classList.toggle('hidden', p.dataset.upPanel !== key);
+      });
+      /* Disable file inputs in hidden panels so they can't submit stale data. */
+      panels.querySelectorAll('input[type=file]').forEach(function (inp) {
+        inp.disabled = inp.closest('[data-up-panel]').classList.contains('hidden');
+      });
+    }
+  }
+
+  methods.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var key = btn.dataset.upMethod;
+      activateMethod(key);
+      try { localStorage.setItem(KEY, key); } catch (e) {}
+      /* Scroll the panel into view if below the fold. */
+      var panel = panels && panels.querySelector('[data-up-panel="' + key + '"]');
+      if (panel && panel.getBoundingClientRect().top > window.innerHeight * 0.85) {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  });
+
+  /* Restore last choice. */
+  var saved = 'files';
+  try { saved = localStorage.getItem(KEY) || 'files'; } catch (e) {}
+  if (!document.querySelector('[data-up-method="' + saved + '"]')) saved = 'files';
+  activateMethod(saved);
+
+  /* ── Dropzones ──────────────────────────────────────────────────────────
+     Selected files are kept in memory so rows can be removed before submit.
+     On submit, the list is synced back onto the file input via DataTransfer
+     so the existing multipart POST is unchanged. */
+  var dzSelections = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+
+  function dzGetSelection(zone) {
+    if (dzSelections) {
+      if (!dzSelections.has(zone)) dzSelections.set(zone, []);
+      return dzSelections.get(zone);
+    }
+    if (!zone._dzFiles) zone._dzFiles = [];
+    return zone._dzFiles;
+  }
+
+  function dzIsPdf(file) {
+    return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  }
+
+  function dzFileKey(file) {
+    return (file.webkitRelativePath || file.name) + '|' + file.size + '|' + file.lastModified;
+  }
+
+  function dzFormatSize(bytes) {
+    if (!bytes && bytes !== 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function dzDisplayName(file) {
+    if (file.webkitRelativePath) {
+      var parts = file.webkitRelativePath.split('/');
+      return parts[parts.length - 1] || file.name;
+    }
+    return file.name;
+  }
+
+  function dzSyncInput(zone, input, files) {
+    var dt = new DataTransfer();
+    files.forEach(function (f) { dt.items.add(f); });
+    input.files = dt.files;
+  }
+
+  function dzRender(zone, input, listEl, footEl) {
+    var files = dzGetSelection(zone);
+    var has = files.length > 0;
+    zone.classList.toggle('has-files', has);
+    listEl.hidden = !has;
+    if (footEl) footEl.hidden = !has;
+
+    listEl.innerHTML = '';
+    files.forEach(function (file, index) {
+      var li = document.createElement('li');
+      li.className = 'up-dz-item';
+
+      var icon = document.createElement('span');
+      icon.className = 'up-dz-item-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
+
+      var name = document.createElement('span');
+      name.className = 'up-dz-item-name';
+      name.textContent = dzDisplayName(file);
+      name.title = file.webkitRelativePath || file.name;
+
+      var meta = document.createElement('span');
+      meta.className = 'up-dz-item-meta';
+      meta.textContent = dzFormatSize(file.size);
+
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'up-dz-remove';
+      remove.setAttribute('aria-label', 'Remove ' + dzDisplayName(file));
+      remove.textContent = '\u00d7';
+      remove.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var arr = dzGetSelection(zone).slice();
+        arr.splice(index, 1);
+        dzSetSelection(zone, input, listEl, footEl, arr);
+      });
+
+      li.appendChild(icon);
+      li.appendChild(name);
+      li.appendChild(meta);
+      li.appendChild(remove);
+      listEl.appendChild(li);
+    });
+
+    dzSyncInput(zone, input, files);
+  }
+
+  function dzSetSelection(zone, input, listEl, footEl, files) {
+    if (dzSelections) dzSelections.set(zone, files);
+    else zone._dzFiles = files;
+    dzRender(zone, input, listEl, footEl);
+  }
+
+  function dzMergePicked(zone, input, listEl, footEl, picked) {
+    var pdfs = picked.filter(dzIsPdf);
+    if (!pdfs.length) return;
+    if (zone.hasAttribute('data-dz-merge')) {
+      var existing = dzGetSelection(zone).slice();
+      var seen = {};
+      existing.forEach(function (f) { seen[dzFileKey(f)] = true; });
+      pdfs.forEach(function (f) {
+        var k = dzFileKey(f);
+        if (!seen[k]) { existing.push(f); seen[k] = true; }
+      });
+      dzSetSelection(zone, input, listEl, footEl, existing);
+    } else {
+      dzSetSelection(zone, input, listEl, footEl, pdfs);
+    }
+  }
+
+  function dzOpenPicker(input) {
+    input.style.pointerEvents = 'auto';
+    input.click();
+    input.style.pointerEvents = 'none';
+  }
+
+  document.querySelectorAll('[data-dropzone]').forEach(function (zone) {
+    var input = zone.querySelector('input[type=file]');
+    var listEl = zone.querySelector('[data-dz-list]');
+    var footEl = zone.querySelector('[data-dz-foot]');
+    var addBtn = zone.querySelector('[data-dz-add]');
+    if (!input || !listEl) return;
+    var depth = 0;
+    var form = zone.closest('form');
+
+    if (form) {
+      form.addEventListener('submit', function () {
+        dzSyncInput(zone, input, dzGetSelection(zone));
+      });
+    }
+
+    if (addBtn) {
+      addBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dzOpenPicker(input);
+      });
+    }
+
+    input.addEventListener('change', function () {
+      var picked = Array.prototype.slice.call(input.files || []);
+      input.value = '';
+      dzMergePicked(zone, input, listEl, footEl, picked);
+    });
+
+    zone.addEventListener('dragenter', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      depth++;
+      zone.classList.add('is-dragging');
+    });
+    zone.addEventListener('dragover', function (e) {
+      e.preventDefault(); e.stopPropagation();
+    });
+    zone.addEventListener('dragleave', function (e) {
+      e.preventDefault();
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) zone.classList.remove('is-dragging');
+    });
+    zone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      depth = 0;
+      zone.classList.remove('is-dragging');
+      var dropped = Array.prototype.slice.call(e.dataTransfer.files || []);
+      dzMergePicked(zone, input, listEl, footEl, dropped);
+    });
+  });
+
+  /* ── Direct ZIP upload ──────────────────────────────────────────────────
+     Splits the file into parts below Cloudflare's 100 MB request cap and
+     sends them to the S3 multipart endpoints. A few parts are in flight at
+     once and each part is retried, so one dropped request does not lose
+     a multi-gigabyte upload. */
+  var zu = document.querySelector('[data-zipup]');
+  if (zu) {
+    var q = function (s) { return zu.querySelector('[data-zipup-' + s + ']'); };
+    var zuFile = q('file'), zuDrop = q('drop'), zuItem = q('item');
+    var zuGo = q('go'), zuCancel = q('cancel'), zuClear = q('clear');
+    var zuFill = q('fill'), zuPct = q('pct'), zuProgress = q('progress'), zuStats = q('stats');
+    var zuChip = q('chip'), zuStatus = q('status');
+    var zuState = null, zuPicked = null;
+    var PARALLEL = 6, RETRIES = 5;
+    var CHIP = { ready: 'Ready', uploading: 'Uploading', finishing: 'Finishing',
+                 done: 'Complete', failed: 'Failed', cancelled: 'Cancelled' };
+
+    function zuSay(text, kind) {
+      zuStatus.textContent = text || '';
+      zuStatus.classList.toggle('is-error', kind === 'error');
+      zuStatus.classList.toggle('is-done', kind === 'done');
+    }
+    function zuSetState(s) {
+      zuItem.dataset.state = s;
+      zuChip.dataset.state = s;
+      zuChip.textContent = CHIP[s];
+    }
+    function zuSize(b) {
+      if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB';
+      if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+      return Math.max(0, b / 1024).toFixed(0) + ' KB';
+    }
+    function zuTime(secs) {
+      if (!isFinite(secs) || secs <= 0) return '—';
+      secs = Math.round(secs);
+      var h = Math.floor(secs / 3600), m = Math.floor(secs % 3600 / 60), s = secs % 60;
+      if (h) return h + 'h ' + m + 'm';
+      if (m) return m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+      return s + 's';
+    }
+    function zuBusy(on) {
+      zuGo.hidden = on; zuCancel.hidden = !on; zuClear.hidden = on;
+      zuFile.disabled = on;
+      zuDrop.hidden = on || !!zuPicked;
+    }
+    function zuPick(file) {
+      if (!file) return;
+      if (!/\.zip$/i.test(file.name)) {
+        zuPicked = null; zuItem.hidden = true; zuDrop.hidden = false;
+        alert('Only .zip files can be uploaded here.');
+        return;
+      }
+      zuPicked = file;
+      q('name').textContent = file.name;
+      q('name').title = file.name;
+      q('size').textContent = zuSize(file.size);
+      zuItem.hidden = false; zuDrop.hidden = true;
+      zuProgress.hidden = true; zuStats.hidden = true;
+      zuFill.style.width = '0%'; zuPct.textContent = '0%';
+      zuGo.textContent = 'Upload ZIP'; zuGo.hidden = false;
+      zuSetState('ready'); zuSay('');
+    }
+
+    zuFile.addEventListener('change', function () { zuPick(zuFile.files && zuFile.files[0]); zuFile.value = ''; });
+    ['dragenter', 'dragover'].forEach(function (t) {
+      zuDrop.addEventListener(t, function (e) { e.preventDefault(); zuDrop.classList.add('is-dragging'); });
+    });
+    ['dragleave', 'drop'].forEach(function (t) {
+      zuDrop.addEventListener(t, function () { zuDrop.classList.remove('is-dragging'); });
+    });
+    zuDrop.addEventListener('drop', function (e) {
+      e.preventDefault();
+      zuPick(e.dataTransfer.files && e.dataTransfer.files[0]);
+    });
+    zuClear.addEventListener('click', function () {
+      zuPicked = null; zuItem.hidden = true; zuDrop.hidden = false;
+    });
+
+    function zuJson(url, body) {
+      return fetch(url, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(r.status + ' ' + t); });
+        return r.json();
+      });
+    }
+    function zuSleep(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+
+    /* XHR rather than fetch: only XHR reports upload progress, which is what
+       lets the bar move smoothly inside each 50 MB piece. */
+    function zuPutOnce(state, n, blob, onBytes) {
+      return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        state.xhrs[n] = xhr;
+        xhr.open('PUT', '/upload/zip/part?upload_id=' + encodeURIComponent(state.uploadId) +
+          '&key=' + encodeURIComponent(state.key) + '&part_number=' + n);
+        xhr.withCredentials = true;
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.upload.onprogress = function (e) { if (e.lengthComputable) onBytes(e.loaded); };
+        xhr.onload = function () {
+          delete state.xhrs[n];
+          if (/\/login(\?|$)/.test(xhr.responseURL || '')) {
+            var out = new Error('signed-out'); out.signedOut = true; reject(out); return;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(new Error('Bad response')); }
+          } else reject(new Error('HTTP ' + xhr.status));
+        };
+        xhr.onerror = function () { delete state.xhrs[n]; reject(new Error('Network error')); };
+        xhr.onabort = function () { delete state.xhrs[n]; reject(new Error('cancelled')); };
+        xhr.send(blob);
+      });
+    }
+    function zuPutPart(state, n, blob, onBytes, attempt) {
+      if (state.cancelled) return Promise.reject(new Error('cancelled'));
+      return zuPutOnce(state, n, blob, onBytes).catch(function (err) {
+        onBytes(0);
+        if (state.cancelled || err.signedOut || attempt >= RETRIES) throw err;
+        state.retries++;
+        return zuSleep(2000 * attempt).then(function () {
+          return zuPutPart(state, n, blob, onBytes, attempt + 1);
+        });
+      });
+    }
+
+    zuGo.addEventListener('click', function () {
+      var file = zuPicked;
+      if (!file) return;
+
+      var state = zuState = { cancelled: false, xhrs: {}, retries: 0 };
+      zuBusy(true);
+      zuSetState('uploading');
+      zuProgress.hidden = false; zuStats.hidden = false;
+      zuFill.style.width = '0%'; zuPct.textContent = '0%';
+      q('sent').textContent = '0 of ' + zuSize(file.size);
+      q('rate').textContent = '—'; q('eta').textContent = '—'; q('parts').textContent = '—';
+      zuSay('Preparing upload…');
+
+      zuJson('/upload/zip/start', { filename: file.name, size: file.size }).then(function (info) {
+        state.uploadId = info.upload_id; state.key = info.key;
+        var partSize = info.part_size;
+        var total = Math.max(1, Math.ceil(file.size / partSize));
+        var next = 1, done = 0, confirmed = 0, parts = [];
+        var inflight = {};
+        var samples = [{ t: Date.now(), b: 0 }];
+        zuSay('');
+
+        function sentBytes() {
+          var b = confirmed;
+          for (var k in inflight) b += inflight[k];
+          return b;
+        }
+        function render() {
+          var sent = Math.min(sentBytes(), file.size);
+          var pct = sent / file.size * 100;
+          zuFill.style.width = pct.toFixed(2) + '%';
+          zuPct.textContent = (pct >= 99.95 && done < total ? 99.9 : pct).toFixed(1) + '%';
+          q('sent').textContent = zuSize(sent) + ' of ' + zuSize(file.size);
+          q('parts').textContent = done + ' / ' + total + (state.retries ? ' (' + state.retries + ' retried)' : '');
+
+          var now = Date.now();
+          samples.push({ t: now, b: sent });
+          while (samples.length > 2 && now - samples[0].t > 20000) samples.shift();
+          var span = (now - samples[0].t) / 1000;
+          if (span >= 2) {
+            var rate = (sent - samples[0].b) / span;
+            q('rate').textContent = rate > 0 ? zuSize(rate) + '/s' : '—';
+            q('eta').textContent = rate > 0 ? zuTime((file.size - sent) / rate) : '—';
+          }
+        }
+        var ticker = setInterval(render, 500);
+
+        function worker() {
+          if (state.cancelled || next > total) return Promise.resolve();
+          var n = next++;
+          var blob = file.slice((n - 1) * partSize, Math.min(file.size, n * partSize));
+          inflight[n] = 0;
+          return zuPutPart(state, n, blob, function (b) { inflight[n] = b; }, 1).then(function (res) {
+            delete inflight[n];
+            parts.push({ part_number: n, etag: res.etag });
+            done++; confirmed += blob.size;
+            return worker();
+          });
+        }
+        var pool = [];
+        for (var i = 0; i < Math.min(PARALLEL, total); i++) pool.push(worker());
+        return Promise.all(pool).then(function () {
+          clearInterval(ticker); render();
+          if (state.cancelled) throw new Error('cancelled');
+          zuSetState('finishing');
+          q('eta').textContent = '—';
+          zuSay('All pieces sent. MinIO is joining them into one file…');
+          return zuJson('/upload/zip/complete', { upload_id: state.uploadId, key: state.key, parts: parts });
+        }, function (err) { clearInterval(ticker); throw err; });
+      }).then(function (res) {
+        zuFill.style.width = '100%'; zuPct.textContent = '100%';
+        zuSetState('done');
+        zuSay('Upload complete. ' + file.name + ' is in the ' + res.bucket +
+          ' bucket. It will show in "Recent ZIP uploads" within about a minute — refresh this page.', 'done');
+        zuState = null;
+      }).catch(function (err) {
+        Object.keys(state.xhrs).forEach(function (k) { state.xhrs[k].abort(); });
+        if (state.uploadId) zuJson('/upload/zip/abort', { upload_id: state.uploadId, key: state.key }).catch(function () {});
+        if (state.cancelled) { zuSetState('cancelled'); zuSay('Upload cancelled. Nothing was added to the bucket.'); }
+        else if (err.signedOut) {
+          zuSetState('failed');
+          zuSay('You were signed out during the upload. Sign in again in a new tab, come back here and press Retry.', 'error');
+        }
+        else { zuSetState('failed'); zuSay('Upload failed: ' + err.message + '. Check your connection and press Retry.', 'error'); }
+        zuGo.textContent = 'Retry';
+        zuState = null;
+      }).then(function () {
+        zuBusy(false);
+      });
+    });
+
+    zuCancel.addEventListener('click', function () {
+      if (!zuState) return;
+      zuState.cancelled = true;
+      Object.keys(zuState.xhrs).forEach(function (k) { zuState.xhrs[k].abort(); });
+    });
+    window.addEventListener('beforeunload', function (e) {
+      if (zuState && zuState.uploadId) { e.preventDefault(); e.returnValue = ''; }
+    });
+  }
+
+  /* ── Show more archives ─────────────────────────────────────────────────
+     Rows beyond the first 5 are already in the DOM — just unhide them. */
+  var moreBtn = document.getElementById('zip-view-more');
+  if (moreBtn) {
+    moreBtn.addEventListener('click', function () {
+      document.querySelectorAll('[data-archive-row][hidden]').forEach(function (r) {
+        r.removeAttribute('hidden');
+      });
+      moreBtn.remove();
+    });
+  }
+})();
+</script>
+
+{% endblock %}

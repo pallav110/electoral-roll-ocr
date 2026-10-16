@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Electoral Data</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f7fb; color: #172033; }
+    main { width: min(100% - 2rem, 25rem); background: #fff; border: 1px solid #dbe3ef; border-radius: 16px; padding: 2rem; box-shadow: 0 18px 45px #1b31501c; }
+    h1 { margin: 0 0 .5rem; font-size: 1.45rem; } p { color: #526176; line-height: 1.5; }
+    label { display: grid; gap: .4rem; margin-top: 1rem; font-weight: 650; font-size: .9rem; }
+    input { padding: .75rem; border: 1px solid #aebacc; border-radius: 8px; font: inherit; }
+    button { width: 100%; margin-top: 1.4rem; padding: .8rem; background: #135cbb; color: #fff; border: 0; border-radius: 8px; font: inherit; font-weight: 700; cursor: pointer; }
+    .error { margin-top: 1rem; padding: .7rem; border-radius: 8px; background: #fff0f0; color: #9e2424; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Electoral Data</h1>
+    <p>Sign in with your authorised internal account.</p>
+    {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/login" autocomplete="on">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label>Username <input name="username" required autofocus autocomplete="username"></label>
+      <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

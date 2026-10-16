@@ -1,0 +1,530 @@
+{% extends "base.html" %}
+{% from "macros.html" import state_badge, action_menu, batch_action_menu %}
+{% set sg = batch_groups[0].subgroups[0] %}
+{% block title %}Roll set {{ sg.batch_num }} · {{ scope_label }} · Electoral Roll Processing{% endblock %}
+{% block content %}
+<style>
+  /* Batch detail — visual polish only. Markup, columns, and actions are unchanged. */
+  .batch-detail-head {
+    display: flex; flex-direction: column; align-items: stretch;
+    gap: 1.25rem; margin-bottom: 1.35rem;
+  }
+  .batch-detail-intro { min-width: 12rem; }
+  .batch-detail-title {
+    margin: 0;
+    font: 700 1.75rem/1.15 var(--sans); color: var(--ink-950);
+    letter-spacing: -.03em;
+  }
+  .batch-detail-sub {
+    margin: .35rem 0 0; font: 400 .875rem/1.45 var(--sans); color: var(--ink-500);
+    max-width: 68ch;
+  }
+
+  .batch-summary {
+    display: flex; align-items: stretch; width: 100%;
+    gap: .85rem;
+  }
+  .batch-summary-card {
+    display: flex; flex: 1 1 0; flex-direction: column; align-items: center; justify-content: center;
+    gap: .35rem; min-width: 0; min-height: 5.25rem;
+    padding: 1rem 1.35rem; border-radius: 14px; text-align: center;
+    border: 1px solid transparent;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+  }
+  .batch-summary-card.is-total {
+    background: #eef1fb; color: #415db8; border-color: #d5def3;
+  }
+  .batch-summary-card.is-extracted {
+    background: #e8f6ee; color: #2f7a52; border-color: #c9e6d4;
+  }
+  .batch-summary-card.is-matched,
+  .batch-summary-card.is-mismatched,
+  .batch-summary-card.is-progress,
+  .batch-summary-card.is-pending {
+    flex: 1 1 0; flex-direction: row; gap: .85rem; min-width: 0;
+    padding: 1rem 1.35rem 1rem 1.15rem;
+  }
+  .batch-summary-card.is-matched {
+    background: #e7f6ec; color: #2f7a52; border-color: #c5e6d0;
+  }
+  .batch-summary-card.is-mismatched {
+    background: #fdeeee; color: #a33b48; border-color: #f6d4d6;
+  }
+  .batch-summary-card.is-progress {
+    background: #eef4fc; color: #2d5f9a; border-color: #d4e3f6;
+  }
+  .batch-summary-card.is-pending {
+    background: #f4f6f8; color: #5c6b7a; border-color: #e4e8ee;
+  }
+  .batch-summary-label {
+    font: 600 .8125rem/1.25 var(--sans); letter-spacing: -.005em;
+  }
+  .batch-summary-value {
+    font: 700 1.75rem/1.05 var(--sans); letter-spacing: -.035em;
+    font-variant-numeric: tabular-nums;
+  }
+  .batch-summary-mark {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.85rem; height: 1.85rem; border-radius: 999px; flex: none;
+    background: #3d9a64; color: #fff;
+    box-shadow: 0 1px 2px rgba(47, 122, 82, .25);
+  }
+  .batch-summary-card.is-mismatched .batch-summary-mark { background: #e07078; }
+  .batch-summary-card.is-progress .batch-summary-mark { background: #4d86c7; }
+  .batch-summary-card.is-pending .batch-summary-mark { background: #8b97a3; }
+  .batch-summary-rule {
+    width: 1px; height: 1.85rem; flex: none; background: currentColor; opacity: .28;
+  }
+  .batch-summary-status {
+    font: 600 .9375rem/1.3 var(--sans); letter-spacing: -.01em; text-align: left;
+  }
+
+  .batch-table {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 8px 24px rgba(15, 23, 42, .04);
+  }
+  .batch-detail .batch-strip,
+  .batch-detail .doc-row {
+    display: grid;
+    grid-template-columns:
+      2.1rem minmax(11rem, 1.3fr)
+      5.6rem 6.4rem
+      4.4rem 4.8rem 5rem 4.6rem
+      13.5rem
+      2.4rem;
+    align-items: center;
+    column-gap: .85rem;
+    padding: .85rem 1.25rem;
+  }
+  .batch-detail .batch-strip {
+    position: sticky; top: 0; z-index: 20;
+    background: #f8fafc;
+    border-top: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 14px 14px 0 0;
+    min-height: 3.15rem;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .batch-detail .batch-strip .batch-check { justify-self: center; margin: 0; }
+  .batch-col-label {
+    font: 600 .75rem/1.3 var(--sans); color: var(--ink-500); text-align: center;
+    letter-spacing: .01em;
+    white-space: nowrap;
+  }
+  .batch-col-label.is-name {
+    justify-self: start; text-align: left; color: var(--ink-800); font-weight: 700;
+    font-size: .8125rem; letter-spacing: -.01em;
+  }
+  .batch-legacy-status { display: none; }
+
+  .batch-detail .doc-row {
+    background: #fff;
+    border-bottom: 1px solid #eef2f6;
+    transition: background-color .12s ease;
+  }
+  .batch-detail .doc-row:hover { background: #f8fafc; }
+  .batch-detail .doc-row.is-picked { background: var(--brand-50); }
+  .batch-detail .doc-row.is-picked:hover { background: #e4eefc; }
+  .batch-detail .doc-row:last-child {
+    border-bottom: 0;
+    border-radius: 0 0 14px 14px;
+  }
+  .batch-detail .doc-row-check { justify-content: center; }
+  .batch-detail .batch-check,
+  .batch-detail .doc-check {
+    width: 1rem; height: 1rem; margin: 0;
+    accent-color: var(--brand-600); cursor: pointer;
+  }
+  .batch-detail .doc-row .min-w-0 { min-width: 0; overflow: hidden; }
+  .batch-detail .doc-name {
+    font-weight: 600; letter-spacing: -.012em; color: var(--ink-900);
+  }
+  .batch-detail .doc-name:hover { color: var(--brand-700); }
+  .batch-detail .doc-sub { min-width: 0; flex-wrap: nowrap; color: var(--ink-400); }
+  .batch-detail .doc-view-link { color: var(--brand-600); font-weight: 600; }
+  .batch-detail .doc-view-link:hover { color: var(--brand-800); }
+  .batch-detail .doc-cell-status { display: none; }
+  .batch-detail .doc-cell-actions { justify-self: end; }
+
+  .rec-cell {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; min-width: 0;
+  }
+  .rec-pill {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 4.75rem; min-height: 2rem; padding: .3rem .8rem; border-radius: 8px;
+    border: 1px solid transparent;
+    font: 700 .9375rem/1.2 var(--sans); font-variant-numeric: tabular-nums;
+    letter-spacing: -.02em;
+  }
+  .rec-pill.is-total { background: #eef1fb; color: #415db8; border-color: #dce3f6; }
+  .rec-pill.is-extracted { background: #e8f6ee; color: #2f7a52; border-color: #d3eadc; }
+  .rec-pill.is-male,
+  .rec-pill.is-female,
+  .rec-pill.is-third,
+  .rec-pill.is-review { min-width: 2.6rem; padding: .3rem .45rem; }
+  .rec-pill.is-male { background: #eef4fc; color: #2d5f9a; border-color: #d4e3f6; }
+  .rec-pill.is-female { background: #f8eef6; color: #8a3d73; border-color: #efd6e8; }
+  .rec-pill.is-third { background: #f6f1ea; color: #7a5a32; border-color: #eadfce; }
+  .rec-pill.is-deleted { background: #f8ecec; color: #8a3d42; border-color: #edd6d6; }
+  .rec-pill.is-review { background: #fff6e8; color: #8a5a12; border-color: #f3e2c2; min-width: 3.4rem; }
+  .count-cell { flex-direction: column; align-items: center; gap: .15rem; }
+  .printed {
+    font: 500 .65rem/1.2 var(--sans); color: var(--ink-400); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .printed.is-off { color: #c45460; font-weight: 600; }
+  .rec-pill.is-off { box-shadow: inset 0 0 0 1px #e07078; }
+  .cover-note { font: 500 .65rem/1.2 var(--sans); color: var(--ink-400); white-space: nowrap; }
+  .match-pill {
+    display: inline-flex; align-items: center; justify-content: flex-start;
+    gap: .5rem; max-width: 100%; min-height: 2rem;
+    padding: .28rem .75rem .28rem .4rem; border-radius: 8px;
+    border: 1px solid transparent;
+    font: 600 .8125rem/1.25 var(--sans); letter-spacing: -.01em;
+    white-space: nowrap;
+  }
+  .match-pill.is-matched { background: #e5f6eb; color: #2f7a52; border-color: #cfe8d8; }
+  .match-pill.is-mismatched { background: #fdeeee; color: #c45460; border-color: #f6d4d6; }
+  .match-pill.is-progress { background: #eef4fc; color: #2d5f9a; border-color: #d4e3f6; }
+  .match-pill.is-pending { background: #f4f6f8; color: #5c6b7a; border-color: #e4e8ee; }
+  .match-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.25rem; height: 1.25rem; border-radius: 999px; flex: none; color: #fff;
+  }
+  .match-pill.is-matched .match-icon { background: #3d9a64; }
+  .match-pill.is-mismatched .match-icon { background: #e07078; }
+  .match-pill.is-progress .match-icon { background: #4d86c7; }
+  .match-pill.is-pending .match-icon { background: #8b97a3; }
+  .match-pill-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+  .batch-detail .actionbar {
+    position: sticky; bottom: 0; z-index: 40;
+    margin-top: 1rem;
+    padding: .8rem 1.15rem;
+    border-radius: 14px;
+    border: 1px solid rgba(226, 232, 240, .95);
+    background: rgba(255, 255, 255, .94);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow:
+      0 10px 28px rgba(15, 23, 42, .12),
+      0 1px 2px rgba(15, 23, 42, .06);
+  }
+  .batch-detail .actionbar #selected-count {
+    font: 700 1.05rem/1 var(--mono);
+    letter-spacing: -.03em;
+    color: var(--brand-700);
+    font-variant-numeric: tabular-nums;
+  }
+
+  @media (max-width: 720px) {
+    .batch-summary { flex-wrap: wrap; }
+    .batch-summary-card,
+    .batch-summary-card.is-matched { flex: 1 1 100%; }
+    .batch-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .batch-detail .batch-strip,
+    .batch-detail .doc-row { min-width: 84rem; }
+    .batch-detail .actionbar {
+      bottom: 0;
+      padding: .7rem .8rem;
+    }
+    .batch-detail .actionbar .btn {
+      padding: .5rem .7rem;
+      font-size: .8125rem;
+    }
+  }
+  @media (max-width: 1080px) {
+    .batch-detail .batch-strip,
+    .batch-detail .doc-row {
+      grid-template-columns:
+        2rem minmax(12rem, 1fr)
+        5rem 5.6rem
+        3.8rem 4.2rem 4.4rem 4.2rem
+        7rem
+        12rem
+        2.25rem;
+      column-gap: .5rem;
+      padding-left: .85rem;
+      padding-right: .85rem;
+    }
+  }
+</style>
+<div class="documents-shell batch-detail">
+  {% if notice %}<div class="alert alert-ok">{{ notice }}</div>{% endif %}
+
+  <div class="batch-detail-head">
+    <div class="batch-detail-intro">
+      <a href="{{ parent_url }}" class="page-back">← Back</a>
+      <h1 class="batch-detail-title">Roll set {{ sg.batch_num }}</h1>
+      <p class="batch-detail-sub">{{ scope_label }}</p>
+      <!-- <span class="pill is-neutral">{{ sg.size }} PDF{{ 's' if sg.size != 1 else '' }}</span> -->
+      <!-- {% if focus %}
+      <a href="/uploads/batch/{{ focus.id }}/label" class="documents-action quiet"
+         style="font-size:.75rem;">Rename upload</a>
+      {% endif %} -->
+    </div>
+    <div class="batch-summary" role="group" aria-label="Electoral roll summary">
+      <div class="batch-summary-card is-total">
+        <span class="batch-summary-label">Electors on cover</span>
+        <span class="batch-summary-value">{{ "{:,}".format(extraction.total) }}</span>
+        <span class="cover-note">Cover details read for {{ extraction.covers_read }} of {{ sg.size }} part rolls</span>
+      </div>
+      <div class="batch-summary-card is-extracted">
+        <span class="batch-summary-label">Elector entries read</span>
+        <span class="batch-summary-value">{{ "{:,}".format(extraction.extracted) }}</span>
+      </div>
+      <div class="batch-summary-card is-{{ extraction.state }}">
+        <span class="batch-summary-mark" aria-hidden="true">
+          {% if extraction.state == "matched" %}
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M3.2 8.2 6.4 11.3 12.8 4.7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {% elif extraction.state == "mismatched" %}
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M2.5 2.5 9.5 9.5 M9.5 2.5 2.5 9.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+          {% else %}
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="5.2" stroke="currentColor" stroke-width="1.8"/>
+          </svg>
+          {% endif %}
+        </span>
+        <span class="batch-summary-rule" aria-hidden="true"></span>
+        <span class="batch-summary-status">
+          {% if extraction.state == "matched" %}Cover counts match
+          {% elif extraction.state == "mismatched" %}Cover count needs checking
+          {% elif extraction.state == "progress" %}Reading elector entries
+          {% else %}Not read yet{% endif %}
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <form method="post" action="/uploads/extract" id="selection-form">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+  {% for group in batch_groups %}
+    {% for subgroup in group.subgroups %}
+      <div class="batch-table">
+      <div class="batch-strip">
+        <input type="checkbox" class="batch-check"
+               aria-label="Select all part rolls in roll set {{ subgroup.batch_num }}">
+        <span class="batch-col-label is-name">Part roll</span>
+        <span class="batch-col-label">Cover total</span>
+        <span class="batch-col-label">On the roll</span>
+        <span class="batch-col-label">Male</span>
+        <span class="batch-col-label">Female</span>
+        <span class="batch-col-label">Third gender</span>
+        <span class="batch-col-label">Deleted entries</span>
+        <span class="batch-col-label">Cover check</span>
+        <span class="batch-col-menu" aria-hidden="true"></span>
+        {# Processing-status blocks stay in the page so their fields are unchanged.
+           They are not shown. #}
+        <div class="batch-legacy-status" hidden>
+        <span class="batch-name">Roll set {{ subgroup.batch_num }}</span>
+        <span class="batch-say">
+          <b>{{ subgroup.settled }}</b> of <b>{{ subgroup.size }}</b> PDF{{ 's' if subgroup.size != 1 else '' }} done
+        </span>
+        <span class="batch-metrics-spacer" aria-hidden="true"></span>
+        <span class="batch-metrics">
+          <span class="batch-metric is-done"{{ " is-zero" if not subgroup.counts.done else "" }}>
+            <span class="batch-metric-n">{{ subgroup.counts.done }}</span>
+            <span class="batch-metric-l">Done</span>
+          </span>
+          <span class="batch-metric is-active"{{ " is-zero" if not subgroup.counts.active else "" }}>
+            <span class="batch-metric-n">{{ subgroup.counts.active }}</span>
+            <span class="batch-metric-l">Active</span>
+          </span>
+          <span class="batch-metric is-problem"{{ " is-zero" if not subgroup.counts.problem else "" }}>
+            <span class="batch-metric-n">{{ subgroup.counts.problem }}</span>
+            <span class="batch-metric-l">Errors</span>
+          </span>
+          <span class="batch-metric is-skipped"{{ " is-zero" if not subgroup.counts.skipped else "" }}>
+            <span class="batch-metric-n">{{ subgroup.counts.skipped }}</span>
+            <span class="batch-metric-l">Skipped</span>
+          </span>
+          <span class="batch-metric is-waiting"{{ " is-zero" if not subgroup.counts.waiting else "" }}>
+            <span class="batch-metric-n">{{ subgroup.counts.waiting }}</span>
+            <span class="batch-metric-l">Waiting</span>
+          </span>
+        </span>
+        <span class="batch-metrics-spacer" aria-hidden="true"></span>
+        <span class="batch-rail" role="img"
+              aria-label="Roll set {{ subgroup.batch_num }}: {{ subgroup.counts.done }} completed, {{ subgroup.counts.active }} being read, {{ subgroup.counts.problem }} needing attention, {{ subgroup.counts.skipped }} duplicate files skipped, {{ subgroup.counts.waiting }} waiting, out of {{ subgroup.size }} part rolls">
+          {% if subgroup.pct.done %}<span class="batch-rail-seg is-done" style="width:{{ subgroup.pct.done }}%"></span>{% endif %}
+          {% if subgroup.pct.active %}<span class="batch-rail-seg is-active" style="width:{{ subgroup.pct.active }}%"></span>{% endif %}
+          {% if subgroup.pct.waiting %}<span class="batch-rail-seg is-waiting" style="width:{{ subgroup.pct.waiting }}%"></span>{% endif %}
+          {% if subgroup.pct.problem %}<span class="batch-rail-seg is-problem" style="width:{{ subgroup.pct.problem }}%"></span>{% endif %}
+          {% if subgroup.pct.skipped %}<span class="batch-rail-seg is-skipped" style="width:{{ subgroup.pct.skipped }}%"></span>{% endif %}
+        </span>
+        </div>
+      </div>
+
+      {% for d in subgroup.documents %}
+        {% set st = extraction.by_document[d.id|string] %}
+        <div class="doc-row" data-doc-row>
+          <span class="doc-row-check">
+            <input type="checkbox" name="document_ids" value="{{ d.id }}" class="doc-check"
+                   aria-label="Select {{ d.file_name }}">
+          </span>
+          <span class="min-w-0">
+            <a href="/documents/{{ d.id }}" class="doc-name">{{ d.file_name }}</a>
+            <span class="doc-sub">
+              <span class="doc-size">{{ file_size_summary(d.file_size) or 'Size unknown' }}</span>
+              <span class="doc-sub-sep" aria-hidden="true">&middot;</span>
+              <span>Part roll {{ d.batch_index if d.batch_index else '—' }}</span>
+              <span class="doc-sub-sep" aria-hidden="true">&middot;</span>
+              <a href="/documents/{{ d.id }}/pdf" target="_blank" rel="noopener" class="doc-view-link">Open roll</a>
+              <span class="doc-sub-sep" aria-hidden="true">&middot;</span>
+              <a href="/documents/{{ d.id }}/images" class="doc-view-link">Images</a>
+            </span>
+          </span>
+          <span class="doc-cell-status">{{ state_badge(d.status) }}</span>
+          <span class="rec-cell count-cell">
+            {% if st.total_source == 'cover' %}
+            <span class="rec-pill is-total" title="Printed on the cover page. Deletions are already left out of this number.">{{ "{:,}".format(st.total) }}</span>
+            {% elif st.cover_status == 'processing' %}
+            <span class="cover-note">reading…</span>
+            {% elif st.cover_status == 'queued' or (st.cover_status == 'failed' and st.cover_retrying) %}
+            <span class="cover-note" title="{{ st.cover_error or 'Waiting for its turn with the cover reader.' }}">{{ 'retrying…' if st.cover_status == 'failed' else 'waiting…' }}</span>
+            {% elif st.cover_status == 'failed' %}
+            <span class="cover-note" style="color:#c45460" title="{{ st.cover_error or '' }}">could not read</span>
+            {% else %}
+            <span class="cover-note">waiting…</span>
+            {% endif %}
+          </span>
+          <span class="rec-cell count-cell">
+            <span class="rec-pill is-extracted{{ ' is-off' if 'total' in st.mismatches else '' }}" title="Elector entries read, not counting entries marked deleted.">{{ "{:,}".format(st.extracted - st.deleted) }}</span>
+            {% if st.deleted %}
+            <span class="cover-note">{{ "{:,}".format(st.extracted) }} read − {{ "{:,}".format(st.deleted) }} deleted</span>
+            {% elif st.extracted %}
+            <span class="cover-note">{{ "{:,}".format(st.extracted) }} entries read</span>
+            {% endif %}
+          </span>
+          {% for key in ('male', 'female', 'third') %}
+          {% set dropped = st['deleted_' + key] %}
+          <span class="rec-cell count-cell">
+            <span class="rec-pill is-{{ key }}{{ ' is-off' if key in st.mismatches else '' }}"{% if dropped %} title="{{ dropped }} deleted {{ 'man' if key == 'male' else ('woman' if key == 'female' else 'third-gender card') }}{{ 's' if dropped != 1 else '' }} {{ 'are' if dropped != 1 else 'is' }} in the Deleted column, not here."{% endif %}>{{ "{:,}".format(st[key]) }}</span>
+            {% if st.cover and st.cover[key] is not none %}
+            <span class="printed{{ ' is-off' if key in st.mismatches else '' }}">cover: {{ "{:,}".format(st.cover[key]) }}</span>
+            {% endif %}
+          </span>
+          {% endfor %}
+          <span class="rec-cell">
+            <span class="rec-pill is-deleted" title="Struck-through cards. Not included in On the roll or the gender counts.">{{ "{:,}".format(st.deleted) }}</span>
+          </span>
+          <span class="rec-cell">
+            {% if st.state == "matched" %}
+            <span class="match-pill is-matched">
+              <span class="match-icon" aria-hidden="true">
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+                  <path d="M3.2 8.2 6.4 11.3 12.8 4.7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+              <span class="match-pill-label">Cover counts match</span>
+            </span>
+            {% elif st.state == "mismatched" %}
+            <span class="match-pill is-mismatched">
+              <span class="match-icon" aria-hidden="true">
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                  <path d="M2.5 2.5 9.5 9.5 M9.5 2.5 2.5 9.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+              </span>
+              <span class="match-pill-label">{% if st.cover and st.cover.total is not none %}{% set gap = (st.extracted - st.deleted) - st.cover.total %}{% if gap < 0 %}{{ -gap }} fewer than cover{% elif gap > 0 %}{{ gap }} more than cover{% else %}Gender total differs{% endif %}{% else %}Cover count unavailable{% endif %}</span>
+            </span>
+            {% elif st.state == "progress" %}
+            <span class="match-pill is-progress">
+              <span class="match-icon" aria-hidden="true">
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="5.2" stroke="currentColor" stroke-width="1.8"/>
+                </svg>
+              </span>
+              <span class="match-pill-label">Reading entries</span>
+            </span>
+            {% else %}
+            <span class="match-pill is-pending">
+              <span class="match-icon" aria-hidden="true">
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="5.2" stroke="currentColor" stroke-width="1.8"/>
+                </svg>
+              </span>
+              <span class="match-pill-label">Not read yet</span>
+            </span>
+            {% endif %}
+          </span>
+          <span class="doc-cell-actions">{{ action_menu(d.id, d.status) }}</span>
+        </div>
+      {% endfor %}
+      </div>
+    {% endfor %}
+  {% endfor %}
+    <div class="actionbar">
+      <div class="flex items-center gap-4 flex-wrap">
+        <span style="font:600 .9375rem/1.4 var(--sans);color:var(--ink-900)">
+          <span id="selected-count">0</span> part rolls selected
+        </span>
+        <button type="button" id="select-all" class="btn btn-quiet">Select all {{ sg.size }} part rolls</button>
+        <button type="button" id="clear-all" class="btn btn-quiet">Clear selection</button>
+      </div>
+      <div class="flex items-center gap-2">
+        <button type="submit" formaction="/uploads/delete" class="btn btn-danger" data-delete-button
+                onclick="return confirm('Remove the selected part rolls and all data read from them? This cannot be undone.')">
+          Remove part rolls
+        </button>
+        <button type="submit" formaction="/uploads/extract" class="btn btn-primary" data-extract-button>
+          Read unfinished rolls
+        </button>
+        <button type="submit" formaction="/uploads/export-options" class="btn btn-quiet" data-export-button>
+          Export elector list (Excel)
+        </button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var form = document.getElementById('selection-form');
+  if (!form) return;
+  var checks = function () { return Array.prototype.slice.call(form.querySelectorAll('.doc-check')); };
+  var batchCheck = form.querySelector('.batch-check');
+  var count = document.getElementById('selected-count');
+
+  function refresh() {
+    var rows = checks();
+    var selected = rows.filter(function (box) { return box.checked; });
+    count.textContent = selected.length;
+    if (batchCheck) {
+      batchCheck.checked = rows.length > 0 && selected.length === rows.length;
+      batchCheck.indeterminate = selected.length > 0 && selected.length < rows.length;
+    }
+    rows.forEach(function (box) {
+      var row = box.closest('[data-doc-row]');
+      if (row) row.classList.toggle('is-picked', box.checked);
+    });
+    form.querySelectorAll('[data-extract-button],[data-export-button],[data-delete-button]').forEach(function (button) {
+      button.disabled = selected.length === 0;
+    });
+  }
+
+  form.addEventListener('change', function (event) {
+    if (event.target.classList.contains('batch-check')) {
+      checks().forEach(function (box) { box.checked = event.target.checked; });
+    }
+    refresh();
+  });
+  document.getElementById('select-all').addEventListener('click', function () {
+    checks().forEach(function (box) { box.checked = true; });
+    refresh();
+  });
+  document.getElementById('clear-all').addEventListener('click', function () {
+    checks().forEach(function (box) { box.checked = false; });
+    refresh();
+  });
+  refresh();
+})();
+</script>
+{% endblock %}

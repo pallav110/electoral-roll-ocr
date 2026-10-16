@@ -53,6 +53,7 @@ KNOWN_COLUMNS: dict[str, tuple[str, dict]] = {
     "sno": ("INTEGER", {"nullable": True}),
     "card_index": ("INTEGER", {"nullable": True}),
     "voter_sr_no": ("VARCHAR(50)", {"nullable": True}),
+    "serial_mark": ("VARCHAR(16)", {"nullable": True}),
     "is_deleted": ("BOOLEAN", {"nullable": False, "default": False}),
     "state_code": ("VARCHAR(10)", {"nullable": True}),
     "ac_code": ("VARCHAR(10)", {"nullable": True}),
@@ -163,10 +164,16 @@ def _add_column_sql(table: str, name: str, ddl: str, opts: dict) -> str:
     future non-nullable column cannot reintroduce the same trap.
     """
     parts = [f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"]
-    if "default" in opts:
-        default = opts["default"]
+    # if "default" in opts:
+    #     default = opts["default"]
+    #     literal = ("true" if default is True else "false" if default is False
+    #                else str(default))
+    #     parts.append(f"DEFAULT {literal}")
+
+    if "default" in opts or "server_default" in opts:
+        default = opts.get("default", opts.get("server_default"))
         literal = ("true" if default is True else "false" if default is False
-                   else str(default))
+                else str(default))
         parts.append(f"DEFAULT {literal}")
     if not opts.get("nullable", True):
         parts.append("NOT NULL")
@@ -195,6 +202,15 @@ KNOWN_DOCUMENT_COLUMNS: dict[str, tuple[str, dict]] = {
     # Which scan root found this file. See Document.scan_root_id for why
     # this is stored rather than derived from source_path.
     "scan_root_id": ("INTEGER", {"nullable": True}),
+    # The upload this file arrived in, and its position inside it. Both are
+    # added together because every upload query reads them together.
+    "upload_batch_id": ("UUID", {"nullable": True}),
+    "batch_index": ("INTEGER", {"nullable": True}),
+    # The /uploads staging gate. server_default false matters here: an
+    # existing table gains this column with every row already false, which is
+    # the safe direction -- a document nobody ticked must not start running
+    # just because the column was added.
+    "approved": ("BOOLEAN", {"nullable": False, "default": False}),
 }
 
 
@@ -210,6 +226,12 @@ KNOWN_DOCUMENT_CONSTRAINTS: dict[str, str] = {
     "fk_documents_scan_root": (
         "FOREIGN KEY (scan_root_id) REFERENCES scan_roots(id)"
     ),
+    # The upload a document arrived in. Safe to add after the fact precisely
+    # because every existing row has NULL there, and NULL satisfies a foreign
+    # key -- no backfill and no nullability conflict.
+    "fk_documents_upload_batch": (
+        "FOREIGN KEY (upload_batch_id) REFERENCES upload_batches(id)"
+    ),
 }
 
 
@@ -224,6 +246,11 @@ KNOWN_DOCUMENT_CONSTRAINTS: dict[str, str] = {
 KNOWN_DOCUMENT_INDEXES: dict[str, str] = {
     "idx_documents_scan_root": "CREATE INDEX IF NOT EXISTS idx_documents_scan_root "
                                "ON documents (scan_root_id)",
+    # The /uploads page's main query: every document of one upload, already in
+    # batch order. Both columns together because filtering by one and sorting
+    # by the other is the only way this index is ever used.
+    "idx_documents_batch": "CREATE INDEX IF NOT EXISTS idx_documents_batch "
+                           "ON documents (upload_batch_id, batch_index)",
 }
 
 

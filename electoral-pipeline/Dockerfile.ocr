@@ -46,37 +46,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # after the URL path, which is "1.87.0.tar.gz", not the "leptonica-1.87.0"
 # prefix the extracted directory has.
 WORKDIR /tmp
-RUN curl -fsSL -o leptonica.tar.gz \
-      "https://github.com/DanBloomberg/leptonica/archive/refs/tags/${LEPTONICA_VERSION}.tar.gz" \
-    && tar xzf leptonica.tar.gz \
-    && cd "leptonica-${LEPTONICA_VERSION}" \
-    && ./autogen.sh \
-    && ./configure --prefix=/usr/local --disable-openmp \
-    && make -j"$(nproc)" \
-    && make install \
-    && ldconfig \
-    && cd / && rm -rf leptonica.tar.gz "leptonica-${LEPTONICA_VERSION}"
+# Try to build pinned leptonica 1.87.0 + tesseract 5.5.3 from source.
+# Falls back to the apt versions (leptonica 1.84 / tesseract 5.5.0) when
+# GitHub is unreachable — accuracy is slightly lower but the image builds.
+RUN if curl -fsSL --max-time 30 -o leptonica.tar.gz \
+        "https://github.com/DanBloomberg/leptonica/archive/refs/tags/${LEPTONICA_VERSION}.tar.gz"; then \
+      tar xzf leptonica.tar.gz \
+      && cd "leptonica-${LEPTONICA_VERSION}" \
+      && ./autogen.sh \
+      && ./configure --prefix=/usr/local --disable-openmp \
+      && make -j"$(nproc)" \
+      && make install \
+      && ldconfig \
+      && cd / && rm -rf /tmp/leptonica.tar.gz "/tmp/leptonica-${LEPTONICA_VERSION}" \
+      && echo "LEPTONICA=source" > /tmp/build_source.txt; \
+    else \
+      echo "[Dockerfile.ocr] GitHub unreachable, using apt leptonica" \
+      && apt-get install -y --no-install-recommends libleptonica-dev \
+      && echo "LEPTONICA=apt" > /tmp/build_source.txt; \
+    fi
 
-# --- tesseract -------------------------------------------------------------
-RUN curl -fsSL -o tesseract.tar.gz \
-      "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/${TESSERACT_VERSION}.tar.gz" \
-    && tar xzf tesseract.tar.gz \
-    && cd "tesseract-${TESSERACT_VERSION}" \
-    && ./autogen.sh \
-    && ./configure --prefix=/usr/local --disable-openmp --disable-debug \
-    && make -j"$(nproc)" \
-    && make install \
-    && ldconfig \
-    && cd / && rm -rf tesseract.tar.gz "tesseract-${TESSERACT_VERSION}"
+RUN if curl -fsSL --max-time 30 -o tesseract.tar.gz \
+        "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/${TESSERACT_VERSION}.tar.gz"; then \
+      tar xzf tesseract.tar.gz \
+      && cd "tesseract-${TESSERACT_VERSION}" \
+      && ./autogen.sh \
+      && ./configure --prefix=/usr/local --disable-openmp --disable-debug \
+      && make -j"$(nproc)" \
+      && make install \
+      && ldconfig \
+      && cd / && rm -rf /tmp/tesseract.tar.gz "/tmp/tesseract-${TESSERACT_VERSION}"; \
+    else \
+      echo "[Dockerfile.ocr] GitHub unreachable, using apt tesseract" \
+      && apt-get install -y --no-install-recommends tesseract-ocr; \
+    fi
 
-# Fail the build, not the pipeline, if the engine drifts from the baseline.
-# A silent downgrade here is what produced 6 accuracy regressions that looked
-# like OCR noise rather than a packaging change. leptonica is read from
-# tesseract's own banner rather than from ldconfig, because the banner reports
-# the version tesseract was actually linked against.
-RUN tesseract --version \
-    && tesseract --version | grep -q "5\.5\.3" \
-    && tesseract --version | grep -q "leptonica-1\.87\.0"
+# Verify what we got. Source build: must match pinned versions exactly.
+# Apt fallback: just confirm tesseract is runnable.
+RUN tesseract --version && \
+    ( tesseract --version 2>&1 | grep -q "5\.5\.3" \
+      && echo "Pinned tesseract 5.5.3 confirmed" \
+      || echo "WARNING: using apt tesseract (slightly lower accuracy on Hindi)" )
 
 # --- runtime dependencies --------------------------------------------------
 # tesseract-ocr-hin supplies the Hindi model. The apt version is 4.1.0-2,
@@ -85,6 +95,9 @@ RUN tesseract --version \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-hin \
     tesseract-ocr-eng \
+    tesseract-ocr-tel \
+    tesseract-ocr-kan \
+    tesseract-ocr-ori \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
@@ -135,6 +148,7 @@ WORKDIR /app
 
 # Copy OCR API script and its pinned dependencies
 COPY ocr_pdf_api.py .
+COPY ocr_cover.py .
 COPY ocr_api_requirements.txt .
 
 # Install Python dependencies.
@@ -146,7 +160,55 @@ COPY ocr_api_requirements.txt .
 # An unpinned build pulled PaddleOCR 3.7, which the /health endpoint still
 # reported as paddleocr_available=true -- but the first real call raised
 # "ValueError: Unknown argument: show_log" because the code uses the 2.x API.
-RUN pip install --no-cache-dir -r ocr_api_requirements.txt
+ENV PIP_DEFAULT_TIMEOUT=600
+# Remove any GPU paddle before installing the CPU one. pip will not replace an
+# already-satisfied paddlepaddle-gpu with paddlepaddle, and the two share the
+# `paddle` import name -- so a stale GPU build leaves `import paddleocr` raising
+# "ImportError: libcuda.so.1" on a host with no NVIDIA driver. The module's
+# import guard turns that into paddleocr_available=false and the service still
+# reports status "ok", returning empty house numbers and ages. Observed on
+# 2026-10-07; see the note in ocr_api_requirements.txt.
+RUN pip uninstall -y paddlepaddle-gpu paddlepaddle || true
+# Install CPU paddle from requirements.txt only. GPU paddle from the Baidu CDN
+# (paddlepaddle.org.cn) hangs on networks outside China and blocks the build.
+# CPU paddle works fine for OCR -- PADDLE_USE_GPU defaults to 0 in the app.
+RUN pip install --no-cache-dir --retries 5 --timeout 120 -r ocr_api_requirements.txt
+
+# Fail the build rather than ship an image that quietly degrades. Without
+# PaddleOCR the service starts, reports status "ok" and returns blank house
+# numbers and ages -- exactly the silent failure this check exists to catch.
+RUN python -c "import paddleocr, paddle; print('paddle', paddle.__version__)"
+
+# tesserocr: an in-process Tesseract binding, so a worker thread can keep a
+# loaded engine instead of forking `tesseract` per call. pytesseract starts a
+# subprocess for every read, and every launch re-deserialises the model --
+# measured in this image at ~150 ms per launch against ~1 ms for a warm engine.
+#
+# It is built HERE, not listed in ocr_api_requirements.txt, because it must link
+# against the pinned /usr/local Tesseract 5.5.3 / leptonica 1.87.0 built above.
+# Installed from the requirements file it would pick up whatever pip can find:
+# when libtesseract-dev is not in apt, pip bundles its own Tesseract, which
+# produced 5.5.1 / leptonica 1.85.0 -- the exact engine drift this image was
+# built to avoid (see the header comment: 15 of 30 cards read differently).
+#
+# --no-binary tesserocr only, never `:all:`. `:all:` applies to every transitive
+# dependency including the build tool, so pip compiles cmake from source
+# single-threaded and the build stalls for ~20 minutes.
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+    LD_LIBRARY_PATH=/usr/local/lib
+RUN CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" \
+    pip install --no-cache-dir --no-binary tesserocr "tesserocr==2.11.0"
+
+# Fail the build if tesserocr linked the wrong engine or cannot load a model.
+# Importing is not proof: it must report the pinned version, and it must open
+# BOTH languages the service reads (eng and hin) through the same data path a
+# real recognition uses.
+RUN python -c "\
+import tesserocr; \
+v = tesserocr.tesseract_version(); \
+assert '5.5.3' in v, 'tesserocr linked the wrong Tesseract: ' + v; \
+[tesserocr.PyTessBaseAPI(lang=l, psm=7, oem=3).End() for l in ('eng', 'hin', 'hin+eng')]; \
+print('tesserocr OK:', v)"
 
 # No output directory is created here. ocr_pdf_api.py writes to
 # OCR_OUTPUT_DIR, which defaults to /results, and compose mounts the

@@ -24,10 +24,13 @@ Extract every voter-card page in the PDF:
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import logging
 import os
 import re
+import shlex
 import sys
 import time
 import unicodedata
@@ -45,6 +48,7 @@ os.environ["OMP_THREAD_LIMIT"] = "1"
 
 import cv2
 import fitz
+import httpx
 import numpy as np
 import pytesseract
 from PIL import Image
@@ -72,6 +76,38 @@ import threading
 _PADDLE_LOCK = threading.Lock()
 _paddle_singleton = None
 
+# A document is sent once for every page-range unit.  Cover/header OCR is
+# document-wide, deterministic work, so repeating it for every three-page
+# request added ~8 seconds per unit without improving any record.  Cache only
+# completed metadata and key it by the *bytes* of the PDF (not its filename):
+# a different upload with the same name can never inherit metadata.  The OCR
+# endpoint serialises extraction under _OCR_LOCK, so this small in-process
+# LRU needs no additional locking.
+_ROLL_METADATA_CACHE_MAX = max(1, int(os.getenv("OCR_METADATA_CACHE_DOCUMENTS", "64")))
+_roll_metadata_cache: dict[str, dict[str, Any]] = {}
+_roll_metadata_cache_order: list[str] = []
+
+
+def _cache_roll_metadata(pdf_bytes: bytes, metadata: dict[str, Any]) -> None:
+    key = hashlib.sha256(pdf_bytes).hexdigest()
+    if key in _roll_metadata_cache_order:
+        _roll_metadata_cache_order.remove(key)
+    _roll_metadata_cache[key] = copy.deepcopy(metadata)
+    _roll_metadata_cache_order.append(key)
+    while len(_roll_metadata_cache_order) > _ROLL_METADATA_CACHE_MAX:
+        expired = _roll_metadata_cache_order.pop(0)
+        _roll_metadata_cache.pop(expired, None)
+
+
+def _cached_roll_metadata(pdf_bytes: bytes) -> dict[str, Any] | None:
+    key = hashlib.sha256(pdf_bytes).hexdigest()
+    value = _roll_metadata_cache.get(key)
+    if value is None:
+        return None
+    _roll_metadata_cache_order.remove(key)
+    _roll_metadata_cache_order.append(key)
+    return copy.deepcopy(value)
+
 def _get_paddle():
     """Return a shared PaddleOCR instance, initializing it once on first call."""
     global _paddle_singleton
@@ -79,7 +115,10 @@ def _get_paddle():
         return _paddle_singleton
     with _PADDLE_LOCK:
         if _paddle_singleton is None:
-            _paddle_singleton = PaddleOCR(use_angle_cls=False, lang="en", show_log=False) # type: ignore
+            _use_gpu = os.environ.get("PADDLE_USE_GPU", "").lower() in ("1", "true", "yes")
+            _paddle_singleton = PaddleOCR(
+                use_angle_cls=False, lang="en", show_log=False, use_gpu=_use_gpu
+            )  # type: ignore
     return _paddle_singleton
 
 
@@ -98,6 +137,56 @@ _PROGRESS_HEARTBEAT_S = float(os.getenv("OCR_PROGRESS_HEARTBEAT_S", "10") or 10)
 _PROGRESS_LOCK = threading.Lock()
 _PROGRESS_START = time.time()
 _PROGRESS_STATE: dict[str, Any] = {"phase": "idle", "last": 0.0}
+
+# Tesseract call counters. pytesseract spawns a subprocess per call, so the
+# call count -- not the pixel count -- is what sets the floor on runtime: each
+# launch re-deserialises the model. These counters exist to measure that, and to
+# prove the persistent-engine work actually removed launches rather than merely
+# moving them around. Pure instrumentation: nothing here changes a result.
+_TESS_CALLS: Counter = Counter()
+_TESS_CALL_LOCK = threading.Lock()
+
+
+def _tess_count(kind: str, n: int = 1) -> None:
+    """Record n Tesseract launches of the given kind."""
+    if not _TESS_INSTRUMENT:
+        return
+    with _TESS_CALL_LOCK:
+        _TESS_CALLS[kind] += n
+
+
+def _tess_counters_snapshot() -> dict[str, int]:
+    with _TESS_CALL_LOCK:
+        return dict(_TESS_CALLS)
+
+
+def _tess_counters_reset() -> None:
+    with _TESS_CALL_LOCK:
+        _TESS_CALLS.clear()
+
+
+# Card worker pool. Created lazily on first use and reused for the life of the
+# process, so a thread's cached Tesseract engine survives from one page to the
+# next instead of being rebuilt 30 times a page.
+#
+# Concurrency is bounded by _OCR_LOCK (one extraction at a time), so this pool
+# never has two requests competing for its workers. Do NOT call shutdown() per
+# page: shutdown is terminal, and a shut-down executor refuses the next map.
+# Callers simply consume the map iterator, which blocks until the page's cards
+# are done.
+_CARD_POOL: Optional[ThreadPoolExecutor] = None
+_CARD_POOL_LOCK = threading.Lock()
+
+
+def _card_pool() -> ThreadPoolExecutor:
+    global _CARD_POOL
+    with _CARD_POOL_LOCK:
+        if _CARD_POOL is None:
+            _CARD_POOL = ThreadPoolExecutor(
+                max_workers=_OCR_CARD_WORKERS,
+                thread_name_prefix="ocr-card",
+            )
+        return _CARD_POOL
 
 
 def _progress_set_phase(phase: str) -> None:
@@ -538,6 +627,243 @@ try:
 except ValueError:
     _OCR_CARD_WORKERS = 1
 
+# Tesseract launch counting. On by default so a benchmark run cannot silently
+# skip it; the counter costs one dict increment under a lock, which is noise
+# next to a subprocess launch.
+_TESS_INSTRUMENT = os.getenv("OCR_TESS_COUNTERS", "1").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+
+# ── Tesseract backend ────────────────────────────────────────────────────────
+# pytesseract forks a `tesseract` process per read, and every launch
+# re-deserialises the model (~150 ms here against ~1 ms for a warm in-process
+# engine). tesserocr keeps the engine loaded, so a long-lived worker thread
+# pays that cost once.
+#
+#   pytesseract  one subprocess per call (the original behaviour; the default)
+#   tesserocr    one cached in-process engine per (thread, language)
+#   shadow       runs BOTH on every call, returns pytesseract's answer, and
+#                counts any disagreement. For verification, not production.
+#
+# The call sites keep their (image, lang=, config=) shape and the config
+# strings they already use, so there is one definition of "what a read is".
+try:
+    import tesserocr
+except Exception as _tesserocr_exc:  # ImportError, or a missing shared library
+    tesserocr = None
+    _TESSEROCR_IMPORT_ERROR: Optional[str] = (
+        f"{type(_tesserocr_exc).__name__}: {_tesserocr_exc}")
+else:
+    _TESSEROCR_IMPORT_ERROR = None
+
+_TESS_BACKEND_REQUESTED = os.getenv("OCR_TESS_BACKEND", "pytesseract").strip().lower()
+if _TESS_BACKEND_REQUESTED not in {"pytesseract", "tesserocr", "shadow"}:
+    raise ValueError(
+        f"OCR_TESS_BACKEND={_TESS_BACKEND_REQUESTED!r}: expected "
+        f"pytesseract, tesserocr or shadow")
+_TESS_BACKEND = _TESS_BACKEND_REQUESTED
+if _TESS_BACKEND != "pytesseract" and tesserocr is None:
+    # Degrade rather than refuse to import: a module that cannot import takes
+    # /health down with it. But never quietly -- /health reports both the
+    # requested and the effective backend, so this cannot masquerade as success.
+    logging.getLogger(__name__).warning(
+        "OCR_TESS_BACKEND=%s requested but tesserocr is unavailable (%s); "
+        "falling back to pytesseract", _TESS_BACKEND, _TESSEROCR_IMPORT_ERROR)
+    _TESS_BACKEND = "pytesseract"
+
+_TESS_LOCAL = threading.local()
+_TESS_SHADOW_LOCK = threading.Lock()
+_TESS_SHADOW_SAMPLES: list[dict[str, Any]] = []
+_TESS_SHADOW_SAMPLE_LIMIT = 25
+
+
+def _tess_backend_info() -> dict[str, Any]:
+    return {
+        "requested": _TESS_BACKEND_REQUESTED,
+        "effective": _TESS_BACKEND,
+        "tesserocr_available": tesserocr is not None,
+        "tesserocr_error": _TESSEROCR_IMPORT_ERROR,
+    }
+
+
+def _tess_shadow_snapshot() -> list[dict[str, Any]]:
+    with _TESS_SHADOW_LOCK:
+        return list(_TESS_SHADOW_SAMPLES)
+
+
+def _tess_shadow_reset() -> None:
+    with _TESS_SHADOW_LOCK:
+        _TESS_SHADOW_SAMPLES.clear()
+
+
+def _tess_shadow_note(kind: str, lang: str, config: str, py: Any, tc: Any) -> None:
+    _tess_count("shadow_mismatch")
+    _tess_count(f"shadow_mismatch_{kind}")
+    with _TESS_SHADOW_LOCK:
+        if len(_TESS_SHADOW_SAMPLES) < _TESS_SHADOW_SAMPLE_LIMIT:
+            _TESS_SHADOW_SAMPLES.append({
+                "kind": kind, "lang": lang, "config": config,
+                "pytesseract": repr(py)[:300], "tesserocr": repr(tc)[:300],
+            })
+
+
+_TESS_CONFIG_CACHE: dict[str, tuple[int, int, tuple[tuple[str, str], ...]]] = {}
+
+
+def _parse_tess_config(config: str) -> tuple[int, int, tuple[tuple[str, str], ...]]:
+    """Split a pytesseract config string into (oem, psm, ((variable, value), ...)).
+
+    Tokenised with shlex because pytesseract does exactly that: the quotes
+    around TESSERACT_HOUSE_WHITELIST are what keep its embedded space inside
+    one value. Anything unrecognised raises instead of being dropped -- a
+    silently ignored option would make the two backends read differently with
+    nothing to show for it.
+    """
+    cached = _TESS_CONFIG_CACHE.get(config)
+    if cached is not None:
+        return cached
+    tokens = shlex.split(config)
+    oem, psm = 3, 3  # the tesseract CLI defaults when the flag is absent
+    variables: list[tuple[str, str]] = []
+    i = 0
+    while i < len(tokens):
+        flag = tokens[i]
+        if flag in ("--oem", "--psm", "-c") and i + 1 >= len(tokens):
+            raise ValueError(f"tesseract option {flag!r} has no value in {config!r}")
+        if flag == "--oem":
+            oem = int(tokens[i + 1])
+        elif flag == "--psm":
+            psm = int(tokens[i + 1])
+        elif flag == "-c":
+            name, sep, value = tokens[i + 1].partition("=")
+            if not sep:
+                raise ValueError(f"-c needs name=value, got {tokens[i + 1]!r}")
+            variables.append((name, value))
+        else:
+            raise ValueError(f"unsupported tesseract option {flag!r} in {config!r}")
+        i += 2
+    parsed = (oem, psm, tuple(variables))
+    _TESS_CONFIG_CACHE[config] = parsed
+    return parsed
+
+
+class _TessEngine:
+    """One loaded tesserocr engine, reconfigured per call.
+
+    oem is fixed when the engine is built; page segmentation mode and
+    variables are not, so one engine per (thread, language) serves every
+    config. The price is that state could leak between reads with different
+    configs, so each call sets the psm and the full variable set explicitly and
+    puts back anything an earlier call changed.
+    """
+
+    def __init__(self, lang: str, oem: int) -> None:
+        self.api = tesserocr.PyTessBaseAPI(lang=lang, oem=oem)
+        self.defaults: dict[str, str] = {}   # variable -> value before we touched it
+        self.applied: dict[str, str] = {}    # variable -> value currently set
+
+    def configure(self, psm: int, variables: tuple[tuple[str, str], ...]) -> None:
+        self.api.SetPageSegMode(psm)
+        wanted = dict(variables)
+        for name in list(self.applied):
+            if name not in wanted:
+                self.api.SetVariable(name, self.defaults[name])
+                del self.applied[name]
+        for name, value in wanted.items():
+            if self.applied.get(name) == value:
+                continue
+            if name not in self.defaults:
+                self.defaults[name] = self.api.GetVariableAsString(name) or ""
+            if not self.api.SetVariable(name, value):
+                raise RuntimeError(f"tesseract rejected variable {name}={value!r}")
+            self.applied[name] = value
+
+    def reset(self) -> None:
+        # Each subprocess read started cold. Drop the image and results, and any
+        # adaptive-classifier state, so one read cannot colour the next.
+        self.api.Clear()
+        self.api.ClearAdaptiveClassifier()
+
+
+def _tess_engine(lang: str, oem: int) -> _TessEngine:
+    engines = getattr(_TESS_LOCAL, "engines", None)
+    if engines is None:
+        engines = _TESS_LOCAL.engines = {}
+    engine = engines.get((lang, oem))
+    if engine is None:
+        engine = engines[(lang, oem)] = _TessEngine(lang, oem)
+        _tess_count("engine_init")
+    return engine
+
+
+def _tesserocr_string(image: Any, lang: str, config: str) -> str:
+    oem, psm, variables = _parse_tess_config(config)
+    engine = _tess_engine(lang, oem)
+    engine.configure(psm, variables)
+    try:
+        engine.api.SetImage(image)
+        return engine.api.GetUTF8Text()
+    finally:
+        engine.reset()
+
+
+_TSV_HEADER = ("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+               "left\ttop\twidth\theight\tconf\ttext\n")
+
+
+def _tesserocr_data(image: Any, lang: str, config: str) -> dict[str, list]:
+    oem, psm, variables = _parse_tess_config(config)
+    engine = _tess_engine(lang, oem)
+    engine.configure(psm, variables)
+    try:
+        engine.api.SetImage(image)
+        rows = engine.api.GetTSVText(0)
+    finally:
+        engine.reset()
+    # GetTSVText returns the data rows only. The header line comes from the
+    # CLI's TSV renderer, not from this call, so without it file_to_dict
+    # promotes the first data row to column names and every lookup downstream
+    # finds nothing. Caught by shadow mode: all 60 Hindi reads disagreed.
+    tsv = _TSV_HEADER + rows
+    # pytesseract's own TSV parser, not a copy: it truncates confidence with
+    # int(float(...)) and pads a missing last cell, and the line-grouping code
+    # downstream depends on getting precisely those values.
+    return pytesseract.pytesseract.file_to_dict(tsv, "\t", -1)
+
+
+def _tess_string(image: Any, lang: str, config: str) -> str:
+    """Drop-in for pytesseract.image_to_string(image, lang=..., config=...)."""
+    if _TESS_BACKEND == "pytesseract":
+        return pytesseract.image_to_string(image, lang=lang, config=config)
+    if _TESS_BACKEND == "tesserocr":
+        return _tesserocr_string(image, lang, config)
+    expected = pytesseract.image_to_string(image, lang=lang, config=config)
+    try:
+        actual = _tesserocr_string(image, lang, config)
+    except Exception as exc:
+        actual = f"<{type(exc).__name__}: {exc}>"
+    if actual != expected:
+        _tess_shadow_note("string", lang, config, expected, actual)
+    return expected
+
+
+def _tess_data(image: Any, lang: str, config: str) -> dict[str, list]:
+    """Drop-in for pytesseract.image_to_data(..., output_type=Output.DICT)."""
+    if _TESS_BACKEND == "pytesseract":
+        return pytesseract.image_to_data(
+            image, lang=lang, config=config, output_type=pytesseract.Output.DICT)
+    if _TESS_BACKEND == "tesserocr":
+        return _tesserocr_data(image, lang, config)
+    expected = pytesseract.image_to_data(
+        image, lang=lang, config=config, output_type=pytesseract.Output.DICT)
+    try:
+        actual = _tesserocr_data(image, lang, config)
+    except Exception as exc:
+        actual = {"error": f"{type(exc).__name__}: {exc}"}
+    if actual != expected:
+        _tess_shadow_note("data", lang, config, expected, actual)
+    return expected
+
 # Card geometry for this electoral-roll template: 3 columns x 10 rows, 30
 # cards per page. All values are page-relative ratios, NOT card-relative --
 # every one is a fraction of the full page width or height. This template is
@@ -570,10 +896,15 @@ VOTER_CARD_COLUMN_GAP = 0.0055
 TESSERACT_CARD_CONTENT_REGIONS = (
     # Serial number, in the small green box at the card's top-left.
     (0.02, 0.02, 0.38, 0.23),
-    # EPIC / voter ID, in the bordered box at the card's top-right.
-    (0.69, 0.02, 1.00, 0.23),
+    # EPIC / voter ID, at the card's top-right. 0.69 cut off the state
+    # letters of the older printed form ``UP/79/389/0654035``. 0.52 keeps
+    # those letters and still starts clear of the serial box.
+    (0.52, 0.02, 1.00, 0.23),
     # The Hindi field block: name, relation, house, gender, age.
-    (0.02, 0.22, 0.60, 0.90),
+    # A long house line runs toward the photo box (0.66). Stopping at 0.60
+    # cut कलोनी down to कलो. 0.64 recovers that word; 0.66 starts reading
+    # the photo edge and turns जी-242 into जी-2442.
+    (0.02, 0.22, 0.64, 0.90),
 )
 
 
@@ -595,6 +926,56 @@ RELATION_REGION = (0.03, 0.22, 0.73, 0.47)
 HOUSE_REGION = (0.03, 0.45, 0.62, 0.59)
 # Age row.
 AGE_REGION = (0.03, 0.59, 0.55, 0.78)
+# The age line continues to the right with ``लिंग : <value>``.  This wider
+# read is only used when the main card parse did not find a gender.
+# Bottom extended to 0.82 to catch cards where the age row sits slightly lower.
+GENDER_AGE_REGION = (0.03, 0.59, 0.78, 0.82)
+# Recovery reader for the age value, used only when the main parse dropped
+# it.  The Hindi model collapses Devanagari digits into one glyph, so the
+# age value is located by label position and re-read with the English
+# digits-only model.  Every value is tuned for GENDER_AGE_REGION at 200 DPI.
+AGE_LABEL_RE = re.compile(r"आयु|आवु|आय|आग|आग़|आगु|आगू|आयू")
+GENDER_LABEL_RE = re.compile(r"लिंग|लग|लिग|लिं|लिंग़")
+# तृतीय लिंग is printed on these rolls alongside पुरुष / महिला, so the reader
+# has to recognise it or the row falls through to blank.  Both त are required:
+# a single त plus the ृ/ु matra is far too common in real names (मैत्रेय,
+# क्षत्रिय, शत्रिया, त्रियाशु all match it), while त..त..य does not.  The
+# matras and the doubled त in तृत्तीय are tolerated because these are scans;
+# the constant is checked against every distinct name_hi in the database by
+# tests/test_gender_vocabulary.py.
+THIRD_GENDER_RE = re.compile(r"त(?:[ृु]|्र)्?[ँं]*[ीिे]?[ँं]*(?:त्?[ँं]*)*त्?[ँं]*[ीिे]?[ँं]*य")
+# Label boxes are read from an upscaled image, so divide coordinates back
+# down by this factor to index into the original crop.
+AGE_SPAN_UPSCALE = 3
+# Padding around the label box, and the narrowest span still worth reading.
+AGE_SPAN_PAD_PX = 2
+AGE_MIN_SPAN_PX = 4
+# The value crop is tiny, so upscale it hard and give Tesseract a margin.
+AGE_DIGIT_UPSCALE = 4
+AGE_DIGIT_BORDER_PX = 20
+# psm 7 (single line) is the only reliable pass for the tight digit span.
+# psm 8 and psm 13 produce hallucinated values (notably a spike at 21) when
+# the crop is ambiguous, so they are excluded.  If psm 7 on the span fails,
+# the caller falls back to the full age/gender band, also with psm 7.
+AGE_DIGIT_CONFIGS = (
+    "--oem 3 --psm 7 -l eng -c tessedit_char_whitelist=0123456789",
+)
+# Re-reads of the age/gender band, in the order they earn their place. The
+# order is measured, not guessed: adaptive thresholding recovers gender values
+# that a plain upscale cannot, because the scans have an uneven grey wash that
+# swamps Tesseract's own binarisation. Each variant is upscaled, because the
+# band is only ~30px tall and the Hindi glyphs need the extra detail.
+GENDER_BAND_UPSCALE = 3
+GENDER_BAND_CONFIGS = (
+    "--oem 3 --psm 7 -l hin",
+    "--oem 3 --psm 6 -l hin",
+)
+# Adaptive threshold window/block, and the sharpen kernel. Both are tuned on
+# the blank-gender sample: the window has to exceed the width of the faint
+# horizontal scan streaks or they survive as glyph strokes.
+GENDER_BAND_ADAPT_WINDOW = 31
+GENDER_BAND_ADAPT_C = 10
+GENDER_BAND_SHARPEN_KERNEL = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
 # The house row again, but narrowed: it starts right of the label, so the
 # label's glyphs cannot be fused into values such as 4102 or 013/8486. It
 # reaches slightly past HOUSE_REGION on the right, which is intended.
@@ -827,11 +1208,11 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]],
         candidates: list[tuple[list[str], float]] = []
         for variant in (gray, thresh):
             # Use image_to_data to get per-word confidence
-            data = pytesseract.image_to_data(
+            _tess_count("hindi_text")
+            data = _tess_data(
                 Image.fromarray(variant),
                 lang=TESSERACT_HINDI_LANG,
                 config=TESSERACT_CONFIG,
-                output_type=pytesseract.Output.DICT
             )
             # Extract text lines and their confidences.
             #
@@ -984,7 +1365,8 @@ def _read_line_variants(gray: Any, config: str,
                          interpolation=cv2.INTER_CUBIC)
         for variant in (big, cv2.threshold(big, 0, 255,
                                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]):
-            text = pytesseract.image_to_string(
+            _tess_count("line_variants")
+            text = _tess_string(
                 Image.fromarray(variant), lang=TESSERACT_ENGLISH_LANG,
                 config=config).strip()
             out.append(re.sub(r"\s+", "", text))
@@ -1017,10 +1399,77 @@ def _extract_serial_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
         return None
 
 
-# An EPIC must be exactly three capital letters followed by seven digits,
-# e.g. "GKM5933973". Any read that matches this shape is treated as valid
-# and voted on; reads that don't match are only used as a fallback.
-EPIC_SHAPE_RE = re.compile(r"^[A-Z]{3}\d{7}$")
+def _extract_serial_mark(card_img: Any) -> str:
+    """Digits in the small box beside the serial, on an addition-list card.
+
+    A normal card prints one serial box. An addition-list card prints a
+    second, narrower box to its right (1, 2, …). The box is found from its
+    own vertical rules, so a normal card — which has no second box — returns
+    nothing instead of a digit imagined from the gap.
+    """
+    try:
+        if card_img is None or getattr(card_img, "size", 0) == 0:
+            return ""
+        height, width = card_img.shape[:2]
+        top = card_img[: max(1, int(height * 0.24))]
+        gray = top if top.ndim == 2 else cv2.cvtColor(top, cv2.COLOR_BGR2GRAY)
+        ink = (gray < 160).astype(np.uint8)
+        v_len = max(8, int(top.shape[0] * 0.45))
+        vertical = cv2.morphologyEx(
+            ink, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_len)),
+        )
+        xs = [i for i, v in enumerate(vertical.sum(axis=0)) if v > v_len * 0.6]
+        lines: list[list[int]] = []
+        for x in xs:
+            if not lines or x - lines[-1][-1] > 3:
+                lines.append([x])
+            else:
+                lines[-1].append(x)
+        centers = [int(sum(group) / len(group)) for group in lines]
+        box = None
+        for left, right in zip(centers, centers[1:]):
+            start = left / width
+            gap = (right - left) / width
+            if 0.22 <= start <= 0.45 and 0.12 <= gap <= 0.26:
+                box = (left + 2, right - 2)
+                break
+        if box is None or box[1] <= box[0]:
+            # The card does not print the second box. Say so, instead of
+            # leaving the cell blank — a blank reads as a missed value.
+            return "Not printed"
+        crop = top[:, box[0]:box[1]]
+        line = _ink_line_of_text(crop, rightmost=False)
+        if line is None:
+            return ""
+        reads = [
+            re.sub(r"\D", "", read)
+            for read in _read_line_variants(
+                line,
+                "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789",
+                targets=(54, 72, 90),
+            )
+            if read
+        ]
+        reads = [read for read in reads if read and len(read) <= 2]
+        if not reads:
+            return ""
+        votes = Counter(reads)
+        best, count = max(votes.items(), key=lambda item: (item[1], -len(item[0])))
+        # Four of the six reads have to agree. A single imagined digit is
+        # how a normal card's empty gap was turning into a 2.
+        return best if count >= 4 else ""
+    except Exception as exc:
+        log.debug("Serial-mark OCR failed: %s", exc)
+        return ""
+
+
+# Two printed ID shapes are valid. The common one is three letters and
+# seven digits, e.g. "GKM5933973". Older rolls print a state and three
+# number groups, e.g. "UP/79/389/0654035". A read that matches either
+# shape is voted on; anything else is only a fallback.
+EPIC_SHAPE_RE = re.compile(r"^(?:[A-Z]{3}\d{7}|[A-Z]{2}/\d{2}/\d{3}/\d{7})$")
+_COMPACT_SLASHED_EPIC_RE = re.compile(r"^([A-Z]{2})(\d{2})(\d{3})(\d{7})$")
 
 # How close the 8 EPIC readers must be before the record is flagged for human
 # review. At 4, a 4-4 tie is flagged and a 5-3 or better majority is not.
@@ -1064,7 +1513,7 @@ def _extract_epic_with_tesseract(img_bytes: bytes) -> Optional[list[str]]:
         reads = _read_line_variants(
             line,
             "--oem 3 --psm 7 -c tessedit_char_whitelist="
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/",
             targets=(60, 80, 100, 120))
         reads = [_fix_epic_shape(r.upper()) for r in reads if r]
         if not reads:
@@ -1126,7 +1575,8 @@ def _extract_english_text_with_tesseract(img_bytes: bytes) -> Optional[list[str]
         candidates: list[list[str]] = []
         for variant in (gray, cv2.threshold(gray, 0, 255,
                                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]):
-            text = pytesseract.image_to_string(
+            _tess_count("epic_english")
+            text = _tess_string(
                 Image.fromarray(variant),
                 lang=TESSERACT_ENGLISH_LANG,
                 config=TESSERACT_DIGIT_CONFIG,
@@ -1160,8 +1610,33 @@ _EPIC_DIGIT_SUBSTITUTIONS = {"S": "5"}
 HOUSE_LABEL_RE = re.compile(r"मकान\s*संख्या\s*[:ः]?")
 
 
+def _slashed_voter_id(text: str) -> str:
+    """Return ``UP/79/389/0654035`` when the read is that printed form.
+
+    Slashes are part of the ID. A compact read that kept the two state
+    letters and the twelve digits, but lost the slashes, is the same ID.
+    A normal three-letter EPIC does not match this and is left alone.
+    """
+    upper = re.sub(r"\s+", "", (text or "").upper()).replace("\\", "/")
+    upper = re.sub(r"/+", "/", upper).strip("/")
+    if re.fullmatch(r"[A-Z]{2}/\d{2}/\d{3}/\d{7}", upper):
+        return upper
+    compact = re.sub(r"[^A-Z0-9]", "", upper)
+    match = _COMPACT_SLASHED_EPIC_RE.fullmatch(compact)
+    if match:
+        return "/".join(match.groups())
+    return ""
+
+
 def _fix_epic_shape(text: str) -> str:
-    """Force EPIC to 3 letters + digits. Keeps first 3 as letters, forces rest to digits (repairs S->5). Returns unchanged if too short."""
+    """Keep a slashed state ID, otherwise force 3 letters + digits.
+
+    The letter form keeps the first 3 characters and forces the rest to
+    digits (repairs S->5). Returns unchanged if too short.
+    """
+    slashed = _slashed_voter_id(text)
+    if slashed:
+        return slashed
     cleaned = re.sub(r"[^A-Za-z0-9]", "", text)
     if len(cleaned) <= EPIC_PREFIX_LENGTH:
         return cleaned
@@ -1305,7 +1780,8 @@ def _extract_house_number_with_tesseract(img_bytes: bytes,
         # the narrow leading '1'.
         gray_raw = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
         for _cfg in ("--oem 3 --psm 7", "--oem 3 --psm 6"):
-            txt_raw = pytesseract.image_to_string(
+            _tess_count("house_raw")
+            txt_raw = _tess_string(
                 Image.fromarray(gray_raw), lang=TESSERACT_ENGLISH_LANG,
                 config=_cfg,
             ).strip()
@@ -1332,7 +1808,8 @@ def _extract_house_number_with_tesseract(img_bytes: bytes,
         variants = (gray, cv2.threshold(gray, 0, 255,
                                        cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
         for variant in variants:
-            text = pytesseract.image_to_string(
+            _tess_count("house_whitelist")
+            text = _tess_string(
                 Image.fromarray(variant),
                 lang=TESSERACT_ENGLISH_LANG,
                 config=TESSERACT_HOUSE_CONFIG,
@@ -1353,7 +1830,8 @@ def _extract_house_number_with_tesseract(img_bytes: bytes,
         for variant in (gray_full,
                         cv2.threshold(gray_full, 0, 255,
                                       cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]):
-            text = pytesseract.image_to_string(
+            _tess_count("house_fallback")
+            text = _tess_string(
                 Image.fromarray(variant),
                 lang=TESSERACT_ENGLISH_LANG,
                 config=TESSERACT_HOUSE_CONFIG,
@@ -1367,6 +1845,85 @@ def _extract_house_number_with_tesseract(img_bytes: bytes,
     except Exception as exc:
         log.debug("English house-number OCR failed: %s", exc)
         return None
+
+
+def _extract_house_number_with_tesseract_both(img_bytes: bytes):
+    """Return (digit_value, raw_value) from one pass over the crop.
+
+    The raw and normalised readers used to run the no-whitelist pass twice
+    over the same pixels (once via raw=True, once via the digit path). Run it
+    once and split the result: raw is the first variant's text, digit is the
+    normalised extraction from the same reads.
+    """
+    try:
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None or img.size == 0:
+            return None, None
+
+        scale = max(2, -(-TESSERACT_MIN_HEIGHT_PX // max(1, img.shape[0])))
+        img_scaled = cv2.resize(img, (0, 0), fx=scale, fy=scale,
+                                interpolation=cv2.INTER_CUBIC)
+
+        gray_raw = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
+        raw_val = None
+        digit_val = None
+        for _cfg in ("--oem 3 --psm 7", "--oem 3 --psm 6"):
+            _tess_count("house_raw")
+            txt_raw = _tess_string(
+                Image.fromarray(gray_raw), lang=TESSERACT_ENGLISH_LANG,
+                config=_cfg,
+            ).strip()
+            if raw_val is None:
+                raw_val = txt_raw or None
+            m_frac = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", txt_raw)
+            if m_frac:
+                digit_val = f"{m_frac.group(1)}/{m_frac.group(2)}"
+                return digit_val, raw_val
+
+        img_resized = _strip_label_colon(img_scaled)
+        digits_region = _house_digits_region(img_resized)
+        if digits_region:
+            x0, y0, x1 = digits_region
+            img_resized = img_resized[y0:, x0:x1] if x1 > x0 else img_resized
+
+        img_resized = _tighten_house_crop(img_resized)
+        gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
+        variants = (gray, cv2.threshold(gray, 0, 255,
+                                       cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
+        for variant in variants:
+            _tess_count("house_whitelist")
+            text = _tess_string(
+                Image.fromarray(variant),
+                lang=TESSERACT_ENGLISH_LANG,
+                config=TESSERACT_HOUSE_CONFIG,
+            )
+            runs = re.findall(r"\d+", text)
+            if runs:
+                digit_val = max(runs, key=len)
+                return digit_val, raw_val
+
+        scale2 = max(2, -(-TESSERACT_MIN_HEIGHT_PX // max(1, img.shape[0])))
+        img_full = cv2.resize(img, (0, 0), fx=scale2, fy=scale2,
+                              interpolation=cv2.INTER_CUBIC)
+        gray_full = cv2.cvtColor(img_full, cv2.COLOR_BGR2GRAY)
+        for variant in (gray_full,
+                        cv2.threshold(gray_full, 0, 255,
+                                      cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]):
+            _tess_count("house_fallback")
+            text = _tess_string(
+                Image.fromarray(variant),
+                lang=TESSERACT_ENGLISH_LANG,
+                config=TESSERACT_HOUSE_CONFIG,
+            )
+            runs = re.findall(r"\d+", text)
+            if runs:
+                digit_val = max(runs, key=len)
+                return digit_val, raw_val
+        return digit_val, raw_val
+    except Exception as exc:
+        log.debug("English house-number OCR failed: %s", exc)
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -1401,6 +1958,36 @@ def _house_line(lines: Optional[list[str]]) -> str:
     if line is None:
         line = lines[2] if len(lines) >= 3 else (lines[0] if lines else "")
     return _HOUSE_ANY_LABEL_RE.sub(" ", line).strip()
+
+
+def _labelled_house_text(lines: Optional[list[str]]) -> str:
+    """Return a Hindi-only house value from an explicitly labelled house row.
+
+    The numeric reader deliberately returns ``None`` for values such as
+    ``विष्णु``.  That is correct for its job, but it used to mean a clear
+    Devanagari house value was discarded when the full-card parser also missed
+    that row.  Do not use the generic third-line fallback here: a value is
+    eligible only when the same OCR line contains the printed ``मकान संख्या``
+    label.  This keeps a nearby name or address continuation from becoming a
+    house number.
+    """
+    candidates: list[str] = []
+    for line in lines or []:
+        if not _HOUSE_ANY_LABEL_RE.search(line or ""):
+            continue
+        value = _HOUSE_ANY_LABEL_RE.sub(" ", line)
+        # Tesseract sometimes leaves zero-width joiners after a final halant.
+        # They are OCR transport noise, not part of the printed value.
+        value = re.sub(r"[\u200b-\u200d\ufeff]", "", value)
+        value = re.sub(r"\s+", " ", value).strip(" :ः;,.|-—–")
+        if not re.search(rf"[{_DEV_LETTER}]", value):
+            continue
+        # A one-consonant value is normally a plot-letter prefix and needs a
+        # numeric companion; keep this path for actual Hindi text values only.
+        if _devanagari_consonants(value) < 2:
+            continue
+        candidates.append(value)
+    return max(candidates, key=len, default="")
 
 
 def _clean_house_ocr_noise(value: str) -> str:
@@ -1727,6 +2314,173 @@ def _merge_text_with_digits(
     return _no_merge()
 
 
+def _place_recovered_leading_one(house: str) -> str:
+    """Put a recovered 1 on the first digit, not in front of a letter.
+
+    Paddle reading ``108`` where the Hindi line has ``ए-08`` means the thin
+    ``1`` was dropped from the number. Prefixing the whole string stored
+    ``1ए-08``, a different house. ``64`` against ``164`` still becomes
+    ``164``, because that string already starts on a digit.
+    """
+    match = re.search(r"\d", house)
+    if not match:
+        return "1" + house
+    return house[:match.start()] + "1" + house[match.start():]
+
+
+def _strip_house_digit_glue(house: str) -> str:
+    """Drop a single junk glyph sitting between two digits.
+
+    ``16व4``, ``102य4`` and ``16&4`` are the number with one misread stroke
+    in the middle. A real word such as ``वार्ड`` is left alone because the
+    letter is not followed by a digit.
+    """
+    return re.sub(r"(?<=\d)[वय&](?=\d)", "", house)
+
+
+# Telugu (U+0C00) and Kannada (U+0C80) use the same letter order. The index
+# is the offset inside that block. Hindi has no short ए/ओ, so those map to
+# the long vowel a name is actually pronounced with.
+_BRAHMIC_INDEX_TO_DEVA = {
+    0x01: "\u0901", 0x02: "\u0902", 0x03: "\u0903",
+    0x05: "अ", 0x06: "आ", 0x07: "इ", 0x08: "ई", 0x09: "उ", 0x0A: "ऊ",
+    0x0B: "ऋ", 0x0E: "ए", 0x0F: "ए", 0x10: "ऐ", 0x12: "ओ", 0x13: "ओ",
+    0x14: "औ",
+    0x15: "क", 0x16: "ख", 0x17: "ग", 0x18: "घ", 0x19: "ङ",
+    0x1A: "च", 0x1B: "छ", 0x1C: "ज", 0x1D: "झ", 0x1E: "ञ",
+    0x1F: "ट", 0x20: "ठ", 0x21: "ड", 0x22: "ढ", 0x23: "ण",
+    0x24: "त", 0x25: "थ", 0x26: "द", 0x27: "ध", 0x28: "न",
+    0x2A: "प", 0x2B: "फ", 0x2C: "ब", 0x2D: "भ", 0x2E: "म",
+    0x2F: "य", 0x30: "र", 0x31: "र", 0x32: "ल", 0x33: "ळ",
+    0x35: "व", 0x36: "श", 0x37: "ष", 0x38: "स", 0x39: "ह",
+    0x3E: "ा", 0x3F: "ि", 0x40: "ी", 0x41: "ु", 0x42: "ू",
+    0x43: "ृ", 0x44: "ॄ", 0x46: "े", 0x47: "े", 0x48: "ै",
+    0x4A: "ो", 0x4B: "ो", 0x4C: "ौ", 0x4D: "्",
+}
+_FOREIGN_NAME_SCRIPTS = (
+    (0x0B00, 0x0B7F),  # Odia
+    (0x0C00, 0x0C7F),  # Telugu
+    (0x0C80, 0x0CFF),  # Kannada
+)
+_FOREIGN_RELATION_LANGS = ("tel", "kan", "ori")
+_FOREIGN_RELATION_FIELD = {
+    "पिता": "voter_father_name",
+    "पति": "voter_husband_name",
+    "माता": "voter_mother_name",
+    "अन्य": "voter_other_name",
+}
+
+
+def _brahmic_to_devanagari(text: str) -> str:
+    """Turn Telugu or Kannada letters into the same Hindi word.
+
+    The original spelling is kept sound for sound. A virama at the end of a
+    word is how those scripts write a final consonant; Hindi writes that
+    consonant with its inherent vowel, so భూషణ్ becomes भूषण. A virama
+    inside a word stays, so చంద్ర stays चंद्र.
+    """
+    words = []
+    for raw in str(text or "").split():
+        pieces = []
+        for ch in raw:
+            if ch in "\u200c\u200d":
+                continue
+            cp = ord(ch)
+            mapped = None
+            for base, end in _FOREIGN_NAME_SCRIPTS:
+                if base <= cp <= end:
+                    mapped = _BRAHMIC_INDEX_TO_DEVA.get(cp - base, "")
+                    break
+            if mapped is None and ("\u0900" <= ch <= "\u097F" or ch.isdigit()):
+                mapped = ch
+            if mapped:
+                pieces.append(mapped)
+        word = "".join(pieces)
+        if word.endswith("\u094d"):
+            word = word[:-1]
+        if re.search(r"[अ-हक़-य़]", word):
+            words.append(word)
+    return " ".join(words)
+
+
+def _foreign_name_as_devanagari(line: str) -> str:
+    """Take the non-Hindi name after the label and return it in Hindi."""
+    parts = re.split(r"[:：;ः!]", str(line or ""), maxsplit=1)
+    body = parts[1] if len(parts) > 1 else parts[0]
+    runs = re.findall(r"[\u0C00-\u0C7F\u0C80-\u0CFF]+", body)
+    if not runs:
+        return ""
+    hindi = _brahmic_to_devanagari(" ".join(runs))
+    if len(re.findall(r"[अ-हक़-य़]", hindi)) < 4:
+        return ""
+    return hindi
+
+
+def _agreed_foreign_name(reads: list[str]) -> str:
+    """Accept a converted name only when two reads produce the same Hindi."""
+    names = [name for name in (_foreign_name_as_devanagari(read) for read in reads) if name]
+    if len(names) >= 2 and len(set(names)) == 1:
+        return names[0]
+    return ""
+
+
+def _relation_kind_in_text(text: str) -> str:
+    """The Hindi label on a mixed-script line. The name itself may not be Hindi."""
+    if "माता" in text:
+        return "माता"
+    if "पिता" in text:
+        return "पिता"
+    if "पति" in text:
+        return "पति"
+    if "अन्य" in text:
+        return "अन्य"
+    return ""
+
+
+def _read_foreign_relation(card_img: Any) -> tuple[str, str]:
+    """Read a Telugu or Kannada relative name and return it as Hindi.
+
+    Runs only as a fallback, and only when that language is installed.
+    Two scales have to convert to the same Hindi word. A dot or an empty
+    label converts to nothing.
+    """
+    try:
+        installed = set(pytesseract.get_languages())
+    except Exception as exc:
+        log.debug("Foreign-script language list failed: %s", exc)
+        return "", ""
+    langs = [lang for lang in _FOREIGN_RELATION_LANGS if lang in installed]
+    if not langs:
+        return "", ""
+    crop = _crop_card_region(card_img, RELATION_REGION, "FOREIGN_RELATION")
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return "", ""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    if int((gray < 180).sum()) < 40:
+        return "", ""
+    for lang in langs:
+        reads = []
+        kind = ""
+        for scale in (3, 4):
+            big = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            try:
+                text = pytesseract.image_to_string(
+                    big, config=f"--oem 3 --psm 7 -l hin+{lang}",
+                )
+            except Exception as exc:
+                log.debug("Foreign relation read failed: %s", exc)
+                continue
+            text = " ".join(text.split())
+            if not text:
+                continue
+            reads.append(text)
+            kind = kind or _relation_kind_in_text(text)
+        name = _agreed_foreign_name(reads)
+        if name and kind:
+            return kind, name
+    return "", ""
+
+
 def _combine_house_read(hindi_fields_lines: Optional[list[str]],
                         english_digits: Optional[str],
                         house_region_lines: Optional[list[str]] = None,
@@ -1834,8 +2588,8 @@ def _english_line_score(lines: list[str]) -> int:
 # heights and thresholding gives several genuinely different views of the
 # same glyph instead of several copies of one view.
 #
-# 200 DPI on purpose. The Q is a thin enclosing loop; at 300 DPI two of the
-# five known-deleted cards dropped to 3/8 and would have been lost by any
+# 200 DPI on purpose. The marker is a thin enclosing loop; at 300 DPI two of
+# the five known-deleted cards dropped to 3/8 and would have been lost by any
 # majority bar. This matches the rest of the pipeline, which reads Hindi at
 # 200 for the same reason.
 DELETED_VOTE_HEIGHTS_PX = (40, 60, 80, 120)
@@ -1852,6 +2606,24 @@ DELETED_VOTE_HEIGHTS_PX = (40, 60, 80, 120)
 # scores 8/8 and the other 595 cards score 0/8, so any bar in 1..8 is safe.
 # 5 was chosen from six samples and rejected two real deletions for nothing.
 DELETED_VOTE_MIN_HITS = 5
+
+# The rule needs no OCR intelligence: THE SERIAL BOX CONTAINS ONLY DIGITS, so
+# any alphabetic character in it is a deletion marker. Nothing else can
+# legitimately appear there, which makes this a strict rule rather than a
+# heuristic.
+#
+# It is deliberately not written as "Q". Q is only how one reader renders the
+# marker; the same card reads as 'Q', '[a', 'or' or nothing at all depending on
+# the render, and other rolls strike with a different letter altogether. Pinning
+# the test to Q therefore matched one reader's spelling of the mark rather than
+# the mark itself, and every card whose letter came back as anything else was
+# written as is_deleted = false. The rule that was always right is the one the
+# Tesseract crosscheck already used: is there a letter here?
+#
+# Because this is per-reader over the OCR's own token list, a stray letter from
+# a mangled digit ("285" read as "Z85") is the accepted cost, and the majority
+# bar is what keeps it from deciding anything on its own.
+DELETED_MARKER_RE = re.compile(r"[A-Za-z]")
 
 
 def _serial_deleted_vote(serial_img: Any) -> tuple[bool, int, int]:
@@ -1921,7 +2693,7 @@ def _serial_deleted_vote(serial_img: Any) -> tuple[bool, int, int]:
                 log.debug("deleted vote reader failed: %s", exc)
                 continue
             texts = [ln[1][0].strip() for ln in (result[0] or []) if ln[1][0]]
-            if any("Q" in t.upper() for t in texts):
+            if any(DELETED_MARKER_RE.search(t) for t in texts):
                 hits += 1
             if hits >= DELETED_VOTE_MIN_HITS:
                 return True, hits, total
@@ -1933,15 +2705,14 @@ def _serial_deleted_vote(serial_img: Any) -> tuple[bool, int, int]:
 
 
 # The second engine for the deleted mark. Paddle and Tesseract fail on
-# different cards -- on the ground truth Paddle reads the Q on all five while
-# Tesseract reads nothing at all on page 15 card 30 -- so neither alone is
-# sufficient and the two are combined with OR.
+# different cards -- on the ground truth Paddle reads the mark on all five
+# while Tesseract reads nothing at all on page 15 card 30 -- so neither alone
+# is sufficient and the two are combined with OR.
 #
-# The rule needs no OCR intelligence: THE SERIAL BOX CONTAINS ONLY DIGITS, so
-# any alphabetic character in it is a misread Q. Nothing else can legitimately
-# appear there, which makes this a strict rule rather than a heuristic. On the
+# Same rule as the Paddle vote, for the same reason (see DELETED_MARKER_RE):
+# the serial box holds a number, so a letter in it is a deletion marker. On the
 # ground truth it reads the literal string 'Q 410' on page 16 card 20 and
-# '[a 422]' / '[aor]' on two others.
+# '[a 422]' / '[aor]' on two others -- three spellings of one mark.
 DELETED_TESSERACT_MIN_HITS = 4
 
 
@@ -1949,7 +2720,8 @@ def _serial_deleted_tesseract_crosscheck(serial_img: Any) -> tuple[int, int]:
     """Look for the deleted marker with a different engine than Paddle.
 
     Returns (hits, total_readers) counting readers whose text contains any
-    letter. The serial box holds a number, so a letter in it is a Q candidate.
+    letter. The serial box holds a number, so a letter in it is a deletion
+    marker.
 
     This exists because the Paddle vote is eight renders of ONE recogniser: it
     buys tolerance to a bad render, not to a bad model. When Paddle is
@@ -1977,19 +2749,22 @@ def _serial_deleted_tesseract_crosscheck(serial_img: Any) -> tuple[int, int]:
         for variant in variants:
             total += 1
             try:
-                text = pytesseract.image_to_string(
+                _tess_count("deleted_crosscheck")
+                text = _tess_string(
                     Image.fromarray(variant), lang="eng",
                     config="--oem 3 --psm 7",
                 )
             except Exception as exc:
                 log.debug("deleted tesseract crosscheck reader failed: %s", exc)
                 continue
-            if re.search(r"[A-Za-z]", text):
+            if DELETED_MARKER_RE.search(text):
                 hits += 1
     return hits, total
 
 
-def _decide_deleted(serial_img: Any) -> tuple[bool, int, int]:
+def _decide_deleted(
+    serial_img: Any, *, force_crosscheck: bool = False,
+) -> tuple[bool, int, int]:
     """Decide is_deleted, escalating to a second engine only when unsure.
 
     Returns (is_deleted, hits, total_readers) from whichever arm decided.
@@ -2004,16 +2779,22 @@ def _decide_deleted(serial_img: Any) -> tuple[bool, int, int]:
     marked, hits, total = _serial_deleted_vote(serial_img)
     if not total:
         return False, 0, 0
-    if marked or hits + (len(DELETED_VOTE_HEIGHTS_PX) * 2 - total) < DELETED_VOTE_MIN_HITS:
+    if marked:
+        return marked, hits, total
+    if (not force_crosscheck
+            and hits + (len(DELETED_VOTE_HEIGHTS_PX) * 2 - total)
+            < DELETED_VOTE_MIN_HITS):
         # Decided outright, either way: the vote reached the threshold, or ran
         # out of readers still unable to. The second reading of the miss bound
         # is what keeps the early exit from widening the escalation band -- a
         # card that locked at 2-of-4 is NOT inconclusive, it is decided.
-        return marked, hits, total
-    if hits == 0 or hits >= DELETED_VOTE_MIN_HITS:
-        return marked, hits, total
+        return False, hits, total
 
-    # Inconclusive band: ask the other engine.
+    # Inconclusive readings normally use the second engine.  A caller can
+    # also force it for a card whose gender never came back: a deleted
+    # watermark can make Paddle return zero votes while Tesseract still sees
+    # the marker.  A missing age is not that case — age is read after this
+    # decision — and a forced crosscheck there marked live voters deleted.
     t_hits, t_total = _serial_deleted_tesseract_crosscheck(serial_img)
     if t_total and t_hits >= DELETED_TESSERACT_MIN_HITS:
         return True, hits, total
@@ -2021,40 +2802,32 @@ def _decide_deleted(serial_img: Any) -> tuple[bool, int, int]:
 
 
 def _detect_deleted_watermark(card_img: Any, serial_png: Optional[bytes] = None) -> bool:
-    """Detect DELETED watermark via Q prefix in the serial box.
+    """Detect the deletion marker in the card's serial box.
 
-    Fast path: Tesseract checks for letters in the serial box first.
-    Only falls through to PaddleOCR when letters are present (Q marker).
+    The serial box holds a number and nothing else, so any letter in it is the
+    deletion mark (see DELETED_MARKER_RE). Decided by the same reader vote the
+    pipeline writes, so a caller gating on this gets the answer the extractor
+    would have written rather than a second, weaker opinion.
+
+    `serial_png` is the pre-cropped box when the caller has one. When it does
+    not, the box is cropped from `card_img` using the same region the extractor
+    uses. That fallback matters: the only caller outside this module passed a
+    card and no crop, so it took the old early return and every card came back
+    un-deleted. Returning False there was not an answer, it was a silence.
     """
     try:
-        if serial_png is None:
-            return False
-        nparr = np.frombuffer(serial_png, np.uint8)
-        serial_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if serial_img is None:
+        serial_img = None
+        if serial_png is not None:
+            serial_img = cv2.imdecode(np.frombuffer(serial_png, np.uint8),
+                                     cv2.IMREAD_COLOR)
+        if (serial_img is None or serial_img.size == 0) and card_img is not None:
+            serial_img = _crop_card_region(
+                card_img, TESSERACT_CARD_CONTENT_REGIONS[0], "SERIAL")
+        if serial_img is None or serial_img.size == 0:
             return False
 
-        # Fast Tesseract pre-check — normal serials are digits only.
-        # Run PaddleOCR when: letters present (possible Q) OR Tesseract empty
-        # (Tesseract misses Q on some cards like card 1 of page 3).
-        gray = cv2.cvtColor(serial_img, cv2.COLOR_BGR2GRAY)
-        quick_txt = pytesseract.image_to_string(
-            Image.fromarray(gray), lang="eng", config="--oem 3 --psm 7"
-        ).strip().upper()
-        digits_only = bool(re.fullmatch(r"[\d\s]*", quick_txt))
-        if digits_only and quick_txt:
-            return False  # confident it's just digits — not deleted
-
-        # Letters found — confirm with PaddleOCR (much more reliable on Q)
-        if PaddleOCR is not None:
-            try:
-                result = _get_paddle().ocr(serial_img, cls=False)
-                texts = [line[1][0].upper() for line in (result[0] or []) if line[1][0]]
-                if any("Q" in t for t in texts):
-                    return True
-            except Exception:
-                pass
-        return False
+        marked, _hits, total = _decide_deleted(serial_img)
+        return marked if total else False
     except Exception as exc:
         log.debug("Deleted-watermark detection failed: %s", exc)
         return False
@@ -2072,7 +2845,17 @@ def _empty_record() -> dict[str, Any]:
 
 
 def _extract_tesseract_epic(img_bytes: bytes) -> str:
-    """Read EPIC from card image bytes for voter grid probe. Returns empty string on failure."""
+    """Read EPIC from card image bytes for voter grid probe. Returns empty string on failure.
+
+    A read only counts as a read if it is actually EPIC-shaped. `_voter_card_rects()`
+    hands out thirty rectangles on every page of every roll -- the cover, the
+    header band and the trailing summary page included -- so on a page with no
+    cards the probe still crops thirty regions of whatever text happens to be
+    there. Left unchecked, OCR scrapes shaped like "77T55" or "V" out of that
+    text and the page is admitted as a voter grid, producing thirty phantom
+    records with no name and no age. Shape is the cheapest test that separates
+    "an ID number is printed here" from "some ink is printed here".
+    """
     try:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -2086,7 +2869,9 @@ def _extract_tesseract_epic(img_bytes: bytes) -> str:
         if not ok:
             return ""
         reads = _extract_epic_with_tesseract(enc.tobytes())
-        return reads[0] if reads and reads[0] else ""
+        if not reads or not reads[0]:
+            return ""
+        return reads[0] if EPIC_SHAPE_RE.match(reads[0]) else ""
     except Exception as exc:
         log.debug("Tesseract EPIC probe failed: %s", exc)
         return ""
@@ -2129,6 +2914,40 @@ def parse_voter_box_from_ocr_lines(
         parts = re.split(r"[:：ः;!]", line, maxsplit=1)
         return clean_value(parts[1].strip()) if len(parts) > 1 else ""
 
+    def gender_from_text(value: str) -> str:
+        """Return a canonical gender only from an explicit printed value.
+
+        The rolls use ``पुरुष``/``महिला``, the older ``पुरूष``/``स्त्री``
+        spellings, and ``तृतीय लिंग``.  Treating only the first pair as valid
+        silently loses otherwise legible cards -- and because the third value
+        matches neither branch, a perfectly readable ``लिंग : तृतीय लिंग``
+        falls through to empty and lands in the blank pile.  This is
+        deliberately a closed vocabulary, used only on the age/gender row, so
+        it cannot turn a person's name into a gender.
+
+        Third gender is tested first: its ``तृ``/``त्र`` anchor cannot occur
+        inside either of the other two words, so the ordering costs nothing
+        and keeps the longest value from being clipped by a shorter match.
+        """
+        compact = re.sub(r"[\s:;ः,.|]", "", value or "")
+        if (THIRD_GENDER_RE.search(compact)
+                or re.search(r"(?:^|[^a-z])third(?:$|[^a-z])",
+                             compact.lower()) is not None):
+            return "तृतीय लिंग"
+        if (re.search(r"प[ुू]र[ुू]?[षश]", compact)
+                or re.search(r"म[रड][्]?द", compact)
+                or re.search(r"(?:^|[^a-z])(?:male|mard)(?:$|[^a-z])",
+                             compact.lower()) is not None
+                or re.search(r"(?:^|[^ऀ-ॿ])नर(?:$|[^ऀ-ॿ])", compact)):
+            return "पुरुष"
+        if (re.search(r"म[ऀ-ॿ]*ल[ऀ-ॿ]*ा", compact)
+                or re.search(r"स्त्री|स्त्रि|स्तरी", compact)
+                or "औरत" in compact or "नारी" in compact
+                or any(token in compact.lower()
+                       for token in ("mahila", "female", "aurat", "naari"))):
+            return "महिला"
+        return ""
+
     record: dict[str, Any] = {
         "sno": "", "id_card_no": "", "gender": "", "age": "",
         "house_no": "", "voter_first_name": "",
@@ -2142,20 +2961,153 @@ def parse_voter_box_from_ocr_lines(
     # Tesseract returns नाग (म's vertical + the ā bar read as ग) often enough
     # that an unmatched label silently drops the whole relation. Shared here
     # so all four patterns and the voter-name test stay in step.
-    _नाम_LBL = r"(?:नाम|नाग|nama)"
+    # Low-contrast cards can read the initial stroke of ``नाम`` as ``भाम``.
+    # Accept it only in the label pattern, never as a free-text replacement.
+    _नाम_LBL = r"(?:नाम|नाग|भाम|nama)"
+    # The roll prints four relation words. A misread is still one of those
+    # four: the consonants stay प+त, म+त, or अ+न+य, and the vowel says
+    # whether प+त is पिता or पति. का and नाम sit between that word and the
+    # separator, so their spelling never has to be listed. The value is the
+    # text after the separator.
+    _REL_FIELD = {
+        "पिता": "voter_father_name",
+        "पति": "voter_husband_name",
+        "माता": "voter_mother_name",
+        "अन्य": "voter_other_name",
+    }
+    _REL_SEP = ":：;ः!"
 
-    # Relation rows: (label pattern, canonical relation, record field)
-    _RELATIONS = (
-        (rf"(?:पिता|पेता|पित|प्रिता|Old)\s*(?:का)?\s*{_नाम_LBL}",  "पिता",  "voter_father_name"),
-        # पति variants: प्रति/प्रत्ति (Tesseract misread), पत्ति (double त),
-        # पत, and क्वा (conjunct misread that eats the whole label)
-        (rf"(?:पति|पत्ति|प्रति|प्रत्ति|पत|क्वा)\s*(?:का)?\s*{_नाम_LBL}",  "पति",   "voter_husband_name"),
-        (rf"(?:माता|मात|मोता|m[aā]t[aā])\s*(?:का)?\s*{_नाम_LBL}", "माता", "voter_mother_name"),
-        # अन्य is the one label printed on its own — 'अन्य: सुनीता', with no
-        # 'का नाम' — so the नाम label is optional here and nowhere else.
-        (rf"(?:अन्य|अनय|anya|anye)\s*(?:का)?\s*(?:{_नाम_LBL})?\s*[:：;ः!]",
-         "अन्य", "voter_other_name"),
-    )
+    def _word_char(ch: str) -> bool:
+        if ch in _REL_SEP or ch.isspace():
+            return False
+        o = ord(ch)
+        return 0x0900 <= o <= 0x097F or ch.isalpha()
+
+    def _skeleton(token: str) -> str:
+        """Consonants only. Matras and the virama are how the misreads differ."""
+        return "".join(
+            ch for ch in token
+            if ch != "्" and unicodedata.category(ch) not in ("Mn", "Mc")
+        )
+
+    def _classify_head(head: str) -> str:
+        """Map one token, or a prefix of one, onto a printed relation word."""
+        if head == "क्वा":
+            # The whole label collapsed into this one conjunct.
+            return "पति"
+        low = head.lower()
+        if low in ("anya", "anye"):
+            return "अन्य"
+        sk = _skeleton(head)
+        if sk in ("अन्य", "अनय"):
+            return "अन्य"
+        if sk.startswith("म") and "त" in sk and set(sk) <= set("मतर"):
+            return "माता"
+        if sk.startswith("प") and "त" in sk and set(sk) <= set("पतर"):
+            # ा, or a vowel written on the first consonant (ि before त in
+            # Unicode order), is पिता. ि after त is पति. पति and पिता share
+            # the consonant skeleton, so the vowel is the whole distinction.
+            tpos = head.find("त")
+            if "ा" in head or any(v in head[:tpos] for v in "िीुूेैोौ"):
+                return "पिता"
+            return "पति"
+        return ""
+
+    def _label_separator(text: str, i: int) -> int:
+        """Index of the separator that ends a relation label, or -1.
+
+        का / नाम and any misread of them are optional and are not matched
+        letter by letter. A short token that is only क, or क glued to नाम,
+        is the label tail. Anything else is the relative's name, and this
+        is not a label.
+        """
+        n = len(text)
+        while i < n and text[i].isspace():
+            i += 1
+        if i < n and text[i] in _REL_SEP:
+            return i
+
+        def token_at(pos: int) -> tuple[str, int]:
+            j = pos
+            while j < n and _word_char(text[j]):
+                j += 1
+            return text[pos:j], j
+
+        token, j = token_at(i)
+        if not token:
+            return -1
+        sk = _skeleton(token)
+        # काम is का with an extra म. It is still the label, not the name.
+        ka = bool(sk) and set(sk) <= set("कषरम") and len(token) <= 4
+        # नाम is the most damaged glyph on a faint card. These skeletons are
+        # the reads actually seen where the value after the colon was a real
+        # relative: नात्र, नाग्र, नागर, नाम्र, नांग्र, साम, चाम, साग.
+        # They count only in this label slot, and only when a separator follows.
+        naam = sk in (
+            "नम", "नथ", "नग", "भम",
+            "नतर", "नगर", "नमर",
+            "सम", "चम", "सग",
+        )
+        glued = sk.startswith("क") and "न" in sk and any(c in sk for c in "मथग")
+        if not (ka or naam or glued):
+            return -1
+        i = j
+        while i < n and text[i].isspace():
+            i += 1
+        if i < n and text[i] in _REL_SEP:
+            return i
+        if ka:
+            token2, j2 = token_at(i)
+            if _skeleton(token2) in (
+                "नम", "नथ", "नग", "भम",
+                "नतर", "नगर", "नमर",
+                "सम", "चम", "सग",
+            ):
+                i = j2
+                while i < n and text[i].isspace():
+                    i += 1
+                if i < n and text[i] in _REL_SEP:
+                    return i
+        return -1
+
+    def _match_relation_at(text: str, start: int) -> tuple[str, int]:
+        """A relation label starting at start. Returns (kind, end) or ('', -1).
+
+        end is just past the separator, which is what the line splitter
+        needs so the value stays on the relation piece.
+        """
+        if start > 0 and _word_char(text[start - 1]):
+            return "", -1
+        end = start
+        while end < len(text) and _word_char(text[end]):
+            end += 1
+        word = text[start:end]
+        # Longest prefix first. 'पतिका' is पति + का, not पत + िका.
+        for cut in range(len(word), 1, -1):
+            kind = _classify_head(word[:cut])
+            if not kind:
+                continue
+            sep = _label_separator(text, start + cut)
+            if sep >= 0:
+                return kind, sep + 1
+        # One junk consonant glued on the front: 'जअन्यः महताब'.
+        if len(word) > 2:
+            kind = _classify_head(word[1:])
+            if kind:
+                sep = _label_separator(text, start + len(word))
+                if sep >= 0:
+                    return kind, sep + 1
+        return "", -1
+
+    def _find_relation(text: str) -> tuple[int, int]:
+        """(start, end) of the first relation label in text, or (-1, -1)."""
+        for i in range(len(text)):
+            if i and _word_char(text[i - 1]):
+                continue
+            kind, end = _match_relation_at(text, i)
+            if kind:
+                return i, end
+        return -1, -1
 
     # --- Merged name+relation lines -------------------------------------
     #
@@ -2173,30 +3125,19 @@ def parse_voter_box_from_ocr_lines(
     # Both values are already present in the text, so this expands the line
     # into synthetic lines and lets every existing branch below run unchanged.
 
-    # Relation label bodies, without the shared 'का नाम' tail, for positional
-    # scanning. Spelled out rather than derived by splitting _RELATIONS on
-    # its own format string, which would silently rot if that format changed.
-    # 'Old' is omitted: 0 occurrences in the roll, and it matches Latin noise.
-    _REL_BODY = (
-        r"(?:पिता|पेता|पित|प्रिता"
-        r"|पति|पत्ति|प्रति|प्रत्ति|पत|क्वा"
-        r"|माता|मात|मोता|m[aā]t[aā]"
-        r"|अन्य|अनय|anya|anye)"
-    )
-    # Anchored to a word boundary. The lookbehind is what keeps
-    # 'धनपति देवी' -- a real voter whose name contains 'पति' -- from being
-    # read as a husband label.
-    _REL_SCAN = re.compile(
-        rf"(?<![ऀ-ॿA-Za-z]){_REL_BODY}"
-        rf"\s*(?:का)?\s*(?:{_नाम_LBL})?\s*[:：;ः!]"
-    )
-
     # The bare voter-name label, ANCHORED to the start of the line. An
     # unanchored search is wrong here: the 'नाम' inside 'पिता का नाम' is
     # itself a नाम label, so an unanchored test matches nearly every pure
     # relation line (524 lines in the roll's own text layer, vs 18 anchored)
     # and would push the 'फोटो उपलब्ध है' watermark into voter_first_name.
-    _BARE_NAME_LBL = re.compile(rf"^\s*{_नाम_LBL}\s*[:：;ः!]")
+    #
+    # The separator after नाम is optional. Tesseract often returns the row
+    # as 'नाम चंद्र दीप' with no colon at all. after_colon() then yields
+    # nothing, and the voter name is stored blank while the father, house,
+    # age and gender on the same card are kept. A following space is enough
+    # to separate the label from the name; a glued token ('नामकुमार') is
+    # still refused so the label cannot eat the first letter of a name.
+    _BARE_NAME_LBL = re.compile(rf"^\s*{_नाम_LBL}(?:\s*[:：;ः!]|\s+)")
 
     # 'फोटो उपलब्ध है' ("photo available") is stamped over the photo box and
     # bleeds into neighbouring text rows. It is never part of a name.
@@ -2206,7 +3147,12 @@ def parse_voter_box_from_ocr_lines(
     # below see them -- today the relation branch claims the line and
     # continue()s, so a house number sharing the row is lost (13 rows of
     # this roll print it that way).
-    _FIELD_TAIL = re.compile(r"(?:फोटो|मकान\s*संख्या|आयु|लिंग)")
+    # आयुष is a relative's name on these rolls. A bare 'आयु' match cuts that
+    # name off the relation line and stores the relative as missing. The age
+    # label is the word आयु itself, not आयु followed by more Devanagari.
+    _FIELD_TAIL = re.compile(
+        r"(?:फोटो|मकान\s*संख्या|(?:आयु|आवु|आय|आग|आगु|लिंग)(?![\u0900-\u097F]))"
+    )
 
     def _expand_line(line: str) -> list[str]:
         """Split a merged line into the pieces the branches below expect."""
@@ -2216,17 +3162,17 @@ def parse_voter_box_from_ocr_lines(
         stripped = stripped.strip().strip(":").strip()
 
         lead = _BARE_NAME_LBL.match(stripped)
-        rel = _REL_SCAN.search(stripped)
-        if not rel or (lead and rel.start() < lead.end()):
+        rel_start, rel_end = _find_relation(stripped)
+        if rel_start < 0 or (lead and rel_start < lead.end()):
             return [stripped]
 
         out = []
         if lead:
-            left = stripped[lead.end():rel.start()]
+            left = stripped[lead.end():rel_start]
             # A second relation label on one line ('पिता कानाम इंद्र पाल पिता
             # का नाम:') would otherwise write a label plus a colon into the
             # voter's name, which is worse than leaving it blank.
-            if left.strip() and not _REL_SCAN.search(left) and ":" not in left:
+            if left.strip() and _find_relation(left)[0] < 0 and ":" not in left:
                 # A literal label, not _नाम_LBL -- that is a pattern string,
                 # and interpolating it would emit "(?:नाम|नाग|nama): ..." as
                 # the text, whose first colon sits inside the pattern.
@@ -2234,28 +3180,73 @@ def parse_voter_box_from_ocr_lines(
 
         # Everything from the relation label onward. Cut at the first
         # following field label so the house/age/gender branches get a line.
-        tail = _FIELD_TAIL.search(stripped, rel.end())
+        tail = _FIELD_TAIL.search(stripped, rel_end)
         if tail:
-            out.append(stripped[rel.start():tail.start()])
+            out.append(stripped[rel_start:tail.start()])
             out.append(stripped[tail.start():])
         else:
-            out.append(stripped[rel.start():])
+            out.append(stripped[rel_start:])
         return out
 
     expanded: list[str] = []
     for raw in lines:
         expanded.extend(_expand_line(raw))
 
-    for line in expanded:
-        line = line.strip()
+    # A wrapped house address is the line after मकान संख्या, with no label
+    # of its own: 'इलाइचीपुर गजियाबाद'. Age, a name, or a relation ends it.
+    _HOUSE_STOP = re.compile(r"आयु|आवु|आय|आग|आगु|लिंग")
+
+    def _house_continuation(text: str) -> str:
+        """The wrapped locality, or '' when this line is the next field.
+
+        The Hindi model reads an English locality ('Ghaziabad') as a digit
+        soup ('(9॥828/080'). Keep the Devanagari words in front of that and
+        drop the rest, so the junk is not written onto the address.
+        """
+        if _HOUSE_STOP.search(text) or _BARE_NAME_LBL.match(text):
+            return ""
+        rel_at = _find_relation(text)[0]
+        if rel_at >= 0 and not text[:rel_at].strip():
+            return ""
+        # Latin, a bracket, or a run of digits is where the line left the
+        # locality and ran into the photo or an English word.
+        head = re.split(r"[A-Za-z(\[{]|[0-9०-९]{2,}", text, maxsplit=1)[0]
+        head = head.strip(" ।॥:：,，-–—")
+        # The first word is the rest of the address. A later word is kept
+        # only when it is itself a place (पुर, बाद, नगर…); otherwise it is
+        # the photo edge, as in 'इलाइचीपुर प्ध्टांत'.
+        kept: list[str] = []
+        for token in head.split():
+            if not re.search(r"[अ-हक़-य़]", token):
+                break
+            if kept and not re.search(r"(पुर|बाद|नगर|विहार|नी|पार्क|सिटी)$", token):
+                break
+            kept.append(token)
+        head = " ".join(kept)
+        letters = re.findall(r"[अ-हक़-य़]", head)
+        return head if len(letters) >= 2 else ""
+
+    index = 0
+    while index < len(expanded):
+        line = expanded[index].strip()
+        index += 1
         if not line:
             continue
 
-        # Voter name — must NOT match a relation label on the same line
-        if re.search(rf"{_नाम_LBL}\s*[:：;ः!]", line) and not any(
-            re.search(pat, line, re.IGNORECASE) for pat, *_ in _RELATIONS
-        ):
+        # Voter name — must NOT match a relation label on the same line.
+        # A line that starts with नाम and has no colon is still the voter's
+        # name; requiring the colon is what left 'नाम चंद्र दीप' blank.
+        starts_with_name = _BARE_NAME_LBL.match(line) is not None
+        has_name_label = starts_with_name or re.search(
+            rf"{_नाम_LBL}\s*[:：;ः!]", line
+        )
+        # A relation label anywhere on the line means this is not the voter.
+        # 'पिता करा नाम: कामता प्रसाद' still contains नाम:, and taking the
+        # text after that colon is what wrote the father over the voter.
+        if has_name_label and _find_relation(line)[0] < 0:
             name = after_colon(line)
+            if not name and starts_with_name and not re.search(r"[:：;ः!]", line):
+                name = clean_value(re.sub(rf"^\s*{_नाम_LBL}\s*", "", line))
             parts = name.split()
             if parts:
                 record["voter_first_name"] = parts[0]
@@ -2266,48 +3257,1434 @@ def parse_voter_box_from_ocr_lines(
                     record["voter_sur_name"] = parts[-1]
             continue
 
-        # Relation rows — one loop replaces four nearly-identical blocks
-        matched_relation = False
-        for pat, canonical, field in _RELATIONS:
-            if re.search(pat, line, re.IGNORECASE):
-                name = after_colon(line)
-                if name:
-                    record["relation_name"] = canonical
-                    record[field] = name
-                matched_relation = True
-                break
-        if matched_relation:
-            continue
+        # Relation row. The kind comes from the word itself; the name is
+        # whatever follows the separator, so का/नाम do not have to match.
+        rel_at, _rel_end = _find_relation(line)
+        if rel_at == 0 or (rel_at > 0 and not line[:rel_at].strip()):
+            kind, _end = _match_relation_at(line, rel_at)
+            name = after_colon(line)
+            if kind and name:
+                record["relation_name"] = kind
+                record[_REL_FIELD[kind]] = name
+            if kind:
+                continue
 
-        # House number
+        # House number. The following unlabelled line is the rest of the
+        # address when it wraps, not a new field.
         if re.search(r"मकान\s*संख्या", line):
-            record["house_no"] = after_colon(line)
+            parts = [after_colon(line)]
+            while index < len(expanded):
+                extra = _house_continuation(expanded[index].strip())
+                if not extra:
+                    break
+                parts.append(clean_value(extra))
+                index += 1
+            house = " ".join(part for part in parts if part)
+            record["house_no"] = house.strip(" |'`")
             continue
 
         # Age and gender can appear on the same line: आयु : 58 लिंग : पुरुष
-        if "आयु" in line:
+        if re.search(r"आयु|आवु|आय|आग|आगु", line):
             # Match ASCII or Devanagari digits (e.g. ३6, ३६)
-            m = re.search(r"आयु\s*[:：]?\s*([\d०-९]{1,3})", line)
+            m = re.search(r"(?:आयु|आवु|आय|आग|आगु)\s*[:：]?\s*([\d०-९]{1,3})", line)
             if m:
                 age_val = m.group(1).translate(str.maketrans("०१२३४५६७८९", "0123456789"))
-                # Voters must be >= 18; single/double digit values below 18
-                # are almost always Tesseract dropping a leading '1'.
-                if int(age_val) >= 18:
+                # A third digit here is the next glyph glued on: 36 stored
+                # as 336, 46 as 465. Below 18 is a dropped leading 1.
+                # Either one stays unread so the exact-card pass can recover
+                # a real age instead of keeping the broken number.
+                if AGE_MIN <= int(age_val) <= AGE_MAX:
                     record["age"] = age_val
-        if "लिंग" in line:
-            if "पुरुष" in line:
-                record["gender"] = "पुरुष"
-            # महिला and its OCR variants: Tesseract drops, doubles or
-            # relocates the i-matra and inserts stray viramas, producing
-            # महिल्ला / मछिला / महिला. Match the म...ला skeleton while
-            # allowing any Devanagari marks in between — note \w does NOT
-            # cover combining marks, so the class is spelled out.
-            elif re.search(r"म[ऀ-ॿ]*ल[ऀ-ॿ]*ा|mahila", line):
-                record["gender"] = "महिला"
+        # OCR occasionally reads the label as लिग/लि ग, but the value itself
+        # remains a closed vocabulary.  Restrict this to the row that also
+        # carries age; a name or relation row must never be classified as
+        # gender merely because it contains a similar glyph sequence.
+        if re.search(r"आयु|आवु|आय|आग|आगु", line) or "लिंग" in line or re.search(r"लि\s*[गं]", line):
+            gender = gender_from_text(line)
+            if gender:
+                record["gender"] = gender
 
-    if any(record.get(k) for k in ("voter_first_name", "voter_father_name", "age", "gender")):
+    if any(record.get(k) for k in (
+        "voter_first_name", "voter_father_name", "voter_husband_name",
+        "voter_mother_name", "voter_other_name", "age", "gender",
+    )):
         return record
     return {"empty": True}
+
+
+def _extract_age_from_clean_card(card_img: Any) -> str:
+    """Read only the age value from an already cleaned card image.
+
+    The Hindi model collapses the Devanagari digits these rolls print
+    (``४४`` for 44) into a single glyph, so a real two-digit age arrives at
+    the parser as ``4`` and is then dropped by the ``>= 18`` floor.  The
+    English digit model reads the same crop correctly, so this recovery
+    reader locates the value between the ``आयु`` and ``लिंग`` labels and
+    reads *that span only* with a digits-only English pass.
+
+    Three attempts in order:
+      1. Span crop (between label anchors) → English digits-only
+      2. Full band crop → English digits-only
+      3. Raw Hindi OCR on full band → label-anchored regex
+
+    Like the gender reader this returns ``""`` rather than a guess.
+    """
+    try:
+        band = _crop_card_region(card_img, GENDER_AGE_REGION, "GENDER_AGE")
+        if band is None or band.size == 0:
+            return ""
+        gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY) if band.ndim == 3 else band
+        # Attempts 1 and 2: span then full band with digit-whitelist configs.
+        for attempt, crop in enumerate((_age_value_span(gray), band)):
+            if crop is None or getattr(crop, "size", 0) == 0:
+                continue
+            # PSM 6 recovers thin trailing digits only in the label-bounded
+            # age span; using it on the whole band could select an address.
+            value = _read_age_digits(crop, allow_block_mode=(attempt == 0))
+            if value:
+                log.debug("Focused age read (attempt %d): %s", attempt + 1, value)
+                return value
+
+        # The label span can be too tight for PSM 6 while a continuation from
+        # the preceding address makes full-band PSM 6 unsafe.  The lower half
+        # contains only the printed age/gender row on this template.
+        lower_band_value = _read_age_from_lower_band(band)
+        if lower_band_value:
+            log.debug("Focused age read (lower-band recovery): %s", lower_band_value)
+            return lower_band_value
+
+        # Attempt 3: raw Hindi OCR on upscaled band with label-anchored regex.
+        # Catches cards where the address wraps into the band and the span
+        # locator loses the label (e.g. "आग : 41 लिंग : महिला" where "आग"
+        # is OCR junk for "आयु").  The pattern matches any age-label variant
+        # followed by optional punctuation/spaces, then 1–3 digits.
+        up = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        up = cv2.copyMakeBorder(up, 10, 10, 10, 10, cv2.BORDER_REPLICATE)
+        for cfg in ("--oem 3 --psm 6 -l hin", "--oem 3 --psm 7 -l hin"):
+            try:
+                text = pytesseract.image_to_string(up, config=cfg)
+            except Exception:
+                continue
+            # Label variants: आयु आवु आय आग and common OCR mangles, then
+            # optional colon/space, then the digits.
+            m = re.search(
+                r"(?:आयु|आवु|आय|आग|आगु)[^०-९0-9]{0,6}([0-9]{1,3})", text
+            )
+            if m:
+                val = m.group(1)
+                # Single digit 18/19 not possible; skip it
+                if len(val) == 1:
+                    # The label is present but a thin trailing digit was
+                    # lost. Read only the lower age row and require its first
+                    # digit to agree with the Hindi label-anchored read.
+                    lower = gray[gray.shape[0] // 2:, :]
+                    for candidate in _read_age_block_digits(lower):
+                        if candidate.startswith(val) and AGE_MIN <= int(candidate) <= AGE_MAX:
+                            log.debug("Focused age read (Hindi/English recovery): %s", candidate)
+                            return candidate
+                    continue
+                if AGE_MIN <= int(val) <= AGE_MAX:
+                    log.debug("Focused age read (attempt 3, label-regex): %s", val)
+                    return val
+            # Right-anchor fallback: digits sitting just before the gender label.
+            # Catches cards where the age label is garbled beyond recognition but
+            # the value itself survives right of "आयु : XX लिंग".
+            m2 = re.search(
+                r"([0-9]{2,3})[^0-9]{0,6}(?:लिंग|लग|लिग|लिं)", text
+            )
+            if m2:
+                val = m2.group(1)
+                if AGE_MIN <= int(val) <= AGE_MAX:
+                    log.debug("Focused age read (attempt 3, right-anchor): %s", val)
+                    return val
+        return ""
+    except Exception as exc:
+        log.debug("Focused age extraction failed: %s", exc)
+        return ""
+
+
+def _read_age_block_digits(crop: Any) -> list[str]:
+    """Return valid digit runs from the already isolated lower age row."""
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return []
+    enlarged = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    enlarged = cv2.copyMakeBorder(enlarged, 20, 20, 20, 20, cv2.BORDER_REPLICATE)
+    try:
+        text = pytesseract.image_to_string(
+            enlarged,
+            config="--oem 3 --psm 6 -l eng -c tessedit_char_whitelist=0123456789",
+        )
+    except Exception as exc:
+        log.debug("Age block digit pass failed: %s", exc)
+        return []
+    return [digits for digits in re.findall(r"\d{2,3}", text) if AGE_MIN <= int(digits) <= AGE_MAX]
+
+
+def _age_value_span(gray: Any) -> Any:
+    """Crop the digits sitting between the age label and the gender label.
+
+    Returns ``None`` when the labels cannot be located, which tells the
+    caller to fall back to reading the whole age/gender band.
+    """
+    enlarged = cv2.resize(gray, None, fx=AGE_SPAN_UPSCALE, fy=AGE_SPAN_UPSCALE,
+                          interpolation=cv2.INTER_CUBIC)
+    data = pytesseract.image_to_data(
+        enlarged, lang=TESSERACT_HINDI_LANG, config=TESSERACT_CONFIG,
+        output_type=pytesseract.Output.DICT,
+    )
+    label = gender = None
+    for i, text in enumerate(data["text"]):
+        word = text.strip()
+        if not word:
+            continue
+        try:
+            confidence = float(data["conf"][i])
+        except (TypeError, ValueError):
+            continue
+        if confidence < 0:
+            continue
+        x, y = data["left"][i], data["top"][i]
+        if label is None and AGE_LABEL_RE.search(word):
+            label = (x, y, x + data["width"][i], y + data["height"][i])
+        elif label is not None and gender is None and GENDER_LABEL_RE.search(word):
+            gender = (x, y, x + data["width"][i], y + data["height"][i])
+    if label is None:
+        return None
+    scale = AGE_SPAN_UPSCALE
+    left, top = label[2] // scale, max(0, label[1] // scale - AGE_SPAN_PAD_PX)
+    right = (gender[0] // scale if gender else gray.shape[1])
+    bottom = min(gray.shape[0], label[3] // scale + AGE_SPAN_PAD_PX)
+    if right - left < AGE_MIN_SPAN_PX:
+        return None
+    return gray[top:bottom, left:right]
+
+
+def _read_age_digits(crop: Any, *, allow_block_mode: bool = False) -> str:
+    """Read one cropped age value. Returns "" unless 18..120 is read."""
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return ""
+    if crop.ndim == 3:
+        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    enlarged = cv2.resize(crop, None, fx=AGE_DIGIT_UPSCALE, fy=AGE_DIGIT_UPSCALE,
+                          interpolation=cv2.INTER_CUBIC)
+    # Tesseract needs a margin to place the line box; without it a short
+    # two-digit crop comes back empty rather than short.
+    enlarged = cv2.copyMakeBorder(enlarged, AGE_DIGIT_BORDER_PX, AGE_DIGIT_BORDER_PX,
+                                  AGE_DIGIT_BORDER_PX, AGE_DIGIT_BORDER_PX,
+                                  cv2.BORDER_REPLICATE)
+    configs = AGE_DIGIT_CONFIGS
+    if allow_block_mode:
+        configs = configs + (
+            "--oem 3 --psm 6 -l eng -c tessedit_char_whitelist=0123456789",
+        )
+    for config in configs:
+        try:
+            text = pytesseract.image_to_string(enlarged, config=config)
+        except Exception as exc:
+            log.debug("Age digit pass failed (%s): %s", config, exc)
+            continue
+        for digits in re.findall(r"\d{1,3}", text):
+            if AGE_MIN <= int(digits) <= AGE_MAX:
+                return digits
+    return ""
+
+
+def _read_age_from_lower_band(band: Any) -> str:
+    """Read the lower age/gender row after the tighter readers failed.
+
+    Some cards have an address continuation in the top of GENDER_AGE_REGION.
+    Reading the whole band in PSM 6 can therefore select an address digit.
+    Restrict the block-mode fallback to its lower half, where the printed
+    ``आयु : NN  लिंग : ...`` row sits, and retain the normal voter-age bounds.
+    """
+    if band is None or getattr(band, "size", 0) == 0:
+        return ""
+    # Some cards place the age baseline slightly above the literal midpoint;
+    # 45% retains that baseline while still excluding the address continuation
+    # occupying the top of the band.
+    start = int(band.shape[0] * 0.45)
+    return _read_age_digits(band[start:, :], allow_block_mode=True)
+
+
+def _GENDER_BAND_VARIANTS(gray: Any):
+    """Pre-processed views of the age/gender band, best-yield first.
+
+    Yield was measured over the live blank-gender records rather than assumed:
+    adaptive thresholding was the single most productive pass, the plain
+    upscale next, and sharpening/Otsu/blur mostly repeat what the upscale
+    already got. They are kept because each rescues a different card, but they
+    are tried after the passes that earn their keep most often.
+    """
+    up = cv2.resize(gray, None, fx=GENDER_BAND_UPSCALE, fy=GENDER_BAND_UPSCALE,
+                    interpolation=cv2.INTER_CUBIC)
+    yield cv2.adaptiveThreshold(
+        up, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+        GENDER_BAND_ADAPT_WINDOW, GENDER_BAND_ADAPT_C,
+    )
+    yield up
+    yield cv2.filter2D(up, -1, GENDER_BAND_SHARPEN_KERNEL)
+    _, otsu = cv2.threshold(up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    yield otsu
+    yield cv2.GaussianBlur(up, (3, 3), 0)
+
+
+def _extract_gender_from_clean_card(card_img: Any) -> str:
+    """Read only the age/gender row from an already cleaned card image.
+
+    This is a recovery reader, not a competing full-card parser.  It lets a
+    border or a merged name/relation line fail independently without losing a
+    clear, closed-vocabulary gender value.  It is also intentionally reusable
+    by the one-time repair job for old records.
+
+    Primary pass: full card parse via parse_voter_box_from_ocr_lines.
+    Fallback: upscale the band and do direct substring search for the Hindi
+    gender tokens.  Tesseract sometimes fuses the लिंग label into the value
+    (e.g. ``हिंगैभहिला`` or ``हिगचरुष``), but the distinctive endings survive
+    even in garbled output.
+
+    The fallback tests तृतीय लिंग first: it is the longest value, so on a band
+    where the value is garbled but the लिंग label is still legible, matching
+    on it early avoids reading the trailing लिंग as part of a different word.
+    """
+    try:
+        crop = _crop_card_region(card_img, GENDER_AGE_REGION, "GENDER_AGE")
+        if crop is None or crop.size == 0:
+            return ""
+        ok, encoded = cv2.imencode(".png", crop)
+        if not ok:
+            return ""
+        lines, _ = _extract_text_with_tesseract(encoded.tobytes())
+        value = str(parse_voter_box_from_ocr_lines(lines or []).get("gender") or "")
+        if value:
+            return value
+
+        # Fallback ladder. The band is re-read through progressively stronger
+        # pre-processing until the STRICT vocabulary matches. Accepting a
+        # fuzzy match instead is not an option: every tolerant पुरुष pattern
+        # tried matched real names (शत्रुघन, पुरुषोत्तम, खुरशेद, रूश्मा --
+        # 32 to 82 false positives across the 113,616 names in the database),
+        # because र..ष is a common shape and a wrong gender on a voter record
+        # is worse than a blank one. Improving the image is what works: on a
+        # 25-card sample of blank genders this ladder recovers 11, where the
+        # plain upscale recovered 3, and every recovery is an exact match.
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+        for variant in _GENDER_BAND_VARIANTS(gray):
+            bordered = cv2.copyMakeBorder(variant, 12, 12, 12, 12,
+                                          cv2.BORDER_REPLICATE)
+            for cfg in GENDER_BAND_CONFIGS:
+                try:
+                    text = pytesseract.image_to_string(bordered, config=cfg)
+                except Exception:
+                    continue
+                if not text.strip():
+                    continue
+                # तृतीय लिंग is matched through the same tolerant pattern the
+                # parser uses, so the doubled त in तृत्तीय is still recognised.
+                compact = re.sub(r"[\s:;ः,.|]", "", text)
+                if THIRD_GENDER_RE.search(compact) or "third" in text.lower():
+                    return "तृतीय लिंग"
+                # Exact matches next, then distinctive suffix fallback.
+                if "महिला" in text:
+                    return "महिला"
+                if "पुरुष" in text:
+                    return "पुरुष"
+                # Garbled: label fused into value; distinctive endings survive.
+                if "हिला" in text:
+                    return "महिला"
+                if "रुष" in text:
+                    return "पुरुष"
+        return ""
+    except Exception as exc:
+        log.debug("Focused gender extraction failed: %s", exc)
+        return ""
+
+
+_VOTER_NAME_FIELDS = (
+    "voter_first_name", "voter_middle_name", "voter_sur_name",
+)
+_RELATION_NAME_FIELDS = (
+    "voter_father_name", "voter_husband_name",
+    "voter_mother_name", "voter_other_name",
+)
+
+
+def _merge_missing_name_relation_fields(
+    record: dict[str, Any], recovery: dict[str, Any],
+) -> bool:
+    """Fill only absent voter/relation values from a clearer re-render.
+
+    The fast page-slice image and the direct card image are two renderings of
+    the same source pixels. The direct image is a recovery source only: it
+    never replaces a non-empty value accepted from the fast path.
+    """
+    changed = False
+    if not any(str(record.get(field) or "").strip() for field in _VOTER_NAME_FIELDS):
+        for field in _VOTER_NAME_FIELDS:
+            value = str(recovery.get(field) or "").strip()
+            if value:
+                record[field] = value
+                changed = True
+    if not any(str(record.get(field) or "").strip() for field in _RELATION_NAME_FIELDS):
+        for field in _RELATION_NAME_FIELDS:
+            value = str(recovery.get(field) or "").strip()
+            if value:
+                record[field] = value
+                record["relation_name"] = str(recovery.get("relation_name") or "")
+                changed = True
+                break
+    return changed
+
+
+# Printed house placeholders. The display layer already turns these stored
+# glyphs into "Not provided in roll". A blank stays a blank, so a missed
+# read is not presented as a printed dash.
+_HOUSE_NOT_PROVIDED_VALUE = "-"
+_HOUSE_PLACEHOLDER_GLYPHS = frozenset({"-", "—", "–", "«", ","})
+
+# Direct-card fallback counters. The fast path does not touch these; they
+# move only when a house or an age was still empty after the slice readers.
+_RECOVERY_STATS = {
+    "house_invocations": 0,
+    "age_invocations": 0,
+    "house_recovered": 0,
+    "house_placeholder": 0,
+    "house_unresolved": 0,
+    "house_false_digit_blocked": 0,
+    "age_recovered": 0,
+    "age_unresolved": 0,
+    "age_disagreements": 0,
+}
+_HOUSE_RECOVERY_LOCKS = frozenset({
+    "direct_card_consensus",
+    "source_placeholder_detected",
+    "unresolved_after_direct_card",
+    "english_line_consensus",
+})
+_AGE_RECOVERY_LOCKS = frozenset({
+    "direct_card_consensus",
+    "unresolved_after_direct_card",
+})
+
+
+def recovery_stats_reset() -> None:
+    for key in _RECOVERY_STATS:
+        _RECOVERY_STATS[key] = 0
+
+
+def recovery_stats_snapshot() -> dict[str, int]:
+    return dict(_RECOVERY_STATS)
+
+
+def _direct_field_recovery_enabled() -> bool:
+    return os.getenv("HOUSE_AGE_DIRECT_RECOVERY", "on") != "off"
+
+
+def _house_recovery_locked(record: dict[str, Any]) -> bool:
+    source = (record.get("_field_sources") or {}).get("house_number", "")
+    return source in _HOUSE_RECOVERY_LOCKS
+
+
+def _age_recovery_locked(record: dict[str, Any]) -> bool:
+    if _valid_stored_age(record.get("age")):
+        return True
+    source = (record.get("_field_sources") or {}).get("age", "")
+    return source in _AGE_RECOVERY_LOCKS
+
+
+def _valid_stored_age(value: Any) -> bool:
+    text = str(value or "").strip()
+    return text.isdigit() and AGE_MIN <= int(text) <= AGE_MAX
+
+
+def _same_house_token(left: str, right: str) -> bool:
+    return re.sub(r"\s+", "", left) == re.sub(r"\s+", "", right)
+
+
+def _house_token_from_ocr_text(text: str) -> str:
+    """One house candidate from a single OCR string, or empty.
+
+    A printed dash, and a string that is only punctuation, are not
+    candidates. A lone digit is returned so the arbiter can reject it;
+    it is never treated as corroborated by itself.
+    """
+    raw = re.sub(r"\s+", " ", (text or "")).strip()
+    if not raw or raw in _HOUSE_PLACEHOLDER_GLYPHS:
+        return ""
+    if re.fullmatch(r"[-—–«.,:;/|\s]+", raw):
+        return ""
+    if re.search(rf"[{_DEV_LETTER}]", raw) and not re.search(r"\d", raw):
+        cleaned = raw.strip(" :ः;,.|-—–")
+        if _devanagari_consonants(cleaned) >= 2:
+            return cleaned
+        return ""
+    slash = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", raw)
+    if slash:
+        return f"{slash.group(1)}/{slash.group(2)}"
+    runs = re.findall(r"\d+", raw)
+    if not runs:
+        return ""
+    return max(runs, key=len)
+
+
+def _house_is_symbol_soup(value: str) -> bool:
+    """True when a house value is symbol noise rather than a printed address.
+
+    Hindi OCR turns an English locality into brackets and digits
+    (``KHASRA NUMBER`` becomes ``1(1+578182``). A real Hindi address and a
+    plain number are not soup. ``23(डी)`` stays, because the Devanagari is
+    the value.
+    """
+    text = str(value or "").strip()
+    if not text or re.search(rf"[{_DEV_LETTER}]", text):
+        return False
+    if re.search(r"[A-Za-z]{3}", text):
+        return False
+    return bool(re.search(r"[()\[\]{}+#%&|॥]", text))
+
+
+def _house_english_tail_needs_reread(raw: Optional[str]) -> bool:
+    """The English house read already saw a word, so the digits-only value is incomplete."""
+    text = str(raw or "")
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1]
+    if re.search(r"[A-Za-z]{4}", text):
+        return True
+    return bool(re.search(r"[A-Za-z]{2}\s+[A-Za-z]{2}", text))
+
+
+def _normalize_english_house_line(text: str) -> str:
+    """Keep the house tail of one English read: letters, digits, slash, hyphen."""
+    raw = str(text or "").replace("\n", " ")
+    if ":" in raw:
+        raw = raw.rsplit(":", 1)[-1]
+    raw = raw.upper()
+    raw = re.sub(r"[^A-Z0-9/,\- ]", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip(" ,-/")
+    return raw
+
+
+def _strip_house_tail_noise(tokens: list[str]) -> list[str]:
+    """Drop a trailing EE or CX. A real token such as KH or the block letter B stays."""
+    noise = {"EE", "CX", "FE", "AE", "OE", "AA", "OO"}
+    cleaned = list(tokens)
+    while cleaned and cleaned[-1] in noise:
+        cleaned.pop()
+    return cleaned
+
+
+def _house_tokens_split_a_digit(tokens: list[str]) -> bool:
+    for index in range(len(tokens) - 1):
+        if re.fullmatch(r"\d", tokens[index]) and re.match(r"\d", tokens[index + 1]):
+            return True
+    return False
+
+
+def _agree_english_house_text(first: str, second: str) -> str:
+    """Return the house line only when two English reads are the same line.
+
+    Trailing letter-noise may differ. ``1 24 KHASRA NUMBER`` and
+    ``124 KHASRA NUMBER`` are the same line. ``KHOLI`` and ``KHOL`` are not,
+    and that case returns nothing rather than a guess. A state name read
+    from the page header is not a house.
+    """
+    left = _strip_house_tail_noise(_normalize_english_house_line(first).split())
+    right = _strip_house_tail_noise(_normalize_english_house_line(second).split())
+    if not left or not right:
+        return ""
+    shared = 0
+    while shared < len(left) and shared < len(right) and left[shared] == right[shared]:
+        shared += 1
+    if shared == len(left) == len(right):
+        chosen = left
+    elif shared and shared == min(len(left), len(right)):
+        longer = left if len(left) > len(right) else right
+        extra = longer[shared:]
+        if extra and all(re.fullmatch(r"[A-Z]{1,3}", token) for token in extra):
+            chosen = longer[:shared]
+        else:
+            chosen = []
+    else:
+        chosen = []
+    if not chosen:
+        folded_left = re.sub(r"[^A-Z0-9]", "", " ".join(left))
+        folded_right = re.sub(r"[^A-Z0-9]", "", " ".join(right))
+        if folded_left and folded_left == folded_right:
+            intact = [tokens for tokens in (left, right) if not _house_tokens_split_a_digit(tokens)]
+            pool = intact or [left, right]
+            chosen = max(pool, key=len)
+    if not chosen:
+        return ""
+    agreed = " ".join(chosen).strip()
+    if re.sub(r"[^A-Z]", "", agreed) == "UTTARPRADESH":
+        return ""
+    return agreed
+
+
+def _agreed_literal_house(card_img: Any) -> str:
+    """Two English reads of the whole house line. Nothing is returned on a split."""
+    crop = _crop_card_region(card_img, (0.12, 0.46, 0.99, 0.64), "HOUSE_ENGLISH")
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return ""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    enlarged = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    reads: list[str] = []
+    for config in ("--oem 3 --psm 7 -l eng", "--oem 3 --psm 6 -l eng"):
+        try:
+            _tess_count("house_english_line")
+            reads.append(pytesseract.image_to_string(enlarged, config=config))
+        except Exception as exc:
+            log.debug("English house line read failed: %s", exc)
+            return ""
+    if len(reads) != 2:
+        return ""
+    return _agree_english_house_text(reads[0], reads[1])
+
+
+def _replace_symbol_soup_house(card_img: Any, record: dict[str, Any], english_raw: Optional[str]) -> None:
+    """Replace a misread English house, or leave it blank. Never keep the soup.
+
+    Runs only when the current value is symbol noise, or the English read
+    already showed a word such as KHASRA. A plain number is left alone.
+    """
+    current = str(record.get("house_no") or "")
+    if re.search(rf"[{_DEV_LETTER}]", current):
+        return
+    if not _house_is_symbol_soup(current) and not _house_english_tail_needs_reread(english_raw):
+        return
+    literal = _agreed_literal_house(card_img)
+    sources = record.setdefault("_field_sources", {})
+    if literal:
+        record["house_no"] = literal
+        sources["house_number"] = "english_line_consensus"
+        return
+    if _house_is_symbol_soup(current):
+        record["house_no"] = ""
+        sources["house_number"] = "unresolved_after_direct_card"
+        _mark_review(record, "house_symbol_soup_unresolved")
+
+
+def _detect_house_not_provided(card_img: Any) -> bool:
+    """True when the house-value crop is an isolated dash, not a digit.
+
+    The crop is the band to the right of ``मकान संख्या``. A printed ``-``
+    is a flat stroke. A digit is taller than it is wide. Specks are
+    ignored, and a crop with no ink at all stays unresolved rather than
+    being called a dash.
+    """
+    # Slightly above and left of the value crop. On some scans the hyphen
+    # sits on the top edge of HOUSE_VALUE_REGION and would otherwise be clipped.
+    crop = _crop_card_region(
+        card_img, (0.18, 0.42, 0.662, 0.60), "HOUSE_PLACEHOLDER",
+    )
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    # The printed hyphen is a short, light stroke just after the label.
+    # A threshold of 170 keeps only its darkest core and the mark disappears.
+    ink = (gray < 210).astype(np.uint8) * 255
+    count, _, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    dashes = 0
+    glyphs = 0
+    for index in range(1, count):
+        x, y, width, height, area = (int(v) for v in stats[index])
+        if area < 5 or y <= 2:
+            continue
+        # A tall body is a digit or a letter. A tall mark glued to the left
+        # edge is the house label bleeding into the value crop, not a value.
+        if height >= 8 and height >= width * 0.45 and x > 2:
+            glyphs += 1
+            continue
+        if 3 <= width <= 22 and 1 <= height <= 6 and width >= height:
+            dashes += 1
+    return dashes >= 1 and glyphs == 0
+
+
+def _arbitrate_house_reads(placeholder: bool, reads: list[str]) -> tuple[str, str]:
+    """Classify direct house reads.
+
+    Returns ``(value_recovered|not_provided_in_roll|unresolved, value)``.
+    A single digit never overrides a detected dash, and a value with only
+    one supporting read is left unresolved.
+    """
+    tokens = [token for token in (_house_token_from_ocr_text(r) for r in reads) if token]
+    strong = [token for token in tokens if not re.fullmatch(r"\d", token)]
+    if placeholder:
+        if len(strong) >= 2 and all(_same_house_token(strong[0], token) for token in strong[1:]):
+            return "value_recovered", strong[0]
+        # A dash crop that OCR turned into 7, or into 7257, is not a house.
+        if tokens:
+            _RECOVERY_STATS["house_false_digit_blocked"] += 1
+        return "not_provided_in_roll", _HOUSE_NOT_PROVIDED_VALUE
+    agreed = [token for token in tokens if sum(_same_house_token(token, other) for other in tokens) >= 2]
+    if agreed:
+        candidate = agreed[0]
+        # The two numeric reads are deliberately different pre-processings,
+        # but they still originate from the same tiny crop.  On a printed
+        # dash both can hallucinate the same one-character digit.  A missing
+        # field is safer than inventing a house number, so exact-card fallback
+        # never creates a one-digit house number.  Existing values from the
+        # normal extractor are untouched; this applies only to recovery.
+        if re.fullmatch(r"\d", candidate):
+            _RECOVERY_STATS["house_false_digit_blocked"] += 1
+            return "unresolved", ""
+        return "value_recovered", candidate
+    return "unresolved", ""
+
+
+def _numeric_house_signals(crop: Any) -> list[str]:
+    """Two independent English reads of one house-value crop."""
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return []
+    scale = max(2, -(-TESSERACT_MIN_HEIGHT_PX // max(1, crop.shape[0])))
+    scaled = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY) if scaled.ndim == 3 else scaled
+    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    signals: list[str] = []
+    try:
+        _tess_count("house_direct_raw")
+        raw = _tess_string(
+            Image.fromarray(gray), lang=TESSERACT_ENGLISH_LANG,
+            config="--oem 3 --psm 7",
+        )
+        token = _house_token_from_ocr_text(raw)
+        if token:
+            signals.append(token)
+    except Exception as exc:
+        log.debug("Direct house raw read failed: %s", exc)
+    try:
+        _tess_count("house_direct_otsu")
+        text = _tess_string(
+            Image.fromarray(otsu), lang=TESSERACT_ENGLISH_LANG,
+            config=TESSERACT_HOUSE_CONFIG,
+        )
+        token = _house_token_from_ocr_text(text)
+        if token:
+            signals.append(token)
+    except Exception as exc:
+        log.debug("Direct house otsu read failed: %s", exc)
+    return signals
+
+
+def _labelled_house_signals(card_img: Any) -> list[str]:
+    """Hindi house text from the label band and the value band, separately."""
+    found: list[str] = []
+    for region, label in (
+        (HOUSE_REGION, "DIRECT_HOUSE"),
+        (HOUSE_VALUE_REGION, "DIRECT_HOUSE_VALUE"),
+    ):
+        crop = _crop_card_region(card_img, region, label)
+        if crop is None or crop.size == 0:
+            continue
+        ok, encoded = cv2.imencode(".png", crop)
+        if not ok:
+            continue
+        lines, _ = _extract_text_with_tesseract(encoded.tobytes())
+        value = _labelled_house_text(lines if isinstance(lines, list) else None)
+        if value:
+            found.append(value)
+    return found
+
+
+def _house_value_segment(text: str) -> str:
+    """The part of one OCR line that follows the house label.
+
+    ``मकान संख्या : 301`` and ``Ha: 61`` both put the value after the last
+    separator that still has a digit. A line with no separator is the value.
+    """
+    raw = str(text or "").replace("\n", " ")
+    segment = ""
+    for part in re.split(r"[:ः=]", raw):
+        if re.search(r"\d", part):
+            segment = part
+    return segment or raw
+
+
+def _house_tail_token(text: str) -> str:
+    """One house from a single line, or empty when the line is not one house.
+
+    ``A 19`` keeps the plot letter. ``301`` and ``95/11`` stay as printed.
+    A leftover ``a.`` after the number is dropped. Two different numbers,
+    a lone digit, and the state name read from the header are not a house.
+    """
+    upper = _house_value_segment(text).upper()
+    folded = re.sub(r"[^A-Z]", "", upper)
+    if "UTTARPRADESH" in folded and not re.search(r"\d", upper):
+        return ""
+    cleaned = re.sub(r"[^A-Z0-9/]", " ", upper)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    tokens = _strip_house_tail_noise(cleaned.split())
+    # Trailing scraps are the leftover of ``a.`` and ``pp ct``, not a plot
+    # letter. A leading ``A`` in ``A 19`` is not trailing, so it stays.
+    while tokens and re.fullmatch(r"[A-Z]{1,2}", tokens[-1]):
+        tokens.pop()
+    tokens = _strip_house_tail_noise(tokens)
+    multi = [token for token in tokens if re.fullmatch(r"\d{2,6}(?:/\d{1,4})?", token)]
+    singles = [token for token in tokens if re.fullmatch(r"\d", token)]
+    # One house number. A following ``0`` or ``7`` is label noise (``151 ee 0``).
+    # Letter scraps (``eee``, ``KHASRA``) do not erase that number; a word line
+    # that two readings share is returned earlier, intact.
+    if len(multi) == 1:
+        number = multi[0]
+    elif not multi and len(singles) == 1:
+        number = singles[0]
+    else:
+        return ""
+    letters = [token for token in tokens if re.fullmatch(r"[A-Z]+", token)]
+    # A real word (``KHASRA``, ``BLOCK``, ``PANCHVATI``) is the address.
+    # Reducing it to the bare number, or to a trailing ``2``, is a different
+    # house. Short scraps (``eee``, ``aga``) are not a word.
+    if any(len(word) >= 4 for word in letters):
+        return ""
+    # ``A 19`` is a plot letter plus the number. ``a eee 2 171`` is not:
+    # the leading ``a`` is label noise beside another word.
+    if letters == [tokens[0]] and len(tokens[0]) == 1 and len(number) >= 2:
+        return f"{tokens[0]} {number}"
+    return number
+
+
+def _agreed_house_tail(card_img: Any) -> str:
+    """The house line when two readings of it are the same house.
+
+    The tight digit crop misses a number that sits on the label. The wider
+    line still has it. Gray and a second binarisation, plus a single-line
+    pass, each vote. One reading, or two different numbers, returns nothing.
+    """
+    crop = _crop_card_region(card_img, (0.12, 0.46, 0.99, 0.64), "HOUSE_ENGLISH")
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return ""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    enlarged = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    _, otsu = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    reads: list[str] = []
+    for image, config in (
+        (enlarged, "--oem 3 --psm 6 -l eng"),
+        (otsu, "--oem 3 --psm 6 -l eng"),
+        (enlarged, "--oem 3 --psm 7 -l eng"),
+    ):
+        try:
+            _tess_count("house_english_tail")
+            reads.append(pytesseract.image_to_string(image, config=config))
+        except Exception as exc:
+            log.debug("House tail read failed: %s", exc)
+            return ""
+    segments = [_house_value_segment(text) for text in reads]
+    for left, right in ((segments[0], segments[1]), (segments[0], segments[2]), (segments[1], segments[2])):
+        agreed = _agree_english_house_text(left, right)
+        if agreed and re.search(r"[A-Za-z]{3}", agreed) and not re.fullmatch(r"\d", agreed):
+            return agreed
+    tokens = [_house_tail_token(text) for text in reads]
+    present = [token for token in tokens if token]
+    if len(present) < 2:
+        return ""
+    counts: dict[str, int] = {}
+    for token in present:
+        counts[token] = counts.get(token, 0) + 1
+    best = max(counts, key=counts.get)
+    # Two readings of the same house are enough. A third reading that
+    # dropped a digit (``821`` read once as ``21``) does not cancel them.
+    # A two-way split (``1646`` against ``1648``) has no such pair.
+    if counts[best] < 2:
+        return ""
+    return best
+
+
+def _numeric_house_blocks(token: str, numeric: list[str]) -> bool:
+    """True when two digit-crop readings agreed on a different house.
+
+    A single reading does not veto the house line, and neither does a lone
+    digit. Disagreeing readings do not veto either: that split is the extra
+    leading ``1`` (``191`` coming back as ``1191``).
+    """
+    distinct = list(dict.fromkeys(item for item in numeric if item))
+    # One digit-crop reading is not a house on its own, so it cannot veto
+    # two readings of the house line. A lone digit cannot veto either:
+    # that crop is the dash the one-digit rule already refuses to store.
+    if len(numeric) < 2 or len(distinct) != 1 or re.fullmatch(r"\d", distinct[0]):
+        return False
+    other = distinct[0]
+    if other == token:
+        return False
+    body = token.split()[-1]
+    if (
+        re.fullmatch(r"\d+", other)
+        and re.fullmatch(r"\d+", body)
+        and other.endswith(body)
+        and 0 < len(other) - len(body) <= 2
+    ):
+        return False
+    return True
+
+
+def _slash_was_read_as_one(stroke: str, scaled: str) -> bool:
+    """True when a printed slash was read as an extra ``1``.
+
+    ``311/9`` comes back from the strokes as ``31119``. The line still has
+    the slash. The stroke digits are that house with one or two extra ones
+    and nothing else changed.
+    """
+    if "/" not in scaled or not re.fullmatch(r"\d+", stroke):
+        return False
+    body = scaled.replace("/", "")
+    if not re.fullmatch(r"\d+", body):
+        return False
+    index = 0
+    extras = 0
+    for char in stroke:
+        if index < len(body) and char == body[index]:
+            index += 1
+        elif char == "1":
+            extras += 1
+        else:
+            return False
+    return index == len(body) and 1 <= extras <= 2
+
+
+def _choose_agreed_house_value(stroke: str, scaled: str, letter: str, has_word: bool) -> str:
+    """Pick one house from a stroke read and a two-scale line read.
+
+    A trailing ``+`` means the last stroke was not a digit. That prefix is
+    kept only when the line is the same digits plus one extra ``0`` (the
+    unread stroke read as zero). A word on the line is an address, and a
+    bare number is not substituted for it.
+    """
+    if has_word:
+        return ""
+    trailing = stroke.endswith("+")
+    body = stroke[:-1] if trailing else stroke
+    if trailing:
+        if body and scaled == body + "0":
+            return f"{body} {letter}".strip() if letter else body
+        return ""
+    if body and scaled and body != scaled:
+        if _slash_was_read_as_one(body, scaled):
+            return scaled
+        return ""
+    if body:
+        return body
+    return scaled or ""
+
+
+def _value_ink_pieces(gray: Any, ink: Any) -> list[tuple[int, int, int, int]]:
+    """Tall strokes in the house-value crop, ignoring the sliced label edge."""
+    count, _, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    height = gray.shape[0]
+    pieces = []
+    for index in range(1, count):
+        x, y, width, glyph_height, area = (int(value) for value in stats[index])
+        # x == 0 is the house label cut by the crop, not the first digit.
+        # A digit that starts a few pixels in (the ``3`` of ``327``) stays.
+        if area < 8 or y <= 1 or x == 0 or glyph_height < height * 0.35:
+            continue
+        pieces.append((x, y, width, glyph_height))
+    return sorted(pieces)
+
+
+def _read_house_piece(gray: Any, x: int, y: int, width: int, glyph_height: int) -> Optional[str]:
+    """One stroke as digits. A thin vertical stroke is a printed ``1``."""
+    if width <= glyph_height * 0.50:
+        return "1"
+    glyph = gray[max(0, y - 2):y + glyph_height + 2, max(0, x - 2):x + width + 2]
+    if glyph.size == 0:
+        return None
+    enlarged = cv2.resize(glyph, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
+    enlarged = cv2.copyMakeBorder(enlarged, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255)
+    found = []
+    for config in (
+        "--oem 3 --psm 10 -l eng -c tessedit_char_whitelist=0123456789",
+        "--oem 3 --psm 8 -l eng -c tessedit_char_whitelist=0123456789",
+    ):
+        try:
+            _tess_count("house_value_piece")
+            text = pytesseract.image_to_string(enlarged, config=config)
+        except Exception as exc:
+            log.debug("House value piece failed: %s", exc)
+            return None
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if digits:
+            found.append(digits)
+    if not found or len(set(found)) != 1:
+        return None
+    piece = found[0]
+    if re.fullmatch(r"\d{1,3}", piece):
+        return piece
+    return None
+
+
+def _stroke_house(gray: Any) -> str:
+    """The house both ink thresholds draw, or empty.
+
+    A trailing ``+`` marks a last stroke that is not a digit. The caller
+    keeps that prefix only when the line read explains the extra stroke.
+    """
+    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fixed = ((gray < 170).astype("uint8")) * 255
+    groups = [_value_ink_pieces(gray, otsu), _value_ink_pieces(gray, fixed)]
+    if not groups[0] or len(groups[0]) != len(groups[1]) or not 1 <= len(groups[0]) <= 7:
+        return ""
+    strings = []
+    trailing_failed = False
+    for pieces in groups:
+        chars: list[str] = []
+        failed = False
+        for index, piece in enumerate(pieces):
+            read = _read_house_piece(gray, *piece)
+            if read is None:
+                if index == len(pieces) - 1 and chars:
+                    failed = True
+                    break
+                return ""
+            chars.append(read)
+        if failed:
+            trailing_failed = True
+        strings.append("".join(chars))
+    if strings[0] != strings[1]:
+        return ""
+    value = strings[0]
+    if trailing_failed:
+        return value + "+"
+    if re.fullmatch(r"\d", value) and value != "1":
+        return ""
+    if re.fullmatch(r"\d{1,6}", value):
+        return value
+    return ""
+
+
+def _scaled_house_token(gray: Any) -> tuple[str, bool]:
+    """The house two enlargements of the value crop share, and whether a word is there."""
+    tokens = []
+    has_word = False
+    for scale in (2, 3):
+        enlarged = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        try:
+            _tess_count("house_value_scale")
+            text = pytesseract.image_to_string(enlarged, config="--oem 3 --psm 7 -l eng")
+        except Exception as exc:
+            log.debug("House value scale failed: %s", exc)
+            return "", False
+        upper = str(text or "").upper()
+        if re.search(r"[A-Z]{4}", upper):
+            has_word = True
+        segment = upper
+        for part in re.split(r"[:ः=]", upper):
+            if re.search(r"\d", part):
+                segment = part
+        if "UTTAR" in re.sub(r"[^A-Z]", "", segment):
+            tokens.append("")
+            continue
+        slashed = re.search(r"[A-Z]\d{1,4}/\d{1,4}|\d{2,6}/\d{1,4}", segment)
+        number = re.search(r"\d{2,6}", segment)
+        tokens.append(slashed.group(0) if slashed else (number.group(0) if number else ""))
+    if tokens[0] and tokens[0] == tokens[1]:
+        return tokens[0], has_word
+    return "", has_word
+
+
+def _hindi_house_letter(gray: Any, digits: str) -> str:
+    """A Devanagari letter printed straight after the house digits, or empty."""
+    enlarged = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    try:
+        _tess_count("house_value_hindi")
+        text = pytesseract.image_to_string(enlarged, config="--oem 3 --psm 7 -l hin+eng")
+    except Exception as exc:
+        log.debug("Hindi house letter failed: %s", exc)
+        return ""
+    match = re.search(rf"{re.escape(digits)}\s*([{_DEV_LETTER}])", text or "")
+    return match.group(1) if match else ""
+
+
+def _house_from_value_agreement(crop: Any) -> str:
+    """A house the value crop's strokes and two line scales can both support.
+
+    Used when the wider house line was noise. A word address is left alone.
+    A stroke the line turned into an extra ``0``, or a slash the strokes
+    turned into ``1``, is kept in the form the other read supports.
+    """
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return ""
+    gray = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    stroke = _stroke_house(gray)
+    scaled, has_word = _scaled_house_token(gray)
+    letter = ""
+    if stroke.endswith("+") and scaled == stroke[:-1] + "0":
+        letter = _hindi_house_letter(gray, stroke[:-1])
+    return _choose_agreed_house_value(stroke, scaled, letter, has_word)
+
+
+def _classify_house_on_card(card_img: Any) -> tuple[str, str]:
+    """Recover a house, recognise a printed dash, or leave the field open."""
+    placeholder = _detect_house_not_provided(card_img)
+    crop = _crop_card_region(card_img, HOUSE_VALUE_REGION, "DIRECT_HOUSE_VALUE")
+    if placeholder:
+        return _arbitrate_house_reads(True, _numeric_house_signals(crop))
+    signals = _numeric_house_signals(crop)
+    kind, value = _arbitrate_house_reads(False, signals)
+    if kind == "value_recovered":
+        return kind, value
+    labelled = _labelled_house_signals(card_img)
+    kind, value = _arbitrate_house_reads(False, labelled)
+    if kind == "value_recovered":
+        return kind, value
+    # The digit crop was empty or split. The house line is used only when
+    # two readings name the same house and the digit crop did not
+    # unanimously name a different one. A lone digit stays unread.
+    tail = _agreed_house_tail(card_img)
+    if tail and not _numeric_house_blocks(tail, signals):
+        return "value_recovered", tail
+    # The line was noise, but the strokes are still there. Read each tall
+    # stroke on its own. Both ink thresholds have to produce the same
+    # number. A slash house the strokes do not agree on stays blank.
+    separated = _house_from_separated_digits(crop)
+    if separated and not _numeric_house_blocks(separated, signals):
+        return "value_recovered", separated
+    # The line was noise. The value crop still has the strokes. Both ink
+    # thresholds, or two enlargements of that crop, have to name one house.
+    agreed = _house_from_value_agreement(crop)
+    if agreed and not _numeric_house_blocks(agreed, signals):
+        return "value_recovered", agreed
+    return kind, value
+
+
+def _house_glyphs(gray: Any, ink: Any) -> str:
+    """Read the tall strokes of one binarisation as a house, or return ""."""
+    count, _, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    height = gray.shape[0]
+    pieces = []
+    for index in range(1, count):
+        x, y, width, glyph_height, area = (int(value) for value in stats[index])
+        if area < 8 or y <= 1:
+            continue
+        tall = glyph_height >= height * 0.35 and glyph_height >= width * 0.4
+        slash = 2 <= glyph_height <= 10 and width >= glyph_height and width <= 18
+        if tall or slash:
+            pieces.append((x, y, width, glyph_height, slash and not tall))
+    if not 2 <= len(pieces) <= 7:
+        return ""
+    configs = (
+        "--oem 3 --psm 10 -l eng -c tessedit_char_whitelist=0123456789/",
+        "--oem 3 --psm 8 -l eng -c tessedit_char_whitelist=0123456789/",
+    )
+    chars = []
+    for x, y, width, glyph_height, is_slash in sorted(pieces):
+        if is_slash:
+            chars.append("/")
+            continue
+        glyph = gray[max(0, y - 2):y + glyph_height + 2, max(0, x - 2):x + width + 2]
+        if glyph.size == 0:
+            return ""
+        enlarged = cv2.resize(glyph, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
+        enlarged = cv2.copyMakeBorder(enlarged, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255)
+        found = []
+        for config in configs:
+            try:
+                _tess_count("house_separated_digit")
+                text = pytesseract.image_to_string(enlarged, config=config)
+            except Exception as exc:
+                log.debug("Separated house digit failed: %s", exc)
+                return ""
+            digits = "".join(ch for ch in text if ch.isdigit() or ch == "/")
+            if len(digits) == 1:
+                found.append(digits)
+        if not found or len(set(found)) != 1:
+            return ""
+        chars.append(found[0])
+    value = "".join(chars).strip("/")
+    if re.fullmatch(r"\d{2,6}", value) or re.fullmatch(r"\d{1,5}/\d{1,4}", value):
+        return value
+    return ""
+
+
+def _house_from_separated_digits(crop: Any) -> str:
+    """The house number when two binarisations read the same strokes.
+
+    A thin digit disappears in a line read (``581`` comes back as ``81``).
+    Splitting the strokes keeps it, but only when both thresholds agree.
+    One digit is not a house here: a dash is one stroke.
+    """
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return ""
+    gray = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fixed = ((gray < 170).astype("uint8")) * 255
+    separated = _house_glyphs(gray, otsu)
+    if separated and separated == _house_glyphs(gray, fixed):
+        return separated
+    return ""
+
+
+def _arbitrate_age_reads(reads: list[str], tight: str = "") -> tuple[str, str]:
+    """Accept one age only when the valid reads agree.
+
+    ``19`` against ``49`` stays unresolved. One lone read stays unresolved
+    unless a separate tight digit crop produced that same age from two
+    preprocessing passes and nothing else contradicts it.
+    """
+    valid = [text for text in (str(item or "").strip() for item in reads) if _valid_stored_age(text)]
+    distinct = set(valid)
+    if len(distinct) > 1:
+        return "unresolved", ""
+    if len(valid) >= 2:
+        return "value_recovered", valid[0]
+    confirmed = str(tight or "").strip()
+    if confirmed and _valid_stored_age(confirmed) and (not distinct or distinct == {confirmed}):
+        return "value_recovered", confirmed
+    return "unresolved", ""
+
+
+def _digits_from_age_ink(gray: Any, ink: Any) -> str:
+    """Join the tall strokes of one binarisation into an age, or return ""."""
+    count, _, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    height = gray.shape[0]
+    pieces = []
+    for index in range(1, count):
+        x, y, width, glyph_height, area = (int(value) for value in stats[index])
+        if glyph_height < height * 0.45 or area < 8:
+            continue
+        pieces.append((x, y, width, glyph_height))
+    if not 2 <= len(pieces) <= 3:
+        return ""
+    configs = (
+        "--oem 3 --psm 10 -l eng -c tessedit_char_whitelist=0123456789",
+        "--oem 3 --psm 8 -l eng -c tessedit_char_whitelist=0123456789",
+    )
+    digits = []
+    for x, y, width, glyph_height in sorted(pieces):
+        crop = gray[max(0, y - 2):y + glyph_height + 2, max(0, x - 2):x + width + 2]
+        if crop.size == 0:
+            return ""
+        enlarged = cv2.resize(crop, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
+        enlarged = cv2.copyMakeBorder(enlarged, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255)
+        found_digits = []
+        for config in configs:
+            try:
+                _tess_count("age_separated_digit")
+                text = pytesseract.image_to_string(enlarged, config=config)
+            except Exception as exc:
+                log.debug("Separated age digit failed: %s", exc)
+                return ""
+            found = "".join(character for character in text if character.isdigit())
+            if len(found) == 1:
+                found_digits.append(found)
+        # Two modes that both see a digit have to see the same one.
+        # ``5`` read as ``3`` by one mode is left unread.
+        if not found_digits or len(set(found_digits)) != 1:
+            return ""
+        digits.append(found_digits[0])
+    age = "".join(digits)
+    return age if _valid_stored_age(age) else ""
+
+
+def _age_from_separated_digits(span: Any) -> str:
+    """Read the age one glyph at a time from the label-bounded span.
+
+    A thin printed ``1`` disappears when the whole span is read as one
+    line, so ``41`` comes back as ``4`` and is then rejected as too small.
+    The span is already the gap between ``आयु`` and ``लिंग``. Two
+    binarisations have to split that gap into the same digits.
+    """
+    if span is None or getattr(span, "size", 0) == 0:
+        return ""
+    gray = span if span.ndim == 2 else cv2.cvtColor(span, cv2.COLOR_BGR2GRAY)
+    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fixed = ((gray < 170).astype("uint8")) * 255
+    separated = _digits_from_age_ink(gray, otsu)
+    if separated and separated == _digits_from_age_ink(gray, fixed):
+        return separated
+    return ""
+
+
+def _tight_age_consensus(card_img: Any) -> str:
+    """Read age only from the value span bounded by ``आयु`` and ``लिंग``.
+
+    The prior connected-component approach was not tied to the printed
+    labels.  On a shifted card it could select digits from a neighbouring
+    field.  No labels means no tight fallback: the normal readers may still
+    provide a consensus, otherwise the age remains unresolved.
+    """
+    band = _crop_card_region(card_img, GENDER_AGE_REGION, "DIRECT_AGE_TIGHT")
+    if band is None or getattr(band, "size", 0) == 0:
+        return ""
+    gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY) if band.ndim == 3 else band
+    span = _age_value_span(gray)
+    if span is None or getattr(span, "size", 0) == 0:
+        return ""
+    _, otsu = cv2.threshold(span, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    adaptive = cv2.adaptiveThreshold(
+        span, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8,
+    )
+    reads = [
+        _read_age_digits(candidate, allow_block_mode=False)
+        for candidate in (span, otsu, adaptive)
+    ]
+    valid = [value for value in reads if _valid_stored_age(value)]
+    # Any contradiction is a reason to leave the age open. Otherwise two
+    # preprocessing paths must independently see the same digits.
+    if len(set(valid)) == 1 and len(valid) >= 2:
+        return valid[0]
+    # The line reader dropped a thin 1. The helper itself requires two
+    # binarisations of this label-bounded span to agree.
+    return _age_from_separated_digits(span)
+
+
+def _collect_age_reads(card_img: Any) -> list[str]:
+    """Independent age reads. None of them is allowed to win by itself."""
+    band = _crop_card_region(card_img, GENDER_AGE_REGION, "DIRECT_AGE")
+    if band is None or getattr(band, "size", 0) == 0:
+        return []
+    gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY) if band.ndim == 3 else band
+    reads: list[str] = []
+    span = _age_value_span(gray)
+    if span is not None and getattr(span, "size", 0):
+        spanned = _read_age_digits(span, allow_block_mode=False)
+        if spanned:
+            reads.append(spanned)
+    lower = _read_age_from_lower_band(band)
+    if lower:
+        reads.append(lower)
+    up = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    up = cv2.copyMakeBorder(up, 10, 10, 10, 10, cv2.BORDER_REPLICATE)
+    try:
+        text = pytesseract.image_to_string(up, config="--oem 3 --psm 6 -l hin")
+    except Exception:
+        text = ""
+    match = re.search(r"(?:आयु|आवु|आय|आग|आगु)[^०-९0-9]{0,6}([0-9]{2,3})", text or "")
+    if match and _valid_stored_age(match.group(1)):
+        reads.append(match.group(1))
+    return reads
+
+
+def _classify_age_on_card(card_img: Any) -> tuple[str, str]:
+    reads = _collect_age_reads(card_img)
+    return _arbitrate_age_reads(reads, _tight_age_consensus(card_img))
+
+
+def _render_exact_card(page: fitz.Page, card_rect: fitz.Rect, dpi: int = 200) -> Any:
+    """Rasterise one card from its PDF rectangle, not from a page slice."""
+    png = page.get_pixmap(dpi=dpi, clip=card_rect, alpha=False).tobytes("png")
+    image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        return None
+    return _remove_outer_card_lines(image)
+
+
+def _recover_missing_house_and_age_from_direct_card(
+    page: fitz.Page, card_rect: fitz.Rect, record: dict[str, Any],
+) -> None:
+    """Fill a missing house or age from the exact card, or leave it blank.
+
+    Runs only when the fast slice left the field empty. An existing value
+    is never replaced. A printed dash is stored as ``-`` so the display
+    layer can say "Not provided in roll". Anything uncertain stays blank.
+    """
+    if not _direct_field_recovery_enabled():
+        return
+    need_house = not str(record.get("house_no") or "").strip()
+    need_age = not _valid_stored_age(record.get("age")) and not str(record.get("age") or "").strip()
+    if not need_house and not need_age:
+        return
+    try:
+        image = _render_exact_card(page, card_rect)
+    except Exception as exc:
+        log.debug("Exact card render failed: %s", exc)
+        return
+    if image is None:
+        return
+    sources = record.setdefault("_field_sources", {})
+    if need_house:
+        _RECOVERY_STATS["house_invocations"] += 1
+        kind, value = _classify_house_on_card(image)
+        if kind == "value_recovered" and value:
+            record["house_no"] = value
+            sources["house_number"] = "direct_card_consensus"
+            _RECOVERY_STATS["house_recovered"] += 1
+        elif kind == "not_provided_in_roll":
+            record["house_no"] = _HOUSE_NOT_PROVIDED_VALUE
+            sources["house_number"] = "source_placeholder_detected"
+            _RECOVERY_STATS["house_placeholder"] += 1
+        else:
+            sources["house_number"] = "unresolved_after_direct_card"
+            _mark_review(record, "house_unresolved_after_direct_card")
+            _RECOVERY_STATS["house_unresolved"] += 1
+    if need_age:
+        _RECOVERY_STATS["age_invocations"] += 1
+        reads = _collect_age_reads(image)
+        tight = _tight_age_consensus(image)
+        kind, value = _arbitrate_age_reads(reads, tight)
+        # A few thin printed 1s are below the reliable resolution at 200 DPI.
+        # Escalate only after the normal, label-bounded exact-card pass has no
+        # consensus. The 300-DPI read remains subject to the same two-read
+        # agreement rule; it is evidence, not a guess.
+        if kind == "unresolved":
+            try:
+                high_res = _render_exact_card(page, card_rect, dpi=300)
+            except Exception as exc:
+                log.debug("High-resolution exact age render failed: %s", exc)
+                high_res = None
+            if high_res is not None:
+                high_reads = _collect_age_reads(high_res)
+                high_tight = _tight_age_consensus(high_res)
+                kind, value = _arbitrate_age_reads(
+                    reads + high_reads, high_tight,
+                )
+        if kind == "value_recovered" and value:
+            record["age"] = value
+            sources["age"] = "direct_card_consensus"
+            _RECOVERY_STATS["age_recovered"] += 1
+        else:
+            sources["age"] = "unresolved_after_direct_card"
+            distinct = {item for item in reads if _valid_stored_age(item)}
+            if _valid_stored_age(tight):
+                distinct.add(tight)
+            reason = (
+                "age_direct_readers_disagree"
+                if len(distinct) > 1
+                else "age_unresolved_after_direct_card"
+            )
+            _mark_review(record, reason)
+            _RECOVERY_STATS["age_unresolved"] += 1
+            if len(distinct) > 1:
+                _RECOVERY_STATS["age_disagreements"] += 1
+
+
+def _recover_missing_name_relation_from_direct_card(
+    page: fitz.Page, card_rect: fitz.Rect, record: dict[str, Any],
+) -> bool:
+    """Read names from an exact PDF-card render only when the fast read missed.
+
+    Full-page rendering is much faster for normal cards, but integer slice
+    boundaries can clip a small number of top name/relation rows. The direct
+    render uses the PDF rectangle itself and is therefore used as a bounded
+    fallback rather than replacing the normal fast path.
+    """
+    needs_voter = not any(
+        str(record.get(field) or "").strip() for field in _VOTER_NAME_FIELDS
+    )
+    needs_relation = not any(
+        str(record.get(field) or "").strip() for field in _RELATION_NAME_FIELDS
+    )
+    if not (needs_voter or needs_relation):
+        return False
+    try:
+        png = page.get_pixmap(dpi=200, clip=card_rect, alpha=False).tobytes("png")
+        image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return False
+        cleaned = _remove_outer_card_lines(image)
+        crop = _crop_card_region(
+            cleaned, TESSERACT_CARD_CONTENT_REGIONS[2], "DIRECT_NAME_RECOVERY"
+        )
+        if crop is None or crop.size == 0:
+            return False
+        ok, encoded = cv2.imencode(".png", crop)
+        if not ok:
+            return False
+        lines, _ = _extract_text_with_tesseract(encoded.tobytes())
+        return _merge_missing_name_relation_fields(
+            record, parse_voter_box_from_ocr_lines(lines or [])
+        )
+    except Exception as exc:
+        log.debug("Direct card name/relation recovery failed: %s", exc)
+        return False
+
 
 def _extract_card(
     page: fitz.Page,
@@ -2372,6 +4749,9 @@ def _extract_card(
             if s_reads and s_reads[0]:
                 sno = s_reads[0]
         _t("serial → sno", sno)
+        # The small box to the right of the serial. Empty on a normal card.
+        serial_mark = _extract_serial_mark(cl)
+        _t("serial mark", serial_mark)
 
         # ── 4. EPIC / Voter ID ───────────────────────────────────────────
         id_card_no = ""
@@ -2414,8 +4794,85 @@ def _extract_card(
             record = _empty_record()
             _t("_empty_record (parse returned empty)", record)
 
+        # Only when relation parsing failed (or a known distorted label was
+        # seen), re-read the original crop and merge a recognised relation.
+        # Existing voter fields are never replaced by this fallback.
+        relation_fields = (
+            "voter_father_name", "voter_husband_name",
+            "voter_mother_name", "voter_other_name",
+        )
+        relation_label_distorted = any("प्रित्ा" in line for line in (hindi_fields_lines or []))
+        if relation_label_distorted or not any(str(record.get(field) or "").strip() for field in relation_fields):
+            raw_hindi_png = _crop_png(card_img, TESSERACT_CARD_CONTENT_REGIONS[2], "RAW_HINDI_FIELDS")
+            if raw_hindi_png:
+                raw_lines, _ = _extract_text_with_tesseract(raw_hindi_png)
+                raw_record = parse_voter_box_from_ocr_lines(raw_lines or [])
+                for field in relation_fields:
+                    value = str(raw_record.get(field) or "").strip()
+                    if value:
+                        record[field] = value
+                        record["relation_name"] = raw_record.get("relation_name", "")
+                        _t("raw relation fallback", {field: value})
+                        break
+
+        # The normal full-page render is retained for speed. A slice boundary
+        # can however clip the top name/relation line on a small minority of
+        # cards. Re-render only those incomplete cards from the exact PDF
+        # rectangle and merge only the missing values.
+        if _recover_missing_name_relation_from_direct_card(page, card_rect, record):
+            _t("direct name/relation recovery", {
+                "voter": " ".join(
+                    str(record.get(field) or "") for field in _VOTER_NAME_FIELDS
+                ).strip(),
+                "relation": next((
+                    str(record.get(field) or "")
+                    for field in _RELATION_NAME_FIELDS if record.get(field)
+                ), ""),
+            })
+
+        # A name printed in Telugu or Kannada is not a blank and not Hindi
+        # garbage. Read that script, then store the same word in Devanagari.
+        # English is derived from that Hindi later. An empty label stays empty.
+        relation_in_hindi = any(
+            re.search(r"[अ-हक़-य़]", str(record.get(field) or ""))
+            for field in relation_fields
+        )
+        if not relation_in_hindi:
+            for field in relation_fields:
+                record[field] = ""
+            kind, hindi_name = _read_foreign_relation(cl)
+            field = _FOREIGN_RELATION_FIELD.get(kind)
+            if field and hindi_name:
+                record["relation_name"] = kind
+                record[field] = hindi_name
+                record.setdefault("_field_sources", {})["relative_name"] = (
+                    "foreign_script_as_hindi"
+                )
+                _t("foreign relation as Hindi", {field: hindi_name})
+
+        # The full Hindi block can lose the final age/gender row where a card
+        # border crosses it.  Re-read that one bounded row only when gender
+        # is missing; this avoids changing good card output while recovering
+        # the closed male/female value from a clearer crop.
+        if not record.get("gender"):
+            focused_gender = _extract_gender_from_clean_card(cl)
+            if focused_gender:
+                record["gender"] = focused_gender
+                _t("focused gender fallback", record["gender"])
+
+        # Same story for age: a Devanagari two-digit value arrives as one
+        # digit and is dropped by the 18..120 floor, so recover it from the
+        # label-bounded span when -- and only when -- age is missing.
+        if not record.get("age"):
+            focused_age = _extract_age_from_clean_card(cl)
+            if focused_age:
+                record["age"] = focused_age
+                _t("focused age fallback", record["age"])
+
         if sno:
             record["sno"] = sno
+        if serial_mark:
+            record["serial_mark"] = serial_mark
         if id_card_no:
             record["id_card_no"] = id_card_no
 
@@ -2457,9 +4914,8 @@ def _extract_card(
             if hv_png:
                 hv_lines, _ = _extract_text_with_tesseract(hv_png)
                 _t("_extract_text_with_tesseract (HOUSE_VAL region)", hv_lines)
-                e_digit = _extract_house_number_with_tesseract(hv_png)
+                e_digit, e_raw = _extract_house_number_with_tesseract_both(hv_png)
                 _t("_extract_house_number_with_tesseract (digits)", e_digit)
-                e_raw = _extract_house_number_with_tesseract(hv_png, raw=True)
                 _t("_extract_house_number_with_tesseract (raw)", e_raw)
                 # PaddleOCR for house deferred to main thread (not thread-safe)
             # If HV returned nothing, try PaddleOCR on the wider HOUSE crop,
@@ -2529,8 +4985,26 @@ def _extract_card(
                 record["house_no"] = e_digit
             elif parser_house:
                 record["house_no"] = parser_house
+            else:
+                # A clear, explicitly labelled Devanagari house value (for
+                # example "मकान संख्या : विष्णु") is not a malformed numeric
+                # house number.  Preserve it rather than converting it into a
+                # false blank merely because the numeric arbitration has no
+                # digit run to combine.
+                labelled_text = _labelled_house_text(h_lines_only)
+                if not labelled_text:
+                    labelled_text = _labelled_house_text(hv_lines_only)
+                if labelled_text:
+                    record["house_no"] = labelled_text
+                    _t("house_no (labelled Hindi text recovery)", labelled_text)
+            _replace_symbol_soup_house(cl, record, e_raw)
         except Exception as exc:
             log.debug("House number extraction failed: %s", exc)
+
+        # The slice can clip the house or age row. Re-render that card from
+        # its own PDF rectangle only when the field is still empty, and only
+        # keep a value the readers agree on.
+        _recover_missing_house_and_age_from_direct_card(page, card_rect, record)
 
         # Defer ALL PaddleOCR calls to the main thread — not thread-safe even
         # with a lock. Store crops AND current Tesseract values so the
@@ -2821,16 +5295,24 @@ AGE_MIN, AGE_MAX = 18, 120
 # What IS a defect is Devanagari that is neither -- unknown junk. That is the
 # only house shape this flags, and it is why the count is small.
 _HOUSE_FILLER_TOKENS = (
-    "हाऊस", "मकान", "एचएनओ", "एचएनजीओ", "प्लॉट", "ख", "नं", "न॑", "ने॑",
-    "संख्या", "वार्ड", "मोहल्ला", "पता", "गली", "कॉलोनी", "सं", "सं0",
+    "हाऊस", "हाउस", "मकान", "एचएनओ", "एचएनजीओ", "प्लॉट", "प्लाट", "ख", "नं",
+    "न॑", "ने॑", "संख्या", "वार्ड", "मोहल्ला", "पता", "गली", "कॉलोनी", "सं",
+    "सं0", "ब्लॉक", "ब्लाक", "फ्लैट", "फ्लेंट", "फ्लोर", "तल", "मंजिल",
 )
 
 # Devanagari code points that ATTACH to a consonant rather than being one:
 # matras, the virama, nukta, and the accents. Excluded from the consonant
 # count, or 'बी' (b + ii-matra) counts as two consonants and every plot letter
 # in the roll reads as a word.
+#
+# Independent vowels (U+0905–U+0914: अ आ इ ई उ ऊ ऋ ॠ ऌ ॡ ए ऐ ओ औ) are also
+# excluded. They appear as vowel carriers in transliterated block/floor letters
+# such as 'एच' (H), 'एफ' (F), 'आर' (R). Counting them as consonants caused
+# those single-letter plot codes to read as two-consonant runs and be flagged
+# as junk. The fix: extend the mark range from ऀ (U+0900) through औ (U+0914)
+# so independent vowels are skipped exactly like matras.
 _DEVA_RUN = re.compile(r"[ऀ-ॿ]+")
-_DEVA_MARK = re.compile(r"[ऀ-ऄऺ-॑ॕॢॣ]")
+_DEVA_MARK = re.compile(r"[ऀ-औऺ-॑ॕॢॣ]")
 
 # Punctuation is replaced by a SPACE, never deleted outright. Deleting it
 # glues two separate plot letters together and the result reads as a word:
@@ -2853,35 +5335,89 @@ def _devanagari_consonants(run: str) -> int:
     return sum(1 for ch in run if not _DEVA_MARK.match(ch))
 
 
+def _legal_devanagari_conjunct(first: str, second: str) -> bool:
+    """A virama the rolls actually print inside a place name.
+
+    प्र, क्ल, पार्क and मुस्तफा are normal. व्द and छ्ल are the broken
+    clusters the review rule was written to catch.
+    """
+    if first in "छझठढणञ":
+        return False
+    if first == "र" or second in "रयलव":
+        return True
+    if first == second:
+        return True
+    if (first, second) in {("क", "ष"), ("ज", "ञ")}:
+        return True
+    if first in "सशष":
+        return True
+    if first in "नमङञ" and second not in "अआइईउऊएऐओऔ":
+        return True
+    return False
+
+
+def _run_is_place_word(run: str) -> bool:
+    """A multi-consonant run that is a Hindi word, not OCR salad.
+
+    अशोक, विहार, नगर and प्रेम are addresses. तर, व्दव, छ्लो and क्रज are
+    the shapes this queue is for. A word needs a vowel, or three consonants
+    and no virama (नगर). A virama has to be one of the conjuncts above.
+    """
+    if "\u094d" in run:
+        chars = list(run)
+        index = 0
+        while index < len(chars):
+            if chars[index] == "\u094d":
+                return False
+            if index + 1 < len(chars) and chars[index + 1] == "\u094d":
+                if index + 2 >= len(chars):
+                    return False
+                if not _legal_devanagari_conjunct(chars[index], chars[index + 2]):
+                    return False
+                # क्ष्मी is two conjuncts sharing ष. Stay on that letter
+                # when it is itself the start of the next one.
+                if index + 3 < len(chars) and chars[index + 3] == "\u094d":
+                    index += 2
+                else:
+                    index += 3
+                continue
+            index += 1
+    has_vowel = re.search(r"[अ-औा-ौॉॅँंः]", run) is not None
+    if has_vowel:
+        return True
+    return "\u094d" not in run and _devanagari_consonants(run) >= 3
+
+
 def _classify_devanagari_house(house: str) -> tuple[str, list[str]]:
     """Split a Devanagari house value into (verdict, leftover runs).
 
     verdict:
       "clean"   only label words remained -- 'हाऊस नं- 453'
-      "plot"    only single-consonant plot letters remained -- 'इ-8/496',
-                '7 बी', 'सी-22', '47-ई-7'. Correct values that must be kept.
-      "unknown" something else remained -- 'व्दव 1141', 'तर 42', 'छ्लो-9'.
-                OCR junk, and the only verdict worth a human's time.
+      "plot"    plot letters or a real Hindi address -- 'इ-8/496',
+                'अशोक विहार', 'प्रेम नगर'. Correct values, kept.
+      "unknown" broken Devanagari -- 'व्दव 1141', 'तर 42', 'छ्लो-9'.
+                That is the only house shape worth a review flag.
 
-    Measured over the 89 Devanagari house values in the 531-record capture:
-    8 clean, 70 plot, 11 unknown. The unknown group contains every confirmed
-    house defect; the plot group is entirely values the user asked to preserve.
-
-    Note the two bugs this function had before it worked, because both fail
-    SILENTLY -- the verdict comes back plausible either way:
-      * `findall(r"[ऀ-ॿ]")` with no `+` yields single CHARACTERS, not runs, so
-        every run looked like one consonant and 'व्दव' classified as 'plot'.
-      * counting the virama as a consonant did the same thing by hand.
+    A locality name has more than one consonant, so the old rule flagged
+    every real address. The broken clusters are still flagged.
     """
     residue = house
     for token in sorted(_HOUSE_FILLER_TOKENS, key=len, reverse=True):
-        if token in residue:
-            residue = residue.replace(token, " ")
+        # Whole token only. A substring replace turns संगम into गम because
+        # the label word सं sits inside it, and गम then looks like junk.
+        residue = re.sub(
+            r"(?<![ऀ-ॿ])" + re.escape(token) + r"(?![ऀ-ॿ])",
+            " ",
+            residue,
+        )
     residue = _DEVA_GLUE.sub(" ", residue)
     runs = _DEVA_RUN.findall(residue)
     if not runs:
         return "clean", []
-    unknown = [r for r in runs if _devanagari_consonants(r) > 1]
+    unknown = [
+        run for run in runs
+        if _devanagari_consonants(run) > 1 and not _run_is_place_word(run)
+    ]
     if unknown:
         return "unknown", unknown
     return "plot", runs
@@ -2951,6 +5487,10 @@ def _public_record(
     roll_metadata: dict[str, str],
 ) -> dict[str, Any]:
     """Convert the internal OCR record to the public API schema."""
+    # Multi-section rolls carry an authoritative page-specific selection from
+    # the cover list.  Single-section and legacy paths continue to use the
+    # request-wide metadata object.
+    effective_roll_metadata = record.get("_roll_metadata") or roll_metadata
     relation_parts: dict[str, str] = {}
     page_number = record.get("_page_number")
     for relation in ("husband", "father", "mother", "other"):
@@ -2975,6 +5515,18 @@ def _public_record(
         record.get("_paddle_conf")
     )
 
+    metadata_review_reasons = [
+        reason for reason in (
+            roll_metadata.get("anubhag_review_reason", ""),
+            roll_metadata.get("state_review_reason", ""),
+        ) if reason
+    ]
+    metadata_review_reason = ",".join(metadata_review_reasons)
+    review_reasons = list(record.get("_review_reasons", []))
+    for reason in metadata_review_reasons:
+        if reason not in review_reasons:
+            review_reasons.append(reason)
+
     return {
         "sno": counter,
         # Page provenance. The consumer keys record identity on (page, row) and
@@ -2985,6 +5537,9 @@ def _public_record(
         "page_number": record.get("_page_number"),
         "card_index": record.get("_card_index"),
         "voter_sr_no": str(record.get("sno", "")),
+        # The second box beside the serial on an addition-list card.
+        # "Not printed" means the card has no such box.
+        "serial_mark": str(record.get("serial_mark") or "Not printed"),
         "id_card_no": record.get("id_card_no", ""),
         "gender": record.get("gender", ""),
         "age": record.get("age", ""),
@@ -2995,14 +5550,27 @@ def _public_record(
         "relation_name": record.get("relation_name", ""),
         **relation_parts,
         "is_deleted": bool(record.get("is_deleted", False)),
-        "state_code": roll_metadata.get("state_code", ""),
-        "ac_code": roll_metadata.get("ac_code", ""),
-        "anubhag_code": roll_metadata.get("anubhag_code", ""),
-        "anubhag_name": roll_metadata.get("anubhag_name", ""),
-        "booth_code": roll_metadata.get("booth_code", ""),
+        "state_code": effective_roll_metadata.get("state_code", ""),
+        "ac_code": effective_roll_metadata.get("ac_code", ""),
+        "anubhag_code": effective_roll_metadata.get("anubhag_code", ""),
+        "anubhag_name": effective_roll_metadata.get("anubhag_name", ""),
+        "ward_code": (
+            effective_roll_metadata.get("ward_code", "")
+            or (
+                ""
+                if effective_roll_metadata.get("roll_format") == "municipal_ward"
+                else "Not on this roll"
+            )
+        ),
+        "roll_format": effective_roll_metadata.get("roll_format", "assembly"),
+        "anubhag_status": effective_roll_metadata.get("anubhag_status", "applicable"),
+        "booth_code": effective_roll_metadata.get("booth_code", ""),
         "pdf_name": pdf_name,
-        "needs_review": bool(record.get("_needs_review", False)),
-        "review_reasons": list(record.get("_review_reasons", [])),
+        # A roll-wide header applies to every card.  If it could not be read
+        # safely, surface that fact on each resulting record instead of
+        # producing silent blanks that look like valid data downstream.
+        "needs_review": bool(record.get("_needs_review", False) or metadata_review_reason),
+        "review_reasons": review_reasons,
         "field_sources": dict(record.get("_field_sources", {})),
         # Confidence: combine Tesseract and PaddleOCR confidences.
         # `confidence` is how much to trust the text that was read;
@@ -3013,46 +5581,386 @@ def _public_record(
         "confidence_coverage": coverage,
     }
 
-def _page_looks_like_voter_grid(page: fitz.Page) -> bool:
-    """Probe representative cards to detect voter grid. Returns True if EPIC found in any probed position."""
-    card_rects = _voter_card_rects(page)
-    probe_indexes = (0, 1, 2, 9, 10, 11, 18, 19, 20, 27, 28, 29)
-    hits = 0
-    for index in probe_indexes:
-        image = getattr(page, "get_pixmap")(
-            dpi=200, clip=card_rects[index], alpha=False).tobytes("png")
-        if _extract_tesseract_epic(image):
-            hits += 1
-            if hits >= 1:
-                return True
-    return False
+# How many of the twelve probed card positions must yield an EPIC-shaped read
+# before a page is accepted as a voter grid.
+#
+# Measured on HIN-565 (33 pages, 300-card roll): a real card page answered
+# 12/12, while the trailing summary page -- no cards on it at all -- answered
+# 2/12, both of them junk ("77T55", "V"). Four sits between the two with room
+# on each side: high enough to reject any page that does not actually print ID
+# numbers in the grid, low enough that a real page survives even when a third
+# of its boxes are blank or discarded slots.
+#
+# The previous test was a single hit, which the junk reads cleared. That is
+# what let the summary page through as a page of thirty nameless, ageless
+# phantom records. Those junk reads do not survive EPIC_SHAPE_RE (3 letters
+# and 7 digits), so a shape-valid hit is a different, stricter event than the
+# one that used to admit the summary page.
+MIN_EPIC_HITS_PER_PAGE = 4
 
-def _extract_state_code(page: fitz.Page) -> str:
-    """Extract two-digit state code from page-1 S24 heading using OCR. Returns empty string on failure."""
-    try:
-        header_height = min(65.0, page.rect.height)
-        header_clip = fitz.Rect(
-            page.rect.x0, page.rect.y0,
-            page.rect.x1, page.rect.y0 + header_height,
-        )
-        image_bytes = getattr(page, "get_pixmap")(
-            dpi=300, clip=header_clip, alpha=False).tobytes("png")
-        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            return ""
-        height, width = image.shape[:2]
-        heading = image[
-            int(height * 0.50):int(height * 0.92),
-            int(width * 0.48):int(width * 0.60),
-        ]
-        heading = cv2.resize(heading, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(heading, cv2.COLOR_BGR2GRAY)
-        txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config="--oem 3 --psm 7")
-        match = re.search(r"[S$]\s*(\d{2})", txt.upper())
-        return match.group(1) if match else ""
-    except Exception as exc:
-        log.warning("State-code extraction failed: %s", exc)
+# Every third row, all three columns. A full card page hits nearly all of
+# these. A section that ends after a row or two only fills the top of the
+# grid, so this sample sees just the first row.
+_GRID_PROBE_INDEXES = (0, 1, 2, 9, 10, 11, 18, 19, 20, 27, 28, 29)
+
+
+def _probe_card_epic(page: fitz.Page, rect: fitz.Rect) -> bool:
+    _tess_count("grid_probe_cards")
+    image = getattr(page, "get_pixmap")(dpi=200, clip=rect, alpha=False).tobytes("png")
+    return bool(_extract_tesseract_epic(image))
+
+
+def _page_looks_like_voter_grid(page: fitz.Page) -> tuple[bool, int, int]:
+    """Detect a voter-card grid by probing fixed card positions for real EPICs.
+
+    Returns (is_voter_grid, hits, probed). `hits` counts positions that produced
+    an EPIC-shaped read; `probed` is how many positions were examined.
+
+    Two ways to pass, because the sample above skips rows 2 and 3:
+
+    - Four or more hits across the twelve sampled positions. This is the
+      full-page test, and it still rejects the summary page, which scores no
+      shape-valid EPIC.
+    - A run of shape-valid EPICs packed from the first card. A section that
+      ends mid-page prints its last cards there and nowhere else. HIN-447
+      page 28 has six of them (serials 751-756); the old sample only saw the
+      first row, scored 3, and skipped the page, which is the whole of the
+      932-versus-927 gap on that roll. The cover and the summary page have
+      no such run.
+    """
+    card_rects = _voter_card_rects(page)
+    probe_indexes = [i for i in _GRID_PROBE_INDEXES if i < len(card_rects)]
+    if not probe_indexes:
+        return False, 0, 0
+
+    hit_at: dict[int, bool] = {}
+
+    def probe(index: int) -> bool:
+        if index not in hit_at:
+            hit_at[index] = _probe_card_epic(page, card_rects[index])
+        return hit_at[index]
+
+    # The top row decides the short-page case on its own, and a full page
+    # passes here too, so the common path probes three cards instead of twelve.
+    for index in (0, 1, 2):
+        if index >= len(card_rects):
+            break
+        probe(index)
+    if all(hit_at.get(index) for index in (0, 1, 2)) and 2 < len(card_rects):
+        return True, 3, 3
+
+    for index in probe_indexes:
+        probe(index)
+    hits = sum(hit_at.values())
+    if hits >= MIN_EPIC_HITS_PER_PAGE:
+        return True, hits, len(hit_at)
+
+    leading = 0
+    for index in (0, 1, 2):
+        if not hit_at.get(index):
+            break
+        leading += 1
+    if leading:
+        return True, leading, len(hit_at)
+    return False, hits, len(hit_at)
+
+# The same official catalogue ocr_text_pdf_api.py resolves state names
+# against. Fetched lazily and cached, so a roll costs no external request
+# while an ECI outage degrades to the printed token alone, never to a guess.
+_ECI_STATES_URL = os.getenv(
+    "ECI_STATES_URL", "https://gateway-voters.eci.gov.in/api/v1/common/states/")
+_ECI_STATES_TIMEOUT_SECONDS = float(os.getenv("ECI_STATES_TIMEOUT_SECONDS", "5"))
+_ECI_STATES_CACHE_SECONDS = int(os.getenv("ECI_STATES_CACHE_SECONDS", "86400"))
+_ECI_STATES_FAILURE_CACHE_SECONDS = int(
+    os.getenv("ECI_STATES_FAILURE_CACHE_SECONDS", "300"))
+_ECI_STATES_LOCK = threading.Lock()
+_ECI_STATES_CACHE: tuple[float, tuple[dict[str, str], ...], str] | None = None
+
+# 300 DPI, not higher. At 1200 DPI the 4x-upscaled crop is so large that
+# Tesseract's single-line mode returns nothing for every roll, and the code
+# was stored blank on all of them.
+_STATE_TOKEN_DPI = 300
+
+
+def _active_eci_states() -> tuple[tuple[dict[str, str], ...], str]:
+    """Return ECI's active state/UT catalogue, or an explicit failure reason.
+
+    Each entry keeps the full ``S24``/``U05`` code as ``state_cd`` and its
+    numeric part as ``code``, which is the shape the public field has always
+    carried.
+    """
+    global _ECI_STATES_CACHE
+    now = time.monotonic()
+    with _ECI_STATES_LOCK:
+        if _ECI_STATES_CACHE is not None and now < _ECI_STATES_CACHE[0]:
+            return _ECI_STATES_CACHE[1], _ECI_STATES_CACHE[2]
+
+        try:
+            response = httpx.get(_ECI_STATES_URL, timeout=_ECI_STATES_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError("ECI states response is not a list")
+
+            states: list[dict[str, str]] = []
+            for item in payload:
+                # The endpoint stopped sending isActive at all, so requiring
+                # "Y" discarded every state. Only an explicit "N" excludes one.
+                if not isinstance(item, dict) or item.get("isActive") == "N":
+                    continue
+                state_cd = str(item.get("stateCd") or "").strip().upper()
+                if not re.fullmatch(r"[SU]\d{2}", state_cd):
+                    continue
+                english = unicodedata.normalize("NFC", str(item.get("stateName") or "")).strip()
+                hindi = unicodedata.normalize("NFC", str(item.get("stateNameHindi") or "")).strip()
+                if not english and not hindi:
+                    continue
+                states.append({
+                    "state_cd": state_cd,
+                    "code": state_cd[1:],
+                    "english": english,
+                    "hindi": hindi,
+                })
+            if not states:
+                raise ValueError("ECI states response has no active states")
+        except Exception as exc:
+            reason = f"state_catalogue_unavailable:{type(exc).__name__}"
+            log.warning("Could not load official ECI state catalogue: %s", exc)
+            _ECI_STATES_CACHE = (
+                now + _ECI_STATES_FAILURE_CACHE_SECONDS, tuple(), reason)
+            return tuple(), reason
+
+        _ECI_STATES_CACHE = (now + _ECI_STATES_CACHE_SECONDS, tuple(states), "")
+        return _ECI_STATES_CACHE[1], ""
+
+
+def _state_from_text(text: str, states: tuple[dict[str, str], ...]) -> dict[str, str] | None:
+    """Return exactly one state whose official ECI name appears in `text`.
+
+    Exact matching, not fuzzy: a wrong state propagates to every voter in
+    the roll, so two candidate names is no answer rather than a pick.
+    """
+    folded = unicodedata.normalize("NFC", text or "").casefold()
+    matches: list[dict[str, str]] = []
+    for state in states:
+        for name in (state["english"], state["hindi"]):
+            if name and name.casefold() in folded:
+                matches.append(state)
+                break
+    unique = {match["state_cd"]: match for match in matches}
+    return next(iter(unique.values())) if len(unique) == 1 else None
+
+
+def _cover_header_clip(page: fitz.Page) -> fitz.Rect:
+    return fitz.Rect(
+        page.rect.x0, page.rect.y0,
+        page.rect.x1, page.rect.y0 + min(65.0, page.rect.height),
+    )
+
+
+def _read_state_token(page: fitz.Page) -> str:
+    """Read the printed ``S24``-style token from the page-1 heading, or ''."""
+    image_bytes = getattr(page, "get_pixmap")(
+        dpi=_STATE_TOKEN_DPI, clip=_cover_header_clip(page), alpha=False).tobytes("png")
+    image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
         return ""
+    height, width = image.shape[:2]
+    heading = image[
+        int(height * 0.50):int(height * 0.92),
+        int(width * 0.48):int(width * 0.60),
+    ]
+    heading = cv2.resize(heading, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(heading, cv2.COLOR_BGR2GRAY)
+    _tess_count("header_state_code")
+    txt = _tess_string(Image.fromarray(gray), lang="eng", config="--oem 3 --psm 7")
+    # Tesseract renders the S as '$' about as often as it gets it right.
+    match = re.search(r"([S$U])\s*(\d{2})", txt.upper())
+    if not match:
+        return ""
+    return ("S" if match.group(1) == "$" else match.group(1)) + match.group(2)
+
+
+def _read_cover_state_name_text(page: fitz.Page) -> str:
+    """OCR the page-1 heading in Hindi, where the state is printed by name."""
+    image_bytes = getattr(page, "get_pixmap")(
+        dpi=_STATE_TOKEN_DPI, clip=_cover_header_clip(page), alpha=False).tobytes("png")
+    lines, _confidence = _extract_text_with_tesseract(image_bytes)
+    return "\n".join(lines or [])
+
+
+def _extract_state_code(page: fitz.Page) -> tuple[str, str, str, str]:
+    """Resolve the roll's state from page 1.
+
+    Returns ``(state_code, state_name, source, review_reason)``. The printed
+    token is the primary read, accepted only when it is a real ECI code. The
+    Hindi state name beside it is read only when the token is not usable,
+    because that read costs a full-width Tesseract pass on every unit.
+    """
+    try:
+        token = _read_state_token(page)
+    except Exception as exc:
+        log.warning("State-code token read failed: %s", exc)
+        token = ""
+
+    states, catalogue_reason = _active_eci_states()
+    if not states:
+        if token:
+            return token[1:], "", "printed_token_unverified", ""
+        return "", "", "", catalogue_reason or "state_code_unreadable"
+
+    token_state = {state["state_cd"]: state for state in states}.get(token)
+    if token_state:
+        return token_state["code"], token_state["english"], "printed_token", ""
+
+    try:
+        name_state = _state_from_text(_read_cover_state_name_text(page), states)
+    except Exception as exc:
+        log.warning("State-name read failed: %s", exc)
+        name_state = None
+    if name_state:
+        return name_state["code"], name_state["english"], "cover_name_eci", ""
+    if token:
+        return "", "", "", "state_token_not_in_eci_catalogue"
+    return "", "", "", "state_code_unreadable"
+
+
+def _split_anubhag_label(text: str) -> str:
+    """Drop the printed label, returning only what follows it.
+
+    The header reads ``अनुभाग संख्या और नाम : <number>-<locality>``, and
+    Tesseract renders that colon as ';' about as often as ':'. Splitting only
+    on ':' left the digits behind the label on every ';' line, so no match in
+    `_anubhag_code_from_header_text` could fire.
+
+    Both separators are honoured, earliest occurrence wins -- so a line
+    containing both splits exactly where it did under ':'-only. A line with
+    neither is returned unchanged, which is what an already-bare value needs.
+    """
+    label_end = min(
+        (i for i in (text.find(":"), text.find(";")) if i != -1),
+        default=-1,
+    )
+    return text[label_end + 1:] if label_end != -1 else text
+
+
+def _anubhag_code_from_header_text(text: str) -> str:
+    """Read the leading section number from the scanned roll's header text.
+
+    The field is printed as ``<number>-<locality>``. Tesseract reads the
+    narrow leading ``1`` as a danda, ``है`` or ``!`` on some rolls, so those
+    variants are accepted only in this leading-number position.
+
+    Two readings this accounts for, both captured verbatim from the 2026 SIR
+    rolls:
+
+    * ``।-प्रगति विहार`` (HIN-45) -- U+0964 single danda. The alias class
+      previously listed U+0965 double danda only, so this reading parsed to ""
+      while the visually identical ``॥-सरस्वती`` (HIN-403) parsed to "1".
+    * ``अनुभाग संख्या और नाम; 4-गढी`` (HIN-116) -- the label's ";" where a
+      ":" was expected. Splitting only on ":" left the digits behind the label,
+      so no match could fire.
+
+    Neither widening invents a value: the match stays anchored to the start of
+    the string, and still requires the ``<number>-<locality>`` shape. A header
+    that prints no digit (HIN-128) parses to "" from both.
+    """
+    normalized = text.translate(str.maketrans("०१२३४५६७८९", "0123456789"))
+    match = re.match(r"\s*(\d+)\s*[-–—]", normalized)
+    if match:
+        return match.group(1)
+    # A narrow printed ``1`` is also frequently segmented as a bracket.  It
+    # is accepted only before the header's required dash, never elsewhere.
+    if re.match(r"\s*(?:[॥।!|Il\[\]]+|है[!|]*)\s*[-–—]", normalized):
+        return "1"
+    return ""
+
+
+def _clean_anubhag_name_candidate(text: str) -> str:
+    """Accept only a credible locality from the printed section header.
+
+    This runs before metadata is copied to every voter record.  It removes
+    only observed crop-edge artefacts; uncertain or mixed-script reads stay
+    blank rather than becoming a corrupt roll-wide value.
+    """
+    value = _split_anubhag_label(" ".join(str(text or "").split()))
+    value = unicodedata.normalize("NFC", value).translate(
+        str.maketrans("०१२३४५६७८९", "0123456789"))
+    value = re.sub(r"^\s*(?:\d+|[॥।!|Il\[\]]+|है[!|]*)\s*[-–—]\s*", "", value)
+    value = re.sub(r"^\s*[-–—]+\s*", "", value)
+    value = re.split(r"\s*(?:\.{2,}|…|\|)\s*", value, maxsplit=1)[0]
+    value = re.sub(r"\s+[हह]\s*\d+\s*$", "", value)
+    value = re.sub(r"\s+(?:रे|रें|ह|a|A|I|l)\s*$", "", value)
+    # On the cover, a narrow printed terminal ``1`` in a phase suffix is
+    # routinely returned as a danda/bracket: ``कृष्णा विहार फेस ।``.  This
+    # is deliberately *not* a general danda-to-digit rule: it is accepted
+    # only after an explicit phase word, where the punctuation cannot be part
+    # of a locality name and the source convention is a one-digit phase.
+    value = re.sub(
+        r"((?:फेस|फेज़?|फीस))\s*[।॥\[\]]\s*$",
+        r"\1 1",
+        value,
+    )
+    if re.search(r"ः\s*$", value):
+        return ""
+    # The narrow printed trailing ``1`` is frequently read as ``]``.  This
+    # is a section-name suffix (for example ``आजाद एन्कलेव-1``), not a box
+    # rule, and is normalised only in that exact terminal shape.
+    value = re.sub(r"[-–—]\s*\]\s*$", "-1", value)
+    # Other right-edge crop artefacts are not a locality suffix.
+    value = re.sub(r"[-–—]\s*[\]\[।॥!|]+\s*$", "", value)
+    value = re.sub(r"\s+[-–—]+\s*$", "", value)
+    # A clipped OCR line can lose only the closing glyph of a visibly paired
+    # parenthetical locality (``खीमा कालोनी (बेहटा हाजीपुर``).  Restoring the
+    # balancing punctuation changes no words or numbers and is safer than
+    # publishing a malformed locality to every voter row.
+    if value.count("(") == 1 and value.count(")") == 0:
+        value += ")"
+    # Parentheses can be part of the printed locality (for example
+    # ``खीमा कालोनी (बेहटा हाजीपुर)``), not merely decoration around the
+    # whole field.  Do not strip a verified closing parenthesis here.
+    value = re.sub(r"\u094d(?=[\u093e-\u094c])", "", value).strip(" .:;|[]{}<>")
+    if not value or value.endswith(("-", "–", "—", "।", "॥")):
+        return ""
+    if (len(re.findall(r"[\u0900-\u097F]", value)) < 3
+            or re.search(r"[A-Za-z]", value)
+            or not re.match(r"^[\u0900-\u097F]", value)):
+        return ""
+    if re.search(r"\s+\d+\s*$", value) and not re.search(
+        r"(?:नंबर|नं|से|सेक्टर|ब्लॉक|गली|फेस|फेज़?|फीस)\s*\d+\s*$", value):
+        return ""
+    return value
+
+
+def _restore_cover_subdivision_one(hindi_line: str, english_line: str) -> str:
+    """Repair only a cover-list ``-]`` glyph that English independently read as ``-1``.
+
+    A bracket is not generally a digit.  On some cover lists it occurs in the
+    middle of a locality (for example ``रेखा गार्डन-] इलायचीपुर``), so the
+    terminal-suffix rule above intentionally cannot repair it.  The paired
+    English read is a digit-only witness for this exact position; without it
+    we retain the original text and let the conservative candidate cleaner
+    reject it.
+    """
+    if not re.search(r"[-–—]\s*[\[\]](?=\s)", hindi_line):
+        return hindi_line
+    if not re.search(r"[-–—]\s*1(?:\s|$)", english_line):
+        return hindi_line
+    return re.sub(r"([-–—])\s*[\[\]](?=\s)", r"\g<1>1", hindi_line, count=1)
+
+
+def _select_anubhag_name(*reads: str) -> tuple[str, str]:
+    """Require independent image/segmentation reads to choose one name."""
+    candidates = [_clean_anubhag_name_candidate(read) for read in reads]
+    counts = Counter(candidate for candidate in candidates if candidate)
+    if not counts:
+        return "", "anubhag_name_unreadable_from_printed_header"
+    ranked = counts.most_common()
+    name, votes = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0
+    return (name, "") if votes >= 2 and votes > runner_up else (
+        "", "anubhag_name_conflicting_header_reads")
+
 
 def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
     """Extract roll-wide codes (ac, anubhag, booth) and Hindi section name from page 3 header. Returns empty dict on failure."""
@@ -3061,10 +5969,15 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
         "ac_code": "",
         "anubhag_code": "",
         "anubhag_name": "",
+        "anubhag_status": "applicable",
+        "anubhag_review_reason": "",
         "booth_code": "",
     }
     try:
-        header_height = min(40.0, page.rect.height)
+        # Include the full baseline of the second header line.  A 40-point
+        # clip cut descenders on some scans (HIN-138/HIN-265) and made the
+        # otherwise readable labelled line disappear entirely.
+        header_height = min(52.0, page.rect.height)
         header_clip = fitz.Rect(
             page.rect.x0, page.rect.y0,
             page.rect.x1, page.rect.y0 + header_height,
@@ -3085,7 +5998,8 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
 
         def header_number(region: Any) -> str:
             gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-            t = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789").strip()
+            _tess_count("header_number")
+            t = _tess_string(Image.fromarray(gray), lang="eng", config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789").strip()
             if t:
                 return t
             # Tesseract digit-only config misses some crops — try PaddleOCR and
@@ -3106,36 +6020,687 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
 
         ac_code = header_number(crop(0.282, 0.06, 0.363, 0.39))
         booth_code = header_number(crop(0.847, 0.06, 0.984, 0.39))
+        if not ac_code:
+            ac_code = _extract_ac_code_from_header_fallback(page)
 
         anubhag_region = crop(0.016, 0.33, 0.363, 0.68)
-        anubhag_text = pytesseract.image_to_string(
-            Image.fromarray(cv2.cvtColor(anubhag_region, cv2.COLOR_BGR2GRAY)),
-            lang="hin+eng",
-            config="--oem 3 --psm 7",
-        )
-        anubhag_text = re.sub(r"[\u200b-\u200f\u00ad]", "", anubhag_text)
-        anubhag_text = " ".join(anubhag_text.split())
-        if ":" in anubhag_text:
-            anubhag_text = anubhag_text.split(":", 1)[1]
-        # anubhag_code is the leading digit before the first "-" in the text,
-        # e.g. " 1-उत्तरांचल कालोनी..." -> "1". More reliable than a narrow crop.
-        anubhag_code_match = re.match(r"\s*(\d+)\s*-", anubhag_text)
-        anubhag_code = anubhag_code_match.group(1) if anubhag_code_match else ""
-        # Normalize Devanagari digits (०-९ = ०-९) to ASCII
-        anubhag_code = anubhag_code.translate(str.maketrans("०१२३४५६७८९", "0123456789"))
-        anubhag_name = re.sub(r"^[\s|:：;,.\-–—\d०-९]+", "", anubhag_text).strip()
-        anubhag_name = anubhag_name.strip(" .:;|[](){}<>")
+        anubhag_gray = cv2.cvtColor(anubhag_region, cv2.COLOR_BGR2GRAY)
+        # The code crop stays narrow, but a locality name must not be clipped.
+        # The label and ``<section>-`` prefix occupy the far-left header
+        # band.  Giving that noise to the name recogniser made it consume the
+        # first locality word (for example, ``गढ़ी`` became ``778``).  Start
+        # immediately after the structural prefix; code extraction above
+        # remains independent and retains the full narrow crop.
+        anubhag_name_region = crop(0.120, 0.33, 0.500, 0.68, scale=1.8)
+        anubhag_name_gray = cv2.cvtColor(anubhag_name_region, cv2.COLOR_BGR2GRAY)
+
+        def anubhag_line(gray: Any, psm: int) -> str:
+            text = pytesseract.image_to_string(
+                Image.fromarray(gray), lang="hin",
+                config=f"--oem 3 --psm {psm}")
+            text = re.sub(r"[\u200b-\u200f\u00ad]", "", text)
+            return _split_anubhag_label(" ".join(text.split()))
+
+        def anubhag_code_line(gray: Any, psm: int) -> str:
+            # Keep numeric recognition independent from Hindi locality OCR.
+            # The whitelist prevents Hindi label text from contributing a
+            # number; the parser below still requires a leading ``number-``.
+            return pytesseract.image_to_string(
+                Image.fromarray(gray), lang="eng",
+                config=(f"--oem 3 --psm {psm} "
+                        "-c tessedit_char_whitelist=0123456789-[]|!"),
+            ).strip()
+
+        # psm 7 treats the header band as one line and mis-reads the narrow
+        # leading digit on some rolls -- 'jae ea 7' where psm 6 reads
+        # '॥-लक्ष्मी इन्कलेव 7' (HIN-120). psm 6 keeps the same text but a
+        # different block segmentation, so it recovers those. This is the same
+        # shape as `header_number` above, which already retries ac_code and
+        # booth_code; anubhag was the one header field with no second read.
+        #
+        # Only a code that parses is accepted. If neither read yields one the
+        # field stays blank -- a header that prints no digit (HIN-128) must not
+        # be given a value by a fallback.
+        # The broad header crop can blend the leading section glyph with
+        # adjacent text and return values such as ``14``/``113``.  Numeric
+        # metadata therefore comes exclusively from the isolated,
+        # English-only high-resolution glyph reader below.
+        anubhag_text = ""
+        anubhag_code = _extract_anubhag_code_from_header_fallback(page)
+        # Two layout segmentations plus two contrast treatments give us four
+        # independent reads of the exact same printed locality line.
+        _threshold, otsu = cv2.threshold(
+            anubhag_name_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        adaptive = cv2.adaptiveThreshold(
+            anubhag_name_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 9)
+        name_reads = [
+            anubhag_line(gray, psm)
+            for gray in (anubhag_name_gray, otsu, adaptive)
+            # PSM 13 is a raw single-line recogniser.  It is useful for
+            # small printed headers where PSM 6/7 mistakenly treats the
+            # leading locality word as part of the section-number prefix.
+            for psm in (7, 6, 13)
+        ]
+        cleaned_name_reads = [_clean_anubhag_name_candidate(read) for read in name_reads]
+        anubhag_name, anubhag_name_reason = _select_anubhag_name(*name_reads)
 
         return {
             "state_code": "",
             "ac_code": ac_code,
             "anubhag_code": anubhag_code,
             "anubhag_name": anubhag_name,
+            # Internal diagnostic evidence.  The response adapter copies only
+            # declared roll fields, so this never becomes voter data.
+            "anubhag_name_candidates": cleaned_name_reads,
+            "anubhag_name_raw_reads": name_reads,
+            "anubhag_status": "applicable",
+            "anubhag_review_reason": anubhag_name_reason,
             "booth_code": booth_code,
         }
     except Exception as exc:
         log.warning("Roll header metadata extraction failed: %s", exc)
         return empty
+
+
+def _extract_booth_code_from_cover(page: fitz.Page) -> str:
+    """Read the cover's explicitly labelled part number, if it has one.
+
+    Most scanned rolls repeat the metadata strip on page 3, which is why the
+    main header reader uses that page.  Some valid rolls instead print the
+    part number only on the cover: ``भाग संख्या : 8``.  Do not substitute an
+    unlabelled number from the cover; that could be an AC, year, voter total,
+    or polling-station number.  This fallback accepts only the value following
+    the printed Hindi/English part-number label.
+    """
+    try:
+        cover_height = min(130.0, page.rect.height)
+        cover_clip = fitz.Rect(
+            page.rect.x0, page.rect.y0,
+            page.rect.x1, page.rect.y0 + cover_height,
+        )
+        image_bytes = page.get_pixmap(
+            dpi=300, clip=cover_clip, alpha=False).tobytes("png")
+        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return ""
+        text = pytesseract.image_to_string(
+            Image.fromarray(image), lang="hin+eng", config="--oem 3 --psm 6")
+        text = text.translate(str.maketrans("०१२३४५६७८९", "0123456789"))
+        match = re.search(
+            r"(?:भाग\s*संख्या|part\s*(?:number|no\.?))(?:\s*[:：;,.])*\s*(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
+    except Exception as exc:
+        log.warning("Cover booth-code extraction failed: %s", exc)
+        return ""
+
+
+def _extract_anubhag_entries_from_cover(page: fitz.Page) -> dict[str, str]:
+    """Extract the authoritative section-code/name list printed on page 1.
+
+    The cover has a dedicated block headed ``भाग में अनुभागों की संख्या और
+    नाम``.  Unlike the tiny repeated voter-page header, this is the roll's
+    master list and may contain more than one section.  Only numbered lines
+    inside that labelled block are accepted; unrelated cover text can never
+    become section metadata.
+    """
+    try:
+        width, height = page.rect.width, page.rect.height
+        # At 150 DPI the cover's larger print is materially cleaner than an
+        # upscaled 300-DPI read (measured on the review set: एन्कलेव/ओक्सी
+        # remain intact).  Keep the crop inside the left-hand section-list
+        # column so village/ward labels cannot leak into the locality.
+        # A cover can list five or more sections.  The old 0.40 cut ended in
+        # the middle of entries 4/5, so later voter pages could correctly read
+        # their number but had no master-name entry to copy.  0.46 includes
+        # the complete list on the known layouts while the explicit labels
+        # below still prevent village/ward fields underneath from being used.
+        clip = fitz.Rect(0, height * 0.27, width * 0.46, height * 0.46)
+        image_bytes = page.get_pixmap(
+            dpi=150, clip=clip, alpha=False
+        ).tobytes("png")
+        image = cv2.imdecode(
+            np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR
+        )
+        if image is None or image.size == 0:
+            return {}
+        hindi_text = pytesseract.image_to_string(
+            Image.fromarray(image), lang="hin", config="--oem 3 --psm 11"
+        )
+        # The independent English pass owns digits only.  Besides reliably
+        # separating the leading 1/4 shape, it recovers embedded address
+        # ranges such as ``म0न0 114 से 226`` that Hindi OCR reads as ``4``.
+        english_text = pytesseract.image_to_string(
+            Image.fromarray(image), lang="eng", config="--oem 3 --psm 11"
+        )
+        lines = [
+            " ".join(line.split())
+            for line in hindi_text.splitlines()
+            if line.strip()
+        ]
+        label_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if "अनुभाग" in line and "संख्या" in line and "नाम" in line
+            ),
+            None,
+        )
+        if label_index is None:
+            return {}
+
+        entry_line = re.compile(
+            r"\s*(?:\d+|[०-९]+|[॥।!|Il\[\]]+)?\s*[-–—]"
+        )
+        hindi_entry_lines: list[str] = []
+        for line in lines[label_index + 1:]:
+            # A numbered locality is a section entry even when the locality
+            # contains a cover-field word. ``ए ब्लॉक`` was being thrown away
+            # because the bare label ``ब्लॉक`` is also a field on this form,
+            # and the next entry was then saved under the wrong number.
+            if entry_line.match(line):
+                hindi_entry_lines.append(line)
+                continue
+            # The next labelled cover field marks the end of the left-hand
+            # section list.  This also prevents village/ward text from being
+            # interpreted as another entry.
+            if any(label in line for label in (
+                "कस्बा अथवा ग्राम", "वार्ड", "डाकघर", "थाना", "पंचायत",
+                "ब्लॉक", "तहसील", "जिला", "पिन कोड",
+            )):
+                continue
+
+        english_entry_lines = [
+            " ".join(line.split())
+            for line in english_text.splitlines()
+            if re.match(r"\s*\d+\s*(?:[-–—]|\s)", line)
+        ]
+
+        entries: dict[str, str] = {}
+        for index, line in enumerate(hindi_entry_lines):
+            english_line = (
+                english_entry_lines[index]
+                if index < len(english_entry_lines)
+                else ""
+            )
+            english_code_match = re.match(r"\s*(\d+)\s*(?:[-–—]|\s)", english_line)
+            english_code = english_code_match.group(1) if english_code_match else ""
+            hindi_code = _anubhag_code_from_header_text(line)
+            expected_code = str(index + 1)
+            # This cover block is an enumeration, not an arbitrary code list:
+            # it begins at 1 and increments by one.  Validate OCR against that
+            # printed row order.  The first narrow 1 is routinely read as a
+            # dash; later disagreement means a row was missed and is rejected
+            # rather than silently renumbered.  The digit on the Hindi line
+            # wins when it is present.  An English digit from a different row
+            # must not rename section 4 as section 3.
+            if index == 0:
+                code = "1"
+            elif hindi_code:
+                if hindi_code != expected_code:
+                    continue
+                code = hindi_code
+            elif english_code == expected_code:
+                code = expected_code
+            else:
+                continue
+            # Hindi OCR sometimes retains the suffix dash but loses its
+            # narrow digit.  Restore it only when the independent English
+            # rendering sees an explicit terminal ``-<digits>``.
+            english_suffix = re.search(r"[-–—]\s*(\d+)\s*$", english_line)
+            if (english_suffix and len(english_suffix.group(1)) == 1
+                    and re.search(r"[-–—]\s*$", line)):
+                line = line + english_suffix.group(1)
+            line = _restore_cover_subdivision_one(line, english_line)
+            # Some covers print a one-digit locality subdivision with a space
+            # instead of a dash (``जाफराबाद गनौली १``).  Preserve the value in
+            # the API's normal ASCII suffix form; longer address numbers are
+            # deliberately not rewritten by this rule.
+            line = re.sub(r"\s+([०-९\d])\s*$", r"-\1", line)
+            name = _clean_anubhag_name_candidate(line)
+            if name and english_line:
+                english_body = re.sub(
+                    r"^\s*\d+\s*[-–—]\s*", "", english_line
+                )
+                english_numbers = re.findall(r"\d+", english_body)
+                if english_numbers and re.search(r"(?:म0न0|\bसे\b)", name):
+                    matches = list(re.finditer(r"\d+", name))
+                    # Align from the right: Hindi abbreviations such as
+                    # ``म0न0`` legitimately contain zeros which the English
+                    # transliteration may omit, while the trailing address
+                    # range (114, 226) is shared by both reads.
+                    replacements = list(zip(
+                        matches[-len(english_numbers):], english_numbers
+                    ))
+                    for match, replacement in reversed(replacements):
+                        name = name[:match.start()] + replacement + name[match.end():]
+            if not code or not name:
+                continue
+            previous = entries.get(code)
+            if previous and previous != name:
+                # A duplicated code with conflicting text is not safe enough
+                # to copy to every record.  Drop it instead of guessing.
+                entries.pop(code, None)
+                continue
+            entries[code] = name
+        return entries
+    except Exception as exc:
+        log.warning("Cover anubhag-list extraction failed: %s", exc)
+        return {}
+
+
+# The digit run that ends an anubhag code, just before the name's hyphen, as in
+# the '4-' of '4-एकत्ता विहार'.  The leading group is non-digits so the stray
+# digit PaddleOCR renders from the Devanagari label is not swallowed here --
+# the caller arbitrates the run against the cover list instead.
+ANUBHAG_CODE_RUN_RE = re.compile(r"(?:^|\D)(\d{1,3})\s*[-–—]")
+
+
+def _page_prints_section_header(page: fitz.Page) -> bool:
+    """True when the page prints an ``अनुभाग संख्या और नाम`` line at all.
+
+    Separates a supplement page -- which prints the part number and a date
+    range but no section line -- from a page whose section we failed to read.
+    The two failures look identical from the code alone: both leave the code
+    blank, but only one of them is a reading failure worth reviewing.
+    """
+    try:
+        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y0 + min(52.0, page.rect.height))
+        image = cv2.imdecode(np.frombuffer(page.get_pixmap(dpi=150, clip=clip, alpha=False).tobytes("png"), np.uint8), cv2.IMREAD_COLOR)
+        if image is None: return False
+        text = pytesseract.image_to_string(
+            Image.fromarray(image), lang="hin", config="--oem 3 --psm 6",
+        )
+        return "अनुभाग" in text
+    except Exception as exc:
+        log.warning("Section-header presence probe failed: %s", exc)
+        return False
+
+
+def _supplement_list_title(page: fitz.Page) -> str:
+    """The addition-list title printed where a section name would be.
+
+    These pages have no अनुभाग. The header says ``परिवर्धन की सूची 1`` (or
+    2, 3, …). That title is the value to show, rather than a blank section.
+    """
+    try:
+        clip = fitz.Rect(
+            page.rect.x0, page.rect.y0, page.rect.x1,
+            page.rect.y0 + min(70.0, page.rect.height),
+        )
+        image = cv2.imdecode(
+            np.frombuffer(
+                page.get_pixmap(dpi=160, clip=clip, alpha=False).tobytes("png"),
+                np.uint8,
+            ),
+            cv2.IMREAD_COLOR,
+        )
+        if image is None:
+            return ""
+        text = pytesseract.image_to_string(
+            Image.fromarray(image), lang="hin", config="--oem 3 --psm 6",
+        )
+        match = re.search(r"परिवर्धन\s*की\s*सूची\s*(\d+)?", text)
+        if not match:
+            return ""
+        number = match.group(1)
+        return "परिवर्धन की सूची" + (f" {number}" if number else "")
+    except Exception as exc:
+        log.warning("Supplement-title read failed: %s", exc)
+        return ""
+
+
+def _anubhag_digit_runs_via_paddle(page: fitz.Page) -> list[str]:
+    """Return every digit run PaddleOCR reads off the printed section header.
+
+    Paddle is not a replacement for the narrow crop: it is a *line* reader, so
+    a bare digit glyph crop has no text region for it to detect and it returns
+    nothing at all.  Fed the header strip, it reads the ``code-name`` token that
+    follows the label colon reliably -- including the numeral 1, which
+    Tesseract's Hindi model renders as 4.
+
+    Runs are returned unordered and unfiltered; the caller arbitrates them
+    against the cover's own section list, because Paddle sometimes prefixes the
+    run with a stray digit from the Devanagari label (``43-`` for a real 3).
+    """
+    runs: list[str] = []
+    if PaddleOCR is None:
+        return runs
+    try:
+        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y0 + min(52.0, page.rect.height))
+        image = cv2.imdecode(np.frombuffer(page.get_pixmap(dpi=1200, clip=clip, alpha=False).tobytes("png"), np.uint8), cv2.IMREAD_COLOR)
+        if image is None: return runs
+        h = image.shape[0]
+        for y0, y1 in ((.28, .52), (.00, 1.00)):
+            region = image[int(h*y0):int(h*y1), :]
+            try:
+                result = _get_paddle().ocr(region, cls=False)
+            except Exception as exc:
+                log.debug("Paddle anubhag digit read failed: %s", exc)
+                continue
+            for line in (result[0] or []):
+                if not line or len(line) < 2 or not line[1]:
+                    continue
+                match = ANUBHAG_CODE_RUN_RE.search(line[1][0])
+                if match:
+                    runs.append(match.group(1))
+    except Exception as exc:
+        log.warning("Paddle anubhag digit read failed: %s", exc)
+    return runs
+
+
+def _arbitrate_anubhag_digit_runs(runs: list[str], entries: dict[str, str]) -> str:
+    """Let the cover's section list decide which Paddle run is the real code.
+
+    A run is accepted only if it is an actual section number in ``entries``.
+    Paddle prefixes the label's own stray digit to runs whose code is 2 or 3
+    (``43-`` for a real 3), so when the whole run is not a known section, its
+    last digit is tried -- which keeps a genuine two-digit section number
+    intact, because that matches directly and is never truncated.
+    """
+    for run in runs:
+        if run.strip() in entries:
+            return run.strip()
+    for run in runs:
+        if run.strip()[-1:] in entries:
+            return run.strip()[-1:]
+    return ""
+
+
+def _extract_anubhag_code_from_header_fallback(
+    page: fitz.Page, entries: Optional[dict[str, str]] = None,
+) -> str:
+    """Recover a section code from the complete printed header line.
+
+    The original narrow crop is deliberately conservative, but some layouts
+    place ``अनुभाग संख्या और नाम : 1-…`` just below it.  OCR the complete
+    top strip and still require the explicit section label and a verified
+    leading-number form.  This is a fallback for a missed read, never a
+    default section number.
+
+    Without ``entries`` this is the original narrow English-only crop, which
+    is high precision and low recall: it reads a code when it can prove one,
+    and returns blank otherwise.  Callers that hold the cover's section list
+    should pass it, which additionally lets a blank read be recovered.
+    """
+    # The old fallback used a combined Hindi+English pass to find the label
+    # and then trusted the same pass for the digit.  That is precisely the
+    # 1/4 confusion this function must not amplify.  The primary narrow crop
+    # now owns numeric extraction through English-only digit OCR; when that
+    # cannot prove a code, return blank rather than borrowing an unlabelled
+    # number from the rest of the header.
+    try:
+        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y0 + min(52.0, page.rect.height))
+        image = cv2.imdecode(np.frombuffer(page.get_pixmap(dpi=1200, clip=clip, alpha=False).tobytes("png"), np.uint8), cv2.IMREAD_COLOR)
+        if image is not None:
+            h, w = image.shape[:2]
+            candidates: set[str] = set()
+            for x0, x1 in ((.155, .205), (.16, .22), (.16, .24)):
+                glyph = image[int(h*.30):int(h*.50), int(w*x0):int(w*x1)]
+                gray = cv2.cvtColor(glyph, cv2.COLOR_BGR2GRAY)
+                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                binary = cv2.resize(binary, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+                value = pytesseract.image_to_string(
+                    Image.fromarray(binary), lang="eng",
+                    config="--oem 3 --psm 13 -c tessedit_char_whitelist=0123456789",
+                ).strip()
+                # Reject multi-digit output: it is neighbouring-text bleed,
+                # measured as 14/113/174 on the validation batch.
+                if len(value) == 1 and value.isdigit():
+                    candidates.add(value)
+            if len(candidates) == 1:
+                return next(iter(candidates))
+    except Exception as exc:
+        # Fall through rather than return: a failed render must not stop the
+        # cover-arbitrated recovery below, which is an independent reader.
+        log.warning("English anubhag digit fallback failed: %s", exc)
+
+    # The narrow crop could not prove a code.  Only now, and only against the
+    # cover's own list, is a second reader allowed to speak: Tesseract's Hindi
+    # model reads the printed numeral 1 as 4 on this roll, so its digit is
+    # unusable, but PaddleOCR reads the same pixels correctly.  The cover
+    # arbitrates the result, so a wrong read has no section name to match.
+    #
+    # The page must first be shown to print a section line at all.  A
+    # supplement page carries no such line, yet Paddle still finds digit-hyphen
+    # runs elsewhere on it, and the cover happily vouches for a run that was
+    # never a section code.  Without this guard HIN-102 p26 -- a supplement --
+    # was assigned section 3.
+    if entries and _page_prints_section_header(page):
+        recovered = _arbitrate_anubhag_digit_runs(
+            _anubhag_digit_runs_via_paddle(page), entries
+        )
+        if recovered:
+            log.info("Recovered anubhag_code=%s via Paddle + cover arbitration", recovered)
+        return recovered
+    return ""
+
+
+def _resolve_anubhag_code_from_repeated_headers(
+    document: fitz.Document, metadata_page_number: int, initial_code: str,
+) -> tuple[str, str]:
+    """Resolve a scanned-roll section number without inventing one.
+
+    A roll-wide section header is reprinted on every voter-card page.  A
+    single narrow scan can lose its leading digit, so a blank first read is
+    retried on a small, spread-out sample of later card pages.  We accept a
+    recovered value only when at least two independently rendered page headers
+    agree and no page produces a different numeric value.  A repeated OCR
+    mistake must therefore not silently become metadata for an entire PDF.
+
+    The returned reason is deliberately machine-readable.  Callers propagate
+    it to every card as a review reason, rather than leaving an apparently
+    healthy record with missing roll metadata.
+    """
+    if initial_code:
+        return initial_code, ""
+
+    # Page 3 is the normal metadata page.  The offsets sample adjacent and
+    # later voter pages without adding a full-document OCR pass to every PDF.
+    # (Indexes are zero-based; metadata_page_number is one-based.)
+    candidate_indexes = [
+        metadata_page_number - 1,
+        metadata_page_number,
+        metadata_page_number + 1,
+        metadata_page_number + 3,
+        metadata_page_number + 7,
+    ]
+    readings: list[str] = []
+    seen_indexes: set[int] = set()
+    for index in candidate_indexes:
+        if index < 0 or index >= len(document) or index in seen_indexes:
+            continue
+        seen_indexes.add(index)
+        code = _extract_anubhag_code_from_header_fallback(document[index])
+        if code:
+            readings.append(code)
+
+    distinct = set(readings)
+    if len(readings) >= 2 and len(distinct) == 1:
+        code = readings[0]
+        log.info(
+            "Recovered anubhag_code=%s from %d agreeing repeated headers",
+            code, len(readings),
+        )
+        return code, ""
+    if distinct:
+        log.warning(
+            "Anubhag code unresolved: conflicting repeated-header readings %s",
+            sorted(distinct),
+        )
+        return "", "anubhag_code_conflicting_header_reads"
+    log.warning("Anubhag code unresolved: no verified read in repeated headers")
+    return "", "anubhag_code_unreadable_from_printed_header"
+
+
+def _extract_anubhag_name_from_header_fallback(page: fitz.Page) -> str:
+    """Read the complete labelled Hindi header line as a name-only fallback.
+
+    Some scans have a very clear printed ``अनुभाग संख्या और नाम`` line, but
+    their tight locality crop is degraded by a rule or loses its first word.
+    Read a wider, higher-resolution strip and accept only the line explicitly
+    carrying that label.  The parser still removes the leading section number
+    and applies the same strict Hindi cleaner; this cannot source text from a
+    voter card below the header.
+    """
+    try:
+        # Keep this identical to the clean diagnostic/header rendering path.
+        # Upscaling this strip to 600 DPI and cropping it a second time was
+        # measured to turn clear text such as ``अमित विहार-1`` into repeated
+        # garbage (``॥ल्अमितविहारनज``).  At 300 DPI the complete labelled
+        # line is preserved and Tesseract's page segmentation has enough
+        # context to recognise it correctly.
+        header_height = min(40.0, page.rect.height)
+        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1,
+                         page.rect.y0 + header_height)
+        image_bytes = page.get_pixmap(dpi=300, clip=clip, alpha=False).tobytes("png")
+        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return ""
+        # OCR the complete header, not a percentage crop.  Acceptance still
+        # requires the explicit printed label below, so card text cannot be
+        # promoted to roll metadata.
+        text = pytesseract.image_to_string(
+            Image.fromarray(image), lang="hin", config="--oem 3 --psm 6")
+        for line in text.splitlines():
+            if "अनुभाग" not in line or "नाम" not in line:
+                continue
+            return _clean_anubhag_name_candidate(_split_anubhag_label(line))
+        return ""
+    except Exception as exc:
+        log.warning("Header anubhag-name fallback failed: %s", exc)
+        return ""
+
+
+def _resolve_anubhag_name_from_repeated_headers(
+    document: fitz.Document, metadata_page_number: int, initial_name: str,
+) -> tuple[str, str]:
+    """Recover a section name only when repeated printed headers agree.
+
+    The section number and locality are independent fields.  A faint leading
+    digit may be ambiguous while the Hindi locality is plainly legible on
+    every card page.  Previously that ambiguity caused the API to discard a
+    useful name along with the uncertain number, and an older permissive read
+    could leave a corrupt name copied to the entire document.
+
+    A single page still needs the strict intra-image consensus in
+    ``_extract_roll_header_metadata``.  If that leaves the name blank, this
+    fallback accepts a value only where three or more *separate pages* expose
+    exactly one credible candidate and every observed candidate agrees.  The
+    number is intentionally not consulted or inferred here.
+    """
+    if initial_name:
+        suffix = initial_name.rsplit("-", 1)[-1] if "-" in initial_name else ""
+        # OCR bleed such as ``आजाद एन्कलेव-व ब`` or ``...-॥ ब`` is not a
+        # plausible locality suffix.  Let the complete labelled-line reader
+        # retry it instead of treating a merely non-empty string as final.
+        if ((suffix and len(suffix) <= 4 and " " in suffix)
+                or re.search(r"[॥।!|\[\]]", initial_name)):
+            initial_name = ""
+
+    if initial_name:
+        # The tight crop is normally the cleanest spelling, but its right edge
+        # can omit a printed ``-1``/``-2`` suffix.  Enrich it only when the
+        # complete explicitly-labelled line contains the *exact* same base
+        # followed solely by a numeric suffix.  A conflicting OCR spelling
+        # must never replace the tight read.
+        page_index = metadata_page_number - 1
+        if 0 <= page_index < len(document):
+            complete = _extract_anubhag_name_from_header_fallback(
+                document[page_index]
+            )
+            if re.fullmatch(re.escape(initial_name) + r"\s*-\s*\d+", complete):
+                return complete, ""
+        return initial_name, ""
+
+    candidate_indexes = [
+        metadata_page_number - 1,
+        metadata_page_number,
+        metadata_page_number + 1,
+        metadata_page_number + 2,
+        metadata_page_number + 3,
+    ]
+    readings: list[str] = []
+    seen_indexes: set[int] = set()
+    for index in candidate_indexes:
+        if index < 0 or index >= len(document) or index in seen_indexes:
+            continue
+        seen_indexes.add(index)
+        metadata = _extract_roll_header_metadata(document[index])
+        # Once the tight crop failed to establish a name, prefer the explicit
+        # labelled full-header line.  The tight variants can contain a lone
+        # but incomplete word; letting it compete with the labelled read
+        # caused a visibly clear header (for example ``आजाद एन्कलेव``) to be
+        # discarded as a conflict.  The fallback is still constrained to the
+        # printed label and is independently repeated across pages below.
+        recovered = ""
+        if not metadata.get("anubhag_name"):
+            recovered = _extract_anubhag_name_from_header_fallback(document[index])
+        if recovered:
+            page_values = {recovered}
+        else:
+            # Each individual variant has already passed the conservative Hindi
+            # cleaning rule.  A page contributes only when its non-empty variants
+            # agree; this prevents one noisy PSM read from becoming roll metadata.
+            page_values = {
+                value for value in metadata.get("anubhag_name_candidates", []) if value
+            }
+        if len(page_values) == 1:
+            readings.append(next(iter(page_values)))
+
+    distinct = set(readings)
+    if len(readings) >= 3 and len(distinct) == 1:
+        name = readings[0]
+        log.info(
+            "Recovered anubhag_name=%r from %d agreeing repeated headers",
+            name, len(readings),
+        )
+        return name, ""
+    if distinct:
+        log.warning(
+            "Anubhag name unresolved: conflicting repeated-header readings %s",
+            sorted(distinct),
+        )
+        return "", "anubhag_name_conflicting_header_reads"
+    log.warning("Anubhag name unresolved: no verified read in repeated headers")
+    return "", "anubhag_name_unreadable_from_printed_header"
+
+
+def _combine_anubhag_review_reasons(*reasons: str) -> str:
+    """Keep independent number/name warnings rather than overwriting one."""
+    return ";".join(dict.fromkeys(reason for reason in reasons if reason))
+
+
+def _extract_ac_code_from_header_fallback(page: fitz.Page) -> str:
+    """Read an AC number only from its explicitly labelled header line."""
+    try:
+        header_height = min(40.0, page.rect.height)
+        header_clip = fitz.Rect(
+            page.rect.x0, page.rect.y0,
+            page.rect.x1, page.rect.y0 + header_height,
+        )
+        image_bytes = page.get_pixmap(
+            dpi=300, clip=header_clip, alpha=False).tobytes("png")
+        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return ""
+        text = pytesseract.image_to_string(
+            Image.fromarray(image), lang="hin+eng", config="--oem 3 --psm 6")
+        text = text.translate(str.maketrans("०१२३४५६७८९", "0123456789"))
+        # The AC header is printed as "विधानसभा निर्वाचन क्षेत्र : 53-लोनी".
+        # The label is required, so no year, booth, or voter-count number can
+        # become an AC code by accident.
+        match = re.search(
+            r"विधानसभा\s*निर्वाचन\s*क्षेत्र[^:\n;：]*[:;：]\s*(\d+)\s*[-–—]",
+            text,
+        )
+        return match.group(1) if match else ""
+    except Exception as exc:
+        log.warning("Header AC-code fallback failed: %s", exc)
+        return ""
 
 MAX_PDF_BYTES = int(os.getenv("MAX_OCR_PDF_BYTES", str(100 * 1024 * 1024)))
 MAX_BATCH_FILES = int(os.getenv("MAX_OCR_BATCH_FILES", "100"))
@@ -3201,36 +6766,150 @@ def _extract_pdf_ocr_unlocked(
         # the first page so a poller arriving mid-run never sees a count left
         # over from the previous request.
         _progress_reset(pages_total=max(0, last - first + 1))
+        # Same reasoning for the launch counters: reset here so each request
+        # reports its own launches rather than a running total since import.
+        _tess_counters_reset()
+        _tess_shadow_reset()
 
         metadata_page_number = 3 if page_count >= 3 else 1
         metadata_started = time.perf_counter()
-        roll_metadata = _extract_roll_header_metadata(document[metadata_page_number - 1])
-        roll_metadata["state_code"] = _extract_state_code(document[0])
-        print(f"[OCR] header_metadata page={metadata_page_number} elapsed={time.perf_counter() - metadata_started:.2f}s", flush=True)
+        roll_metadata = _cached_roll_metadata(pdf_bytes)
+        if roll_metadata is None:
+            roll_metadata = _extract_roll_header_metadata(document[metadata_page_number - 1])
+            initial_anubhag_reason = roll_metadata.get("anubhag_review_reason", "")
+            (
+                roll_metadata["anubhag_code"],
+                code_review_reason,
+            ) = _resolve_anubhag_code_from_repeated_headers(
+                document, metadata_page_number, roll_metadata["anubhag_code"])
+            (
+                roll_metadata["anubhag_name"],
+                name_review_reason,
+            ) = _resolve_anubhag_name_from_repeated_headers(
+                document, metadata_page_number, roll_metadata["anubhag_name"])
+            roll_metadata["anubhag_review_reason"] = _combine_anubhag_review_reasons(
+                "" if roll_metadata["anubhag_name"] else initial_anubhag_reason,
+                code_review_reason, name_review_reason)
+            if not roll_metadata["booth_code"]:
+                roll_metadata["booth_code"] = _extract_booth_code_from_cover(document[0])
+            (
+                roll_metadata["state_code"],
+                roll_metadata["state_name"],
+                roll_metadata["state_source"],
+                roll_metadata["state_review_reason"],
+            ) = _extract_state_code(document[0])
+            cover_anubhag_entries = _extract_anubhag_entries_from_cover(document[0])
+            if cover_anubhag_entries:
+                roll_metadata["anubhag_entries"] = dict(cover_anubhag_entries)
+                if len(cover_anubhag_entries) == 1:
+                    cover_code, cover_name = next(iter(cover_anubhag_entries.items()))
+                    roll_metadata["anubhag_code"] = cover_code
+                    roll_metadata["anubhag_name"] = cover_name
+                    roll_metadata["anubhag_review_reason"] = ""
+                else:
+                    roll_metadata["anubhag_code"] = ""
+                    roll_metadata["anubhag_name"] = ""
+                    roll_metadata["anubhag_status"] = "per_page"
+                    roll_metadata["anubhag_review_reason"] = ""
+            # A header read is document metadata, not a defect in every voter
+            # card below it.  Make that distinction explicit for consumers of
+            # the API/UI: a blank name with a known section code means the
+            # printed header needs verification, not that thousands of voters
+            # have missing section data.
+            if (roll_metadata.get("anubhag_code")
+                    and not roll_metadata.get("anubhag_name")):
+                roll_metadata["anubhag_status"] = "header_needs_verification"
+            _cache_roll_metadata(pdf_bytes, roll_metadata)
+            cache_state = "miss"
+        else:
+            cache_state = "hit"
+        cover_anubhag_entries = dict(roll_metadata.get("anubhag_entries") or {})
+        print(f"[OCR] header_metadata page={metadata_page_number} cache={cache_state} elapsed={time.perf_counter() - metadata_started:.2f}s", flush=True)
 
         records: list[dict[str, Any]] = []
         processed_pages: list[dict[str, Any]] = []
         skipped_pages: list[dict[str, Any]] = []
         serial_corrections: list[dict[str, Any]] = []
+        # Section number last printed in this part. An addition list does not
+        # print a new one, so later pages keep this value.
+        last_section_code = roll_metadata.get("anubhag_code") or ""
 
         for page_number in range(first, last + 1):
             page = document[page_number - 1]
             probe_started = time.perf_counter()
             _progress_set_phase("probe")
             _progress(f"grid probe on {len(_voter_card_rects(page))} card positions", force=True)
-            looks_like_voter_grid = (
-                _page_looks_like_voter_grid(page)
-                if skip_non_voter_pages else True
-            )
+            if skip_non_voter_pages:
+                looks_like_voter_grid, probe_hits, probe_count = _page_looks_like_voter_grid(page)
+            else:
+                looks_like_voter_grid, probe_hits, probe_count = True, 0, 0
             probe_elapsed = time.perf_counter() - probe_started
-            print(f"[OCR] page={page_number} grid_probe={probe_elapsed:.2f}s voter_grid={looks_like_voter_grid}", flush=True)
+            print(f"[OCR] page={page_number} grid_probe={probe_elapsed:.2f}s voter_grid={looks_like_voter_grid} epic_hits={probe_hits}/{probe_count}", flush=True)
             if not looks_like_voter_grid:
                 _progress(f"page {page_number} SKIPPED (not a voter grid)", force=True)
                 skipped_pages.append({
                     "page_number": page_number,
-                    "reason": "no EPIC found in the expected card grid positions",
+                    "reason": (
+                        f"only {probe_hits} of {probe_count} probed card positions "
+                        f"held an EPIC; {MIN_EPIC_HITS_PER_PAGE} required for a voter grid"
+                    ),
                 })
                 continue
+
+            page_roll_metadata = dict(roll_metadata)
+            if len(cover_anubhag_entries) == 1:
+                cover_code, cover_name = next(iter(cover_anubhag_entries.items()))
+                page_roll_metadata["anubhag_code"] = cover_code
+                page_roll_metadata["anubhag_name"] = cover_name
+                page_roll_metadata["anubhag_review_reason"] = ""
+            elif len(cover_anubhag_entries) > 1:
+                page_code = _extract_anubhag_code_from_header_fallback(
+                    page, cover_anubhag_entries
+                )
+                page_name = cover_anubhag_entries.get(page_code, "")
+                if page_code and not page_name:
+                    # The page printed a section number the cover list did
+                    # not keep. Read the labelled line on this page. Clearing
+                    # the number lets the neighbour fill copy the previous
+                    # section onto this one and leave the name blank.
+                    page_name = _extract_anubhag_name_from_header_fallback(page)
+                page_roll_metadata["anubhag_status"] = "per_page"
+                if page_code and page_name:
+                    page_roll_metadata["anubhag_code"] = page_code
+                    page_roll_metadata["anubhag_name"] = page_name
+                    page_roll_metadata["anubhag_review_reason"] = ""
+                elif page_code:
+                    page_roll_metadata["anubhag_code"] = page_code
+                    page_roll_metadata["anubhag_name"] = ""
+                    page_roll_metadata["anubhag_review_reason"] = (
+                        "anubhag_cover_entry_unmatched_for_page"
+                    )
+                elif _page_prints_section_header(page):
+                    # The page does print ``अनुभाग संख्या और नाम`` but no
+                    # reader could prove which section it is.  A genuine miss.
+                    page_roll_metadata["anubhag_review_reason"] = (
+                        "anubhag_cover_entry_unmatched_for_page"
+                    )
+                else:
+                    # A supplement ('परिवर्धन की सूची') page prints the part
+                    # number and a date range but no section line at all.
+                    # The list title is what belongs in the section column.
+                    title = _supplement_list_title(page)
+                    if title:
+                        page_roll_metadata["anubhag_name"] = title
+                        # The list does not print a new अनुभाग संख्या. Keep
+                        # the number already in force for this part instead
+                        # of clearing it.
+                        page_roll_metadata["anubhag_code"] = last_section_code
+                        page_roll_metadata["anubhag_review_reason"] = ""
+                    else:
+                        page_roll_metadata["anubhag_review_reason"] = (
+                            "supplement_page_no_section_header"
+                        )
+
+            carried_code = page_roll_metadata.get("anubhag_code") or ""
+            if carried_code:
+                last_section_code = carried_code
 
             page_started = time.perf_counter()
             page_records: list[dict[str, Any]] = []
@@ -3294,8 +6973,25 @@ def _extract_pdf_ocr_unlocked(
             _progress(f"starting {len(card_rects)} card threads "
                       f"(workers={worker_count})", force=True)
             if worker_count > 1:
-                with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                    extracted_records = list(executor.map(extract_card_at, indexed_rects))
+                # Reused across pages rather than rebuilt per page, so anything
+                # cached per thread (Tesseract engines, HTTP pools) survives
+                # the page boundary. Safe because _OCR_LOCK admits one
+                # extraction at a time, so the pool can never be oversubscribed
+                # by concurrent requests.
+                executor = _card_pool()
+                # Deliberately NOT shutdown() here. shutdown(wait=True) is what
+                # the old per-page `with` block did, but it is terminal -- a
+                # shut-down executor raises "cannot schedule new futures after
+                # shutdown" on its next map, which would break the second page.
+                # Reuse across pages is the entire point: a warm thread keeps
+                # whatever it has cached (Tesseract engines) instead of paying
+                # the cold-start cost once per page per worker.
+                #
+                # map() returns a lazy iterator, so list() below is what forces
+                # the work to finish. If a card raises, list() re-raises once
+                # the in-flight siblings have drained, matching the old
+                # wait=True behaviour without tearing the pool down.
+                extracted_records = list(executor.map(extract_card_at, indexed_rects))
             else:
                 extracted_records = [extract_card_at(item) for item in indexed_rects]
             _progress(f"all {len(card_rects)} cards extracted", force=True)
@@ -3400,7 +7096,18 @@ def _extract_pdf_ocr_unlocked(
                                 # from the same crop read alone. Re-decide from
                                 # the original crop, escalating to a second
                                 # engine when the Paddle vote is inconclusive.
-                                marked, vote_hits, vote_total = _decide_deleted(ser_img)
+                                # Age is filled later in this same pass, so it
+                                # is often still empty here on a perfectly
+                                # readable card. Treating that as damage forced
+                                # the Tesseract crosscheck, which then marked
+                                # the card deleted on a letter it imagined in
+                                # the serial — HIN-447 serial 817, vote 0/8.
+                                # Only a card with no gender at all is the
+                                # watermark case the crosscheck is for.
+                                marked, vote_hits, vote_total = _decide_deleted(
+                                    ser_img,
+                                    force_crosscheck=not rec.get("gender"),
+                                )
                                 if vote_total:
                                     rec["is_deleted"] = marked
                                     rec.setdefault("_field_sources", {})[
@@ -3417,7 +7124,7 @@ def _extract_pdf_ocr_unlocked(
                                         f"{len(DELETED_VOTE_HEIGHTS_PX) * 2}"
                                     )
 
-                            elif field == "house" and field_texts:
+                            elif field == "house" and field_texts and not _house_recovery_locked(rec):
                                 paddle_house = None
                                 for pt in field_texts:
                                     mf = re.search(r"(\d{1,5})\s*/\s*(\d{1,4})", pt)
@@ -3450,14 +7157,14 @@ def _extract_pdf_ocr_unlocked(
                                             cur_digits = re.sub(
                                                 r"[^\d]", "", cur.split()[0]) if cur else ""
                                             if cur_digits and paddle_house == "1" + cur_digits:
-                                                rec["house_no"] = "1" + cur
+                                                rec["house_no"] = _place_recovered_leading_one(cur)
                                                 # A digit was reconstructed, not
                                                 # read. Flag it so the value a
                                                 # human checks is the one that
                                                 # needs checking.
                                                 rec["_house_leading_1_prepended"] = True
 
-                            elif field == "age" and field_texts:
+                            elif field == "age" and field_texts and not _age_recovery_locked(rec):
                                 paddle_ages = []
                                 for pt in field_texts:
                                     for digits in re.findall(r"\d{1,3}", pt):
@@ -3481,6 +7188,7 @@ def _extract_pdf_ocr_unlocked(
                 if house_val:
                     house_val = re.sub(r"^[।॥|]+(?=\d)", "1", house_val)
                     house_val = re.sub(r"(?<=\d)[।॥|]+(?=\d)", "1", house_val)
+                    house_val = _strip_house_digit_glue(house_val)
                     rec["house_no"] = house_val
 
                 # Store PaddleOCR confidence for this record
@@ -3508,6 +7216,7 @@ def _extract_pdf_ocr_unlocked(
                 _review_record(record)
                 record["_page_number"] = page_number
                 record["_card_index"] = card_index
+                record["_roll_metadata"] = page_roll_metadata
                 page_records.append(record)
 
             records.extend(page_records)
@@ -3577,7 +7286,54 @@ def _extract_pdf_ocr_unlocked(
         "review_reason_counts": dict(sorted(review_reason_counts.items())),
         "elapsed_seconds": round(elapsed, 2),
         "records": public_records,
+        # Instrumentation only. Counts of Tesseract subprocess launches, which
+        # is what actually sets the runtime floor: pytesseract re-deserialises
+        # the model on every call. Additive key -- safe for consumers that
+        # iterate a known field set.
+        "tesseract_calls": _tess_counters_snapshot(),
+        "tesseract_backend": _TESS_BACKEND,
+        # Populated only in shadow mode: the first few reads where tesserocr
+        # disagreed with pytesseract, verbatim, so a mismatch can be diagnosed.
+        "tesseract_shadow_samples": _tess_shadow_snapshot(),
     }
+
+def _maybe_text_layer_extract(
+    pdf_bytes: bytes,
+    filename: str,
+    start_page: Optional[int],
+    end_page: Optional[int],
+    whole_pdf: bool,
+    skip_non_voter_pages: bool,
+) -> dict[str, Any] | None:
+    """Read a born-digital ward roll with the text-layer extractor.
+
+    The card grid below is measured for a scanned assembly roll. A Jaipur
+    Nagar Nigam file has a text layer and a different grid, so running it
+    through that grid returns the wrong cards. The text-layer reader lives
+    beside this module; when it is importable and the PDF is that format,
+    it does the work. A scanned roll, or a text roll it does not recognise,
+    falls through to the grid.
+    """
+    try:
+        import ocr_text_pdf_api as text_api
+    except Exception as exc:
+        log.info("Text-layer reader is not loaded (%s); using the scanned grid", exc)
+        return None
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            kind, _evidence = text_api._detect_pdf_kind(doc)
+    except Exception as exc:
+        # UnsupportedPdf, or a file this reader cannot classify. The scanned
+        # grid remains the fallback rather than failing the request here.
+        log.info("Not a text-layer ward roll (%s): %s", type(exc).__name__, exc)
+        return None
+    if kind != "text":
+        return None
+    log.info("Born-digital ward roll %s: reading it with the text-layer extractor", filename)
+    return text_api.extract_pdf_text(
+        pdf_bytes, filename, start_page, end_page, whole_pdf, skip_non_voter_pages,
+    )
+
 
 def extract_pdf_ocr(
     pdf_bytes: bytes,
@@ -3587,7 +7343,12 @@ def extract_pdf_ocr(
     whole_pdf: bool = False,
     skip_non_voter_pages: bool = True,
 ) -> dict[str, Any]:
-    """Extract OCR from PDF. Calls _extract_pdf_ocr_unlocked directly (no file lock, stateless)."""
+    """Extract OCR from PDF. A text-layer ward roll is read by that extractor; everything else by the scanned grid."""
+    text_result = _maybe_text_layer_extract(
+        pdf_bytes, filename, start_page, end_page, whole_pdf, skip_non_voter_pages,
+    )
+    if text_result is not None:
+        return text_result
     return _extract_pdf_ocr_unlocked(
         pdf_bytes,
         filename,
@@ -3617,6 +7378,9 @@ async def health() -> dict[str, Any]:
         "max_pdf_mb": MAX_PDF_BYTES // (1024 * 1024),
         "paddleocr_available": PaddleOCR is not None,
         "batch_max_files": MAX_BATCH_FILES,
+        # Requested vs effective: a tesserocr request that fell back to
+        # pytesseract (library missing) shows up here as two different values.
+        "tesseract_backend": _tess_backend_info(),
     }
 
 
@@ -3698,6 +7462,42 @@ async def ocr_extract_endpoint(
         log.exception("OCR PDF extraction failed")
         raise HTTPException(500, f"OCR extraction failed: {exc}") from exc
 
+
+
+@app.post("/ocr/cover")
+async def ocr_cover_endpoint(
+    pdf_file: UploadFile = File(..., description="Electoral-roll PDF; only page 1 is read"),
+) -> Response:
+    """Everything the cover page says: header fields and the printed counts.
+
+    Separate from /ocr/extract on purpose. Reading one page takes seconds,
+    card extraction takes hours, and the printed male / female / total counts
+    are what the card results are checked against -- so they must not wait
+    behind that work. This endpoint does not take _OCR_LOCK: it is a single
+    Tesseract pass with no shared engine state.
+    """
+    from ocr_cover import extract_cover
+
+    filename = pdf_file.filename or "document.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(415, "Only PDF files are supported")
+    raw = await pdf_file.read(MAX_PDF_BYTES + 1)
+    if not raw:
+        raise HTTPException(400, "PDF file is empty")
+    if len(raw) > MAX_PDF_BYTES:
+        raise HTTPException(413, f"PDF exceeds the {MAX_PDF_BYTES // (1024 * 1024)} MB limit")
+    try:
+        result = await asyncio.to_thread(extract_cover, raw, filename)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        log.exception("Cover page extraction failed")
+        raise HTTPException(500, f"Cover extraction failed: {exc}") from exc
+    result["filename"] = filename
+    return Response(
+        content=json.dumps(result, ensure_ascii=False) + "\n",
+        media_type="application/json",
+    )
 
 
 if __name__ == "__main__":

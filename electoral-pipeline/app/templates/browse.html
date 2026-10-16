@@ -1,136 +1,1061 @@
 {% extends "base.html" %}
-{% block title %}Database · Electoral Roll Processing{% endblock %}
+{% block title %}Browse Voter Data · Electoral Roll Processing{% endblock %}
 {% block content %}
 
-<div class="mb-6">
-  <h1>Database</h1>
-  <p class="text-gray-600 mt-1">
-    Everything the pipeline has read, table by table. Read-only &mdash; to change
-    anything, go back to the documents and process the PDF again.
-  </p>
-</div>
+<style>
+  /* ══════════════════════════════════════════════════════════════════════════
+     BROWSE PAGE — non-technical UX layer
+     ══════════════════════════════════════════════════════════════════════════ */
 
-<!-- Which table to look at -->
-<div class="panel mb-6">
-  <p class="text-sm font-medium text-gray-700 mb-3">What would you like to see?</p>
-  <div class="flex flex-wrap gap-2">
-    {% for t in tables %}
-      <a href="/browse?table={{ t.name }}{{ '&q=' + query if query }}"
-         class="button {% if t.name != table.name %}secondary{% endif %}">
-        {{ t.label }}
-        <span class="opacity-60 font-normal">{{ counts.get(t.name, 0) }}</span>
+  /* ── One clear workspace: choose a view, then search it ────────────────── */
+  .browse-shell {
+    display: block;
+  }
+
+  /* Sidebar. */
+  .browse-sidebar {
+    position: static;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: .9rem;
+    box-shadow: var(--shadow-panel);
+    overflow: hidden;
+    margin-bottom: 1rem;
+  }
+  .browse-sidebar-head {
+    padding: .75rem 1rem .55rem;
+    font: 600 .6875rem/1.4 var(--sans);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-500);
+    background: var(--ink-50);
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* Table tab. */
+  .table-tab {
+    display: flex;
+    align-items: flex-start;
+    gap: .75rem;
+    padding: 1rem 1.125rem;
+    text-decoration: none;
+    border-left: 4px solid transparent;
+    transition: background-color .12s, color .12s, border-color .12s;
+    position: relative;
+  }
+  .table-tab:hover { background: var(--ink-50); }
+  .table-tab.is-active {
+    background: var(--brand-50);
+    border-left-color: var(--brand-600);
+  }
+  .browse-sidebar-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .table-tab + .table-tab { border-left: 1px solid var(--line); }
+
+  .tab-icon { font-size: 1.0625rem; flex-shrink: 0; margin-top: .0625rem; }
+  .tab-body { min-width: 0; }
+  .tab-name {
+    display: block;
+    font: 700 .9375rem/1.3 var(--sans);
+    color: var(--ink-800);
+    white-space: nowrap;
+  }
+  .table-tab.is-active .tab-name { color: var(--brand-800); }
+  .tab-desc {
+    display: block;
+    font: 400 .8125rem/1.45 var(--sans);
+    color: var(--ink-500);
+    margin-top: .125rem;
+  }
+  .tab-count {
+    margin-left: auto;
+    flex-shrink: 0;
+    font: 700 .75rem/1 var(--mono);
+    color: var(--ink-400);
+    background: var(--ink-100);
+    padding: .1875rem .4375rem;
+    border-radius: 999px;
+    align-self: flex-start;
+    margin-top: .1875rem;
+  }
+  .table-tab.is-active .tab-count { background: var(--brand-100); color: var(--brand-700); }
+
+  /* ── Onboarding tip banner ──────────────────────────────────────────────── */
+  .browse-tip-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: .75rem;
+    padding: .875rem 1.125rem;
+    background: #f8fbff;
+    border: 1px solid #dbeafe;
+    border-radius: .75rem;
+    margin-bottom: 1rem;
+    font: 400 .875rem/1.55 var(--sans);
+    color: #0c4a6e;
+  }
+  .browse-tip-body { min-width: 0; }
+  .browse-tip-body strong { font-weight: 600; }
+  .browse-tip-close {
+    margin-left: auto;
+    flex-shrink: 0;
+    background: transparent;
+    border: 0;
+    color: #0369a1;
+    cursor: pointer;
+    font-size: 1.125rem;
+    line-height: 1;
+    padding: .125rem .25rem;
+    border-radius: 4px;
+    align-self: flex-start;
+  }
+  .browse-tip-close:hover { background: #e0f2fe; }
+
+  /* ── Toolbar ────────────────────────────────────────────────────────────── */
+  .browse-toolbar {
+    display: flex;
+    align-items: flex-end;
+    gap: .875rem;
+    flex-wrap: wrap;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: .9rem;
+    box-shadow: var(--shadow-panel);
+    padding: 1.125rem;
+    margin-bottom: 1rem;
+  }
+  .search-wrap { flex: 1 1 14rem; min-width: 0; }
+  .search-row { display: flex; gap: 0; }
+  .search-row .field { border-radius: 7px 0 0 7px; border-right: 0; flex: 1; }
+  .search-row .btn  { border-radius: 0 7px 7px 0; white-space: nowrap; }
+  .search-help {
+    margin-top: .3125rem;
+    font: 400 .75rem/1.4 var(--sans);
+    color: var(--ink-400);
+  }
+  .clear-link {
+    font: 400 .8125rem/1 var(--sans);
+    color: var(--ink-500);
+    text-decoration: none;
+    align-self: center;
+    padding: .375rem .5rem;
+    border-radius: 6px;
+    white-space: nowrap;
+    transition: background-color .12s, color .12s;
+  }
+  .clear-link:hover { background: var(--ink-100); color: var(--ink-900); text-decoration: none; }
+
+  /* Language toggle. */
+  .lang-group { flex-shrink: 0; }
+  .lang-seg {
+    display: inline-flex;
+    padding: 2px;
+    gap: 1px;
+    background: var(--ink-100);
+    border-radius: 8px;
+  }
+  .lang-seg a {
+    display: inline-flex; align-items: center;
+    padding: .375rem .6875rem;
+    font: 500 .8125rem/1 var(--sans);
+    color: var(--ink-600);
+    border-radius: 6px;
+    text-decoration: none;
+    transition: background-color .12s, color .12s;
+  }
+  .lang-seg a:hover { color: var(--ink-900); }
+  .lang-seg a.is-active {
+    background: #fff;
+    color: var(--ink-900);
+    font-weight: 700;
+    box-shadow: 0 1px 3px rgba(15,23,42,.1);
+  }
+
+  /* ── Table header row ───────────────────────────────────────────────────── */
+  .browse-table-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin: 1.5rem 0 .75rem;
+  }
+  .browse-table-title {
+    margin: 0;
+    font: 700 1.125rem/1.3 var(--sans);
+    letter-spacing: -0.011em;
+    color: var(--ink-900);
+  }
+  .browse-count-plain {
+    display: block;
+    font: 400 .8125rem/1.4 var(--sans);
+    color: var(--ink-500);
+    margin-top: .25rem;
+  }
+
+  /* ── Table wrap ─────────────────────────────────────────────────────────── */
+  .browse-table-wrap {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: .9rem;
+    box-shadow: var(--shadow-panel);
+    overflow: hidden;
+  }
+  .browse-scroll {
+    overflow-x: auto;
+    max-height: 70vh;
+    overflow-y: auto;
+  }
+  .browse-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+    font: 400 .8125rem/1.45 var(--sans);
+  }
+
+  /* Sticky header. */
+  .browse-tbl thead th {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: #f1f5f9;
+    text-align: left;
+    padding: .5625rem .875rem;
+    border-bottom: 2px solid var(--line-strong);
+    white-space: nowrap;
+    cursor: default;
+  }
+  .browse-tbl thead th.is-num { text-align: right; }
+
+  /* Frozen first column. */
+  .browse-tbl thead th:first-child,
+  .browse-tbl tbody td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    background: inherit;
+  }
+  .browse-tbl thead th:first-child { z-index: 15; background: #f1f5f9; }
+  .browse-tbl tbody td:first-child { background: #fff; }
+  .browse-tbl tbody tr:hover td:first-child { background: var(--ink-50); }
+
+  /* Frozen column right-edge shadow. */
+  .browse-tbl thead th:first-child::after,
+  .browse-tbl tbody td:first-child::after {
+    content: '';
+    position: absolute;
+    top: 0; right: -7px;
+    width: 7px; height: 100%;
+    background: linear-gradient(to right, rgba(15,23,42,.07), transparent);
+    pointer-events: none;
+  }
+
+  .browse-tbl tbody td {
+    padding: .625rem .875rem;
+    border-bottom: 1px solid var(--ink-100);
+    vertical-align: top;
+    color: var(--ink-700);
+    white-space: nowrap;
+  }
+  .browse-tbl tbody tr:last-child td { border-bottom: 0; }
+  .browse-tbl tbody tr:hover td { background: var(--ink-50); }
+
+  /* A struck-through card. The whole row goes red, including the frozen
+     first column, so it cannot be missed while scrolling sideways. */
+  .browse-tbl tbody tr.is-deleted-row td,
+  .browse-tbl tbody tr.is-deleted-row td:first-child { background: #fdf2f2; color: #8a3d42; }
+  .browse-tbl tbody tr.is-deleted-row:hover td,
+  .browse-tbl tbody tr.is-deleted-row:hover td:first-child { background: #fae3e3; }
+  .roll-status { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .72rem; font-weight: 600; white-space: nowrap; }
+  .roll-status.is-on { background: #e8f6ee; color: #2f7a52; }
+  .roll-status.is-off { background: #c45460; color: #fff; }
+
+  @media (max-width: 42rem) {
+    .browse-sidebar-body { grid-template-columns: 1fr; }
+    .table-tab + .table-tab { border-left: 0; border-top: 1px solid var(--line); }
+    .browse-toolbar { align-items: stretch; }
+    .lang-group { width: 100%; }
+  }
+  .browse-tbl td.is-num {
+    text-align: right;
+    font-family: var(--mono);
+    font-size: .8125rem;
+    color: var(--ink-500);
+  }
+
+  /* ── Rich column header tooltips ────────────────────────────────────────── */
+  /* Each <th> is a relative container. The .col-tip inside it is hidden by
+     default and floats below on hover/focus. Pure CSS, no JS. */
+  .col-header {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: .3125rem;
+    cursor: default;
+  }
+  .col-header-label {
+    font: 600 .6875rem/1.2 var(--sans);
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--ink-600);
+  }
+  /* The ⓘ hint icon — only shown when a hint is defined. */
+  .col-hint-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1rem; height: 1rem;
+    border-radius: 999px;
+    background: var(--ink-200);
+    color: var(--ink-500);
+    font: 700 .625rem/1 var(--sans);
+    flex-shrink: 0;
+    cursor: help;
+    transition: background-color .12s;
+  }
+  .col-header:hover .col-hint-icon { background: var(--brand-500); color: #fff; }
+
+  /* The floating tooltip card. */
+  .col-tip {
+    position: absolute;
+    top: calc(100% + .5rem);
+    left: 50%;
+    transform: translateX(-50%) translateY(-4px);
+    min-width: 12rem;
+    max-width: 17rem;
+    background: #0f172a;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(15,23,42,.5), 0 2px 6px rgba(15,23,42,.2);
+    padding: .625rem .75rem;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity .15s ease, transform .15s ease, visibility .15s ease;
+    z-index: 50;
+    white-space: normal;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  /* Upward arrow. */
+  .col-tip::before {
+    content: '';
+    position: absolute;
+    top: -5px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 9px; height: 5px;
+    background: #0f172a;
+    clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+  }
+  /* Show on hover over the entire <th>. */
+  th:hover .col-tip,
+  th:focus-within .col-tip {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(-50%) translateY(0);
+  }
+  .col-tip-name {
+    font: 700 .75rem/1.3 var(--sans);
+    color: #f1f5f9;
+    margin: 0 0 .25rem;
+  }
+  .col-tip-body {
+    font: 400 .6875rem/1.5 var(--sans);
+    color: rgba(148,163,184,.9);
+    margin: 0;
+  }
+
+  /* ── Expandable cells ───────────────────────────────────────────────────── */
+  .expand-cell details { max-width: 28rem; }
+  .expand-cell summary {
+    cursor: pointer;
+    color: var(--ink-600);
+    white-space: normal;
+    word-break: break-all;
+    list-style: none;
+    padding-left: 1.125rem;
+    position: relative;
+    font-size: .8125rem;
+  }
+  .expand-cell summary::-webkit-details-marker { display: none; }
+  .expand-cell summary::before {
+    content: '▶';
+    font-size: .55rem;
+    position: absolute;
+    left: 0;
+    top: .3125rem;
+    color: var(--ink-400);
+    transition: transform .12s ease;
+  }
+  .expand-cell details[open] summary::before { transform: rotate(90deg); }
+  .expand-cell summary:hover { color: var(--brand-700); }
+  .expand-cell pre {
+    margin-top: .5rem;
+    padding: .5rem .625rem;
+    background: var(--ink-50);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font: 400 .7rem/1.5 var(--mono);
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--ink-800);
+    max-height: 14rem;
+    overflow-y: auto;
+  }
+
+  /* ── Pagination ─────────────────────────────────────────────────────────── */
+  .browse-load-more {
+    font: 600 .8125rem/1 var(--sans);
+    color: var(--brand-700);
+    background: #fff;
+    border: 1px solid var(--line-strong);
+    border-radius: .5rem;
+    padding: .45rem .8rem;
+    cursor: pointer;
+  }
+  .browse-load-more:hover { background: var(--brand-50); }
+  .browse-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: .75rem;
+    padding: .875rem 1.125rem;
+    border-top: 1px solid var(--line);
+    background: var(--ink-50);
+    border-radius: 0 0 var(--radius) var(--radius);
+    font: 400 .8125rem/1.4 var(--sans);
+    color: var(--ink-500);
+  }
+  .pager-controls { display: flex; align-items: center; gap: .3125rem; }
+  .page-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 2rem; height: 2rem;
+    padding: 0 .5rem;
+    border-radius: 6px;
+    font: 500 .8125rem/1 var(--sans);
+    color: var(--ink-700);
+    background: #fff;
+    border: 1px solid var(--line-strong);
+    text-decoration: none;
+    transition: background-color .12s, color .12s, border-color .12s;
+  }
+  .page-btn:hover { background: var(--ink-50); border-color: var(--ink-300); color: var(--ink-900); text-decoration: none; }
+  .page-btn.is-active { background: var(--brand-700); border-color: var(--brand-700); color: #fff; font-weight: 700; }
+  .page-btn.is-disabled { opacity: .38; cursor: not-allowed; pointer-events: none; }
+  .page-ellipsis { display: inline-flex; align-items: center; justify-content: center; min-width: 2rem; height: 2rem; color: var(--ink-400); font-size: .875rem; }
+
+  /* ── Empty state ────────────────────────────────────────────────────────── */
+  .browse-empty { padding: 3.5rem 1.5rem; text-align: center; }
+  .browse-empty-icon { font-size: 2.5rem; display: block; margin-bottom: .75rem; }
+  .browse-empty-title { margin: 0; font: 600 1rem/1.4 var(--sans); color: var(--ink-700); }
+  .browse-empty-body { margin: .375rem auto 0; max-width: 48ch; font: 400 .875rem/1.6 var(--sans); color: var(--ink-500); }
+
+  /* ── Help overlay (first-visit walkthrough) ─────────────────────────────── */
+  .help-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    background: rgba(15,23,42,.65);
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+  }
+  .help-overlay.is-open { display: flex; }
+  .help-panel {
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 24px 64px rgba(15,23,42,.4);
+    max-width: 34rem;
+    width: 100%;
+    overflow: hidden;
+  }
+  .help-panel-head {
+    padding: 1.5rem 1.5rem 1rem;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(135deg, var(--brand-50), #fff 60%);
+  }
+  .help-panel-eyebrow {
+    font: 600 .6875rem/1 var(--sans);
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--brand-600);
+    margin: 0 0 .5rem;
+  }
+  .help-panel-title {
+    margin: 0;
+    font: 700 1.3125rem/1.25 var(--sans);
+    color: var(--ink-900);
+  }
+  .help-panel-sub {
+    margin: .375rem 0 0;
+    font: 400 .9rem/1.55 var(--sans);
+    color: var(--ink-600);
+  }
+  .help-steps { padding: 1.125rem 1.5rem; display: flex; flex-direction: column; gap: .75rem; }
+  .help-step {
+    display: grid;
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+    gap: .75rem;
+    align-items: start;
+  }
+  .help-step-num {
+    width: 2.25rem; height: 2.25rem;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 999px;
+    background: var(--brand-700);
+    color: #fff;
+    font: 700 .875rem/1 var(--sans);
+    flex-shrink: 0;
+  }
+  .help-step-body {}
+  .help-step-title { font: 600 .9375rem/1.3 var(--sans); color: var(--ink-900); margin: 0; }
+  .help-step-desc  { font: 400 .8125rem/1.5 var(--sans); color: var(--ink-600); margin: .25rem 0 0; }
+  .help-panel-foot {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .help-dont-show {
+    display: inline-flex; align-items: center; gap: .5rem;
+    font: 400 .8125rem/1 var(--sans);
+    color: var(--ink-500);
+    cursor: pointer;
+  }
+</style>
+
+{# ── Help overlay (walkthrough) ──────────────────────────────────────────── #}
+
+
+{# ── Page header ─────────────────────────────────────────────────────────── #}
+<div class="page-head mb-5">
+  <div>
+    <h1 class="page-title">Find voter records</h1>
+    <!-- <p style="margin:.35rem 0 0;color:var(--ink-500);font:400 .9375rem/1.5 var(--sans)">
+      Search the records extracted from your electoral rolls, then export only the results you need.
+    </p> -->
+  </div>
+  <div style="display:flex;gap:.625rem;align-items:flex-start;flex-wrap:wrap">
+    <button class="btn btn-ghost" id="help-open-btn" title="Show the how-to guide">
+      Help
+    </button>
+    {% if table.name == 'electoral_records' %}
+      <a href="{{ export_url }}"
+         class="btn btn-primary" title="Download voter records as a spreadsheet">
+        Export Excel
       </a>
-    {% endfor %}
+    {% endif %}
   </div>
-  <p class="text-sm text-gray-600 mt-3">{{ table.description }}</p>
 </div>
 
-<!-- Search within the chosen table -->
-<div class="panel mb-6">
-  <form method="get" class="flex flex-col sm:flex-row gap-3 items-end">
-    <input type="hidden" name="table" value="{{ table.name }}">
-    <div class="flex-1">
-      <label class="block text-sm font-medium text-gray-700 mb-1" for="q">
-        Search inside &ldquo;{{ table.label }}&rdquo;
-      </label>
-      <input id="q" type="text" name="q" value="{{ query or '' }}"
-             placeholder="Type any part of a name, number or code"
-             class="w-full border rounded-lg px-3 py-2 text-sm">
-    </div>
-    <div class="flex gap-2">
-      <button type="submit" class="button">Search</button>
-      <a href="/browse?table={{ table.name }}" class="button secondary">Clear</a>
-    </div>
-  </form>
-</div>
+{# ── Onboarding tip banner ────────────────────────────────────────────────── #}
+<!-- <div class="browse-tip-banner" id="browse-tip-banner">
+  <!-- <div class="browse-tip-body">
+    <strong>Search tip:</strong> use a voter name, Voter ID, house number, or locality. Choose <strong>Export Excel</strong> to download the matching records.
+    This page is read-only.
+  </div> -->
+  <!-- <button class="browse-tip-close" id="browse-tip-close" aria-label="Dismiss tip" title="Dismiss">✕</button>
+</div> --> 
 
-<section class="panel">
-  <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
-    <h2 class="mb-0">
-      {{ table.label }}
-      <span class="text-sm font-normal text-gray-500">
-        {{ total }} row{{ '' if total == 1 else 's' }}{% if query %} matching &ldquo;{{ query }}&rdquo;{% endif %}
-      </span>
-    </h2>
-    <p class="text-sm text-gray-500 mb-0">
-      {{ table.columns | length }} columns &mdash; scroll sideways to see them all
-    </p>
-  </div>
+{# ── Two-column shell ─────────────────────────────────────────────────────── #}
+<div class="browse-shell">
 
-  {% if cells %}
-    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="bg-gray-50">
-            <tr>
-              {% for col in table.columns %}
-                <th scope="col"
-                    class="px-3 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap"
-                    {% if col.hint %}title="{{ col.hint }}"{% endif %}>
-                  {{ col.label }}
-                </th>
-              {% endfor %}
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-200">
-            {% for row in cells %}
-              <tr class="hover:bg-gray-50 transition-colors">
-                {% for col in table.columns %}
-                  {% set raw = row[col.name] %}
-                  <td class="px-3 py-2 {% if col.numeric %}text-right font-mono{% endif %}">
-                    {% if col.expandable %}
-                      {# Long JSON: show it short, reveal the whole thing on click.
-                         Kept as a <details> rather than JS so it works without
-                         scripting and prints the full value. #}
-                      <details class="group">
-                        <summary class="cursor-pointer text-gray-700 hover:text-blue-700 break-all">
-                          {% set short = cell_text(raw) %}
-                          {{ short if short else '(empty)' }}
-                        </summary>
-                        <pre class="mt-2 p-2 bg-gray-50 border rounded text-xs whitespace-pre-wrap break-all max-w-md">{% if raw is none %}(empty){% else %}{{ cell_text(raw) if raw | length < 4000 else raw | string | truncate(4000, true) }}{% endif %}</pre>
-                      </details>
-                    {% else %}
-                      <span class="{% if col.numeric %}font-mono{% endif %}">
-                        {{- cell_text(raw) if raw is not none else '' -}}
-                      </span>
-                    {% endif %}
-                  </td>
-                {% endfor %}
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+  {# ── Sidebar: table navigation ─────────────────────────────────────────── #}
+  <!-- <nav class="browse-sidebar" aria-label="Data views">
+    <div class="browse-sidebar-head">What would you like to review?</div>
+    <div class="browse-sidebar-body">
+      {% set tab_meta = {
+        'electoral_records':          'Search the people listed in your uploaded rolls',
+        'electoral_document_metadata':'View constituency, part and polling-station details',
+      } %}
+      {% for t in tables %}
+        <a href="{{ browse_urls[t.name] }}"
+           class="table-tab {% if t.name == table.name %}is-active{% endif %}"
+           title="{{ t.description }}">
+          <span class="tab-body">
+            <span class="tab-name">{{ t.label }}</span>
+            <span class="tab-desc">{{ tab_meta.get(t.name, t.description) }}</span>
+          </span>
+          <span class="tab-count" title="{{ counts.get(t.name, 0) }} rows in this table">
+            {{ counts.get(t.name, 0) }}
+          </span>
+        </a>
+      {% endfor %}
+    </div>
+  </nav> -->
+
+  {# ── Main content ─────────────────────────────────────────────────────── #}
+  <div>
+
+    {# ── Toolbar ──────────────────────────────────────────────────────────── #}
+    <div class="browse-toolbar">
+      <form method="get" class="search-wrap">
+        <input type="hidden" name="table" value="{{ table.name }}">
+        <input type="hidden" name="lang" value="{{ lang }}">
+        <label class="field-label" for="q">Search {{ table.label | lower }}</label>
+        <div class="search-row">
+          <input id="q" type="text" name="q" value="{{ query or '' }}"
+          placeholder="{% if table.name == 'electoral_records' %}Name, Voter ID, house number or locality{% else %}Constituency, polling station, district or part number{% endif %}"
+                 class="field" style="flex:1">
+          <button type="submit" class="btn btn-primary">Search</button>
+        </div>
+        <!-- <p class="search-help">
+          {% if table.name == 'electoral_records' %}Use the spelling printed on the roll where possible.{% else %}Use a place, constituency, station name, or part number.{% endif %}
+        </p> -->
+      </form>
+
+      {% if query %}
+        <a href="{{ clear_url }}" class="clear-link"
+           title="Remove the current search and show all rows">✕ Clear search</a>
+      {% endif %}
+
+      <div class="lang-group">
+        <div class="field-label" title="Choose which language version of names and places to show">
+          Language shown
+        </div>
+        <div class="lang-seg" role="group" aria-label="Language preference">
+          {% for lval, llabel, ltip in [('both', 'Both', 'Show Hindi and English side by side'), ('hi', 'Hindi', 'Show only Hindi columns'), ('en', 'English', 'Show only English columns')] %}
+            <a href="{{ language_urls[lval] }}"
+               class="{{ 'is-active' if lang == lval }}"
+               title="{{ ltip }}">{{ llabel }}</a>
+          {% endfor %}
+        </div>
       </div>
     </div>
 
-    {% if pages > 1 %}
-      <div class="mt-4 flex items-center justify-between flex-wrap gap-2">
-        <p class="text-sm text-gray-600 mb-0">
-          Showing {{ (page - 1) * per_page + 1 }}&ndash;{{ (page - 1) * per_page + cells | length }}
-          of {{ total }}
-        </p>
-        <div class="flex gap-2">
-          {% if page > 1 %}
-            <a href="?table={{ table.name }}{{ '&q=' + query if query }}&page={{ page - 1 }}"
-               class="button secondary text-sm">&larr; Previous</a>
+    {# ── Table meta row ───────────────────────────────────────────────────── #}
+    <div class="browse-table-head">
+      <div>
+        <h2 class="browse-table-title">{{ table.label }}</h2>
+        <span class="browse-count-plain">
+          {% if total == 0 %}
+            No rows found{% if query %} for "{{ query }}"{% endif %}.
+          {% elif total == 1 %}
+            1 row{% if query %} matching "{{ query }}"{% endif %}.
+          {% elif total < 100 %}
+            {{ total }} rows — all shown below{% if query %} matching "{{ query }}"{% endif %}.
+          {% else %}
+            {{ total }} rows total{% if query %} matching "{{ query }}"{% endif %}
+            — showing the first 100 below. Scroll down to load more, or use search to narrow the list.
           {% endif %}
-          {% if page < pages %}
-            <a href="?table={{ table.name }}{{ '&q=' + query if query }}&page={{ page + 1 }}"
-               class="button text-sm">Next &rarr;</a>
+        </span>
+        <span class="browse-count-plain" style="color:var(--ink-400);font-size:.75rem;margin-top:.125rem">
+          {{ table.description }}
+        </span>
+      </div>
+      {% if cells %}
+        <p style="font:.75rem/1.4 var(--sans);color:var(--ink-400);white-space:nowrap;margin:0;align-self:flex-end">
+          {{ table.columns | length }} fields · scroll right to see more
+        </p>
+      {% endif %}
+    </div>
+
+    {# ── Data table ───────────────────────────────────────────────────────── #}
+
+    {# Map each column name to a richer hint for the tooltip #}
+    {% set col_hints = {
+      'page_number':        ('Page number', 'Which page of the PDF this voter card appeared on. Page 1 is the first page.'),
+      'source_row_number':  ('Row on page', 'Position of this voter card within the page — usually 1 to 6.'),
+      'voter_sr_no':        ('Roll number', 'The serial number printed on the official electoral roll. Kept as text to preserve any leading zeros.'),
+      'serial_mark':        ('List mark', 'The small box beside the serial on an addition-list card. A normal card does not print that box, so the cell says Not printed.'),
+      'epic_number':        ('Voter ID (EPIC)', 'The 10-character unique voter identity number printed on the voter ID card, e.g. ABC1234567.'),
+      'name_hi':            ('Voter name (Hindi)', 'The voter\'s full name exactly as printed in Hindi (Devanagari script).'),
+      'name_en':            ('Voter name (English)', 'The voter\'s full name in English, either printed or transliterated.'),
+      'relation_name':      ('Relative type', 'The relationship word printed on the card — Father (पिता), Husband (पति), Mother (माता), or Other (अन्य).'),
+      'relative_name_hi':   ('Relative\'s name (Hindi)', 'The name of the voter\'s listed relative — father, husband, or mother — in Hindi.'),
+      'relative_name_en':   ('Relative\'s name (English)', 'The relative\'s name in English.'),
+      'age':                ('Age', 'The voter\'s age in years as printed on the roll.'),
+      'gender_hi':          ('Gender (Hindi)', 'पुरुष = Male, महिला = Female, as printed on the roll.'),
+      'gender_en':          ('Gender (English)', 'Male or Female as printed or transliterated.'),
+      'house_number_hi':    ('House number (Hindi)', 'The house or door number in Hindi.'),
+      'house_number_en':    ('House number (English)', 'The house or door number in English.'),
+      'ward_code':          ('Ward number', 'The municipal ward number, printed on a Jaipur nigam roll. An assembly roll has no ward, so the cell says Not on this roll.'),
+      'section_number':     ('Section', 'The polling section number within the constituency.'),
+      'section_name_hi':    ('Section name (Hindi)', 'The name of the polling section / locality in Hindi.'),
+      'section_name_en':    ('Section name (English)', 'The name of the polling section / locality in English.'),
+      'is_deleted':         ('On the roll?', '"Deleted" means the roll has struck this card through — the person is no longer a voter here, and the row is shown in red. "On the roll" means they are a current voter.'),
+      'is_valid':           ('Passed checks', '"yes" means the record passed all automated validation — all required fields are present and sensible.'),
+      'needs_review':       ('Needs human review', '"yes" means the pipeline was uncertain about at least one field. A human should verify this row.'),
+      'review_reasons':     ('Why it needs review', 'A list of the specific fields the pipeline was unsure about. Click the arrow to expand.'),
+      'validation_errors':  ('Validation problems', 'Details of any validation failures — e.g. missing Voter ID, unrecognisable age. Click to expand.'),
+      'field_sources':      ('Where each value came from', 'Which OCR engine or rule produced each field value. Useful for tracing errors. Click to expand.'),
+      'confidence':         ('OCR confidence', 'A 0–1 score: how confident the OCR engine was overall. 1.0 = perfectly certain, 0.0 = total guess.'),
+      'state_code':         ('State code', 'Short code for the state, e.g. "UP" for Uttar Pradesh.'),
+      'ac_code':            ('Constituency code', 'The assembly constituency number.'),
+      'document_id':        ('Source document', 'Which uploaded PDF or file this record came from.'),
+      'created_at':         ('Saved at', 'Date and time (IST) when this record was written to the database.'),
+      'status':             ('Status', 'Current state of processing: waiting (not started), processing (in progress), done (finished OK), or failed (error).'),
+      'file_name':          ('File name', 'The original filename of the uploaded PDF or spreadsheet.'),
+      'source_type':        ('File type', '"pdf" for scanned electoral roll PDFs, "xlsx" for spreadsheets.'),
+      'file_size':          ('File size', 'Size of the file in bytes. 1 MB ≈ 1,000,000 bytes.'),
+      'attempt_count':      ('Attempts so far', 'How many times the pipeline has tried to process this item. More than 1 means it failed and was retried.'),
+      'max_attempts':       ('Attempts allowed', 'The maximum number of retry attempts before the pipeline gives up.'),
+      'last_error':         ('Last error message', 'The most recent error message if processing failed. Empty means no error yet.'),
+      'worker_id':          ('Which worker', 'Internal ID of the background worker process that handled this task.'),
+      'records_extracted':  ('Voters found', 'How many voter records were successfully extracted from this document or work unit.'),
+      'records_failed':     ('Voters failed', 'How many voter records could not be extracted due to errors.'),
+      'pages_total':        ('Total pages', 'How many pages the document contains in total.'),
+      'pages_processed':    ('Pages read', 'How many pages have been processed so far.'),
+      'processing_time_ms': ('Time taken', 'How long processing took in milliseconds. 1000 ms = 1 second.'),
+      'raw_response':       ('Raw OCR reply', 'The exact, unedited response from the OCR service. Useful only for debugging. Click the arrow to expand.'),
+      'received_at':        ('Received at', 'Date and time (IST) when this OCR response arrived.'),
+      'extractor_version':  ('OCR version', 'Which version of the OCR model or service produced this response.'),
+      'roll_year':          ('Roll year', 'The year of the electoral roll, e.g. 2024.'),
+      'publication_date':   ('Published on', 'The official publication date printed on the electoral roll.'),
+      'assembly_constituency_number': ('Constituency number', 'The official number of the assembly constituency (विधानसभा क्षेत्र).'),
+      'assembly_constituency_hi': ('Constituency (Hindi)', 'Name of the assembly constituency in Hindi.'),
+      'assembly_constituency_en': ('Constituency (English)', 'Name of the assembly constituency in English.'),
+      'polling_station_hi': ('Polling station (Hindi)', 'Name of the polling booth in Hindi.'),
+      'polling_station_en': ('Polling station (English)', 'Name of the polling booth in English.'),
+      'part_number':        ('Part number', 'The part (भाग) number of the electoral roll PDF.'),
+      'event_type':         ('Event type', 'What kind of pipeline action this was — e.g. "document_queued", "ocr_started", "record_saved".'),
+      'service':            ('Pipeline service', 'Which part of the pipeline generated this event — e.g. "worker", "extractor", "OCR".'),
+      'message':            ('Log message', 'A human-readable description of what happened at this step.'),
+      'details':            ('Extra detail', 'Additional structured data for this event. Click the arrow to expand.'),
+    } %}
+
+    {% if cells %}
+      <div class="browse-table-wrap">
+        <div class="browse-scroll">
+          <table class="browse-tbl" aria-label="{{ table.label }} — {{ total }} rows">
+            <thead>
+              <tr>
+                {% for col in table.columns %}
+                  {% set tip = col_hints.get(col.name, (col.label, col.hint)) %}
+                  <th scope="col"
+                      class="{{ 'is-num' if col.numeric else '' }}"
+                      tabindex="0">
+                    <span class="col-header">
+                      <span class="col-header-label">{{ col.label }}</span>
+                      {# Show hint icon only when there's actual hint text #}
+                      {% if tip[1] or col.hint %}
+                        <span class="col-hint-icon" aria-hidden="true">i</span>
+                      {% endif %}
+                      {# Tooltip card #}
+                      {% if tip[1] or col.hint %}
+                        <span class="col-tip" role="tooltip">
+                          <p class="col-tip-name">{{ tip[0] }}</p>
+                          <p class="col-tip-body">{{ tip[1] if tip[1] else col.hint }}</p>
+                        </span>
+                      {% endif %}
+                    </span>
+                  </th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in cells %}
+                <tr class="{{ 'is-deleted-row' if row.get('is_deleted') else '' }}">
+                  {% for col in table.columns %}
+                    {% set raw = row[col.name] %}
+                    <td class="{{ 'is-num' if col.numeric else '' }}{{ ' expand-cell' if col.expandable else '' }}">
+                      {% if col.expandable %}
+                        <details>
+                          <summary>{{ cell_text(raw, col.name) if raw is not none else '(empty)' }}</summary>
+                          <pre>{{ raw | string | truncate(4000, true) if raw is not none else '(empty)' }}</pre>
+                        </details>
+                      {% elif table.name == 'electoral_records' and col.name in ('anubhag_code', 'anubhag_name') %}
+                        {# A municipal ward roll has no anubhag, so show the
+                           ward and say why the pair is otherwise blank -- an
+                           unexplained blank reads as a failed extraction. #}
+                        {% set shown = anubhag_display(row) %}
+                        {{ shown[0] if col.name == 'anubhag_code' else shown[1] }}
+                      {% else %}
+                        {{ cell_text(raw, col.name) if raw is not none else '' }}
+                      {% endif %}
+                    </td>
+                  {% endfor %}
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {# Sentinel for the next page. It has to live INSIDE the scrolling
+             box: the table scrolls within .browse-scroll, so a marker placed
+             after that box sits still while the user scrolls and the
+             observer never fires a second time. The user sees 100 rows and a
+             list that will not grow. #}
+          <div id="browse-sentinel" aria-hidden="true" style="height:1px"></div>
+        </div>
+
+        {# ── Infinite-scroll status bar ──────────────────────────────────── #}
+        {% if total > 0 %}
+          <div class="browse-pager" id="browse-pager">
+            <span id="browse-row-counter">
+              Showing <strong id="browse-shown">{{ cells | length }}</strong>
+              of <strong>{{ total }}</strong> rows
+              {% if query %}matching &ldquo;{{ query }}&rdquo;{% endif %}
+            </span>
+            <span id="browse-load-status" style="color:var(--ink-400);font-size:.8125rem"></span>
+            <button type="button" id="browse-load-more" class="browse-load-more" hidden>Show next {{ per_page }}</button>
+          </div>
+        {% endif %}
+      </div>
+
+    {% else %}
+      {# ── Empty state ───────────────────────────────────────────────────── #}
+      <div class="browse-table-wrap">
+        <div class="browse-empty">
+          {% if query %}
+            <span class="browse-empty-icon">🔍</span>
+            <p class="browse-empty-title">Nothing matched "{{ query }}"</p>
+            <p class="browse-empty-body">
+              Try a different word or spelling, or
+              <a href="/browse?table={{ table.name }}&lang={{ lang }}">clear the search</a>
+              to see all rows in this table.
+            </p>
+          {% else %}
+            <span class="browse-empty-icon">📭</span>
+            <p class="browse-empty-title">{{ table.label }} is empty right now</p>
+            <p class="browse-empty-body">
+              Rows will appear here once the pipeline reads a PDF.
+              Go to <a href="/upload">Upload</a> to add PDFs, or check the
+              <a href="/dashboard">Dashboard</a> to see what's in progress.
+            </p>
           {% endif %}
         </div>
       </div>
     {% endif %}
-  {% else %}
-    <div class="text-center py-12 text-gray-500">
-      <p>Nothing in {{ table.label }} yet.</p>
-      {% if query %}
-        <p class="text-sm mt-1">No row contains &ldquo;{{ query }}&rdquo;.</p>
-      {% else %}
-        <p class="text-sm mt-1">Rows appear here once the pipeline reads a PDF.</p>
-      {% endif %}
-    </div>
-  {% endif %}
-</section>
+
+  </div>{# /main content #}
+</div>{# /browse-shell #}
+
+{# ── Scripts ─────────────────────────────────────────────────────────────── #}
+<script>
+(function () {
+  var BANNER_KEY = 'browse-tip-dismissed';
+  var OVERLAY_KEY = 'browse-help-dismissed';
+
+  // ── Onboarding tip banner ────────────────────────────────────────────────
+  var banner = document.getElementById('browse-tip-banner');
+  var bannerClose = document.getElementById('browse-tip-close');
+  try {
+    if (localStorage.getItem(BANNER_KEY)) banner.style.display = 'none';
+  } catch (e) {}
+  if (bannerClose) {
+    bannerClose.addEventListener('click', function () {
+      banner.style.display = 'none';
+      try { localStorage.setItem(BANNER_KEY, '1'); } catch (e) {}
+    });
+  }
+
+  // ── Help overlay ─────────────────────────────────────────────────────────
+  var overlay   = document.getElementById('help-overlay');
+  var openBtn   = document.getElementById('help-open-btn');
+  var closeBtn  = document.getElementById('help-close');
+  var noShowChk = document.getElementById('help-no-show');
+
+  function openOverlay() {
+    overlay.classList.add('is-open');
+    document.body.style.overflow = 'hidden';
+    closeBtn.focus();
+  }
+  function closeOverlay() {
+    overlay.classList.remove('is-open');
+    document.body.style.overflow = '';
+    if (openBtn) openBtn.focus();
+    if (noShowChk && noShowChk.checked) {
+      try { localStorage.setItem(OVERLAY_KEY, '1'); } catch (e) {}
+    }
+  }
+
+  // Help is available on demand. Do not place an instructional modal in front
+  // of the primary task every time someone opens the data workspace.
+
+  // The overlay markup is optional. Without this guard a page that does not
+  // render it throws here, and the infinite scroll further down never starts.
+  if (overlay) {
+  if (openBtn)  openBtn.addEventListener('click', openOverlay);
+  if (closeBtn) closeBtn.addEventListener('click', closeOverlay);
+
+  // Close on backdrop click or Escape.
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeOverlay();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && overlay.classList.contains('is-open')) closeOverlay();
+  });
+
+  // Focus trap inside the overlay while it's open.
+  overlay.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab') return;
+    var focusable = Array.prototype.slice.call(
+      overlay.querySelectorAll('button, [href], input, [tabindex]:not([tabindex="-1"])')
+    ).filter(function (el) { return !el.disabled; });
+    if (!focusable.length) return;
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault(); last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault(); first.focus();
+    }
+  });
+  }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────────
+  (function () {
+    var sentinel  = document.getElementById('browse-sentinel');
+    var scrollBox = document.querySelector('.browse-scroll');
+    var tbody     = document.querySelector('.browse-tbl tbody');
+    var shownEl   = document.getElementById('browse-shown');
+    var statusEl  = document.getElementById('browse-load-status');
+    var moreBtn   = document.getElementById('browse-load-more');
+
+    if (!sentinel || !tbody || !scrollBox) return; // empty state — nothing to do
+
+    var currentPage = {{ page }};
+    var totalRows   = {{ total }};
+    var perPage     = {{ per_page }};
+    var loading     = false;
+    var exhausted   = (currentPage * perPage) >= totalRows;
+
+    var tableName = {{ table.name | tojson }};
+    var query     = {{ (query or '') | tojson }};
+    var lang      = {{ lang | tojson }};
+
+    // Columns metadata (needed to know which are expandable / numeric)
+    var columns = [
+      {% for col in table.columns %}
+      { name: {{ col.name | tojson }}, numeric: {{ 'true' if col.numeric else 'false' }}, expandable: {{ 'true' if col.expandable else 'false' }} }{% if not loop.last %},{% endif %}
+      {% endfor %}
+    ];
+
+    function setStatus(msg) {
+      if (statusEl) statusEl.textContent = msg;
+    }
+
+    function buildRow(obj) {
+      var tr = document.createElement('tr');
+      if (obj.__deleted) tr.className = 'is-deleted-row';
+      columns.forEach(function (col) {
+        var td = document.createElement('td');
+        var cls = '';
+        if (col.numeric)   cls += ' is-num';
+        if (col.expandable) cls += ' expand-cell';
+        td.className = cls.trim();
+
+        var val = obj[col.name] !== undefined ? obj[col.name] : '';
+
+        if (col.name === 'is_deleted') {
+          var pill = document.createElement('span');
+          pill.className = 'roll-status ' + (obj.__deleted ? 'is-off' : 'is-on');
+          pill.textContent = val;
+          td.appendChild(pill);
+        } else if (col.expandable) {
+          var raw = obj['__raw_' + col.name] || val;
+          var details = document.createElement('details');
+          var summary = document.createElement('summary');
+          summary.textContent = val || '(empty)';
+          var pre = document.createElement('pre');
+          pre.textContent = raw || '(empty)';
+          details.appendChild(summary);
+          details.appendChild(pre);
+          td.appendChild(details);
+        } else {
+          td.textContent = val;
+        }
+        tr.appendChild(td);
+      });
+      return tr;
+    }
+
+    function loadNextPage() {
+      if (loading || exhausted) return;
+      loading = true;
+      setStatus('Loading more rows…');
+
+      var nextPage = currentPage + 1;
+      var url = '/browse/rows?table=' + encodeURIComponent(tableName)
+              + '&page=' + nextPage
+              + '&lang=' + encodeURIComponent(lang)
+              + (query ? '&q=' + encodeURIComponent(query) : '');
+
+      fetch(url, { credentials: 'same-origin' })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function (data) {
+          data.rows.forEach(function (row) {
+            tbody.appendChild(buildRow(row));
+          });
+          currentPage = data.page;
+          exhausted   = !data.has_more;
+
+          // Update counter
+          var shown = tbody.querySelectorAll('tr').length;
+          if (shownEl) shownEl.textContent = shown;
+
+          if (exhausted) {
+            setStatus('All ' + totalRows.toLocaleString('en-IN') + ' rows loaded.');
+            if (moreBtn) moreBtn.hidden = true;
+            observer.disconnect();
+            scrollBox.removeEventListener('scroll', onScroll);
+          } else {
+            setStatus('');
+            if (moreBtn) moreBtn.hidden = false;
+          }
+        })
+        .catch(function (err) {
+          setStatus('Could not load more rows. Scroll again or press the button to retry.');
+          if (moreBtn) moreBtn.hidden = false;
+          console.error('Infinite scroll fetch failed:', err);
+        })
+        .finally(function () {
+          loading = false;
+          // 100 rows can be shorter than the box on a tall screen, so the
+          // sentinel may still be in view with no scroll to come. Keep
+          // fetching until the list is taller than the box or we run out.
+          if (!exhausted && sentinelVisible()) loadNextPage();
+        });
+    }
+
+    function sentinelVisible() {
+      var box = scrollBox.getBoundingClientRect();
+      var dot = sentinel.getBoundingClientRect();
+      return dot.top <= box.bottom + 300;
+    }
+
+    // Watch the sentinel against the scrolling box, not the window. The
+    // window never scrolls here; the table does.
+    var observer = new IntersectionObserver(function (entries) {
+      if (entries[0].isIntersecting) loadNextPage();
+    }, { root: scrollBox, rootMargin: '300px 0px' }); // start 300 px early
+
+    // Belt and braces: the box's own scroll event. Fires on every scroll
+    // the user makes, whatever the observer does, and costs one rectangle
+    // comparison.
+    var ticking = false;
+    function onScroll() {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(function () {
+        ticking = false;
+        var nearBottom = scrollBox.scrollTop + scrollBox.clientHeight
+                         >= scrollBox.scrollHeight - 300;
+        if (nearBottom || sentinelVisible()) loadNextPage();
+      });
+    }
+
+    if (moreBtn) {
+      moreBtn.addEventListener('click', loadNextPage);
+      moreBtn.hidden = exhausted;
+    }
+    if (!exhausted) {
+      observer.observe(sentinel);
+      scrollBox.addEventListener('scroll', onScroll, { passive: true });
+      // A tall screen can show all 100 rows with no scrollbar at all, which
+      // means no scroll event and no way to ask for more. Fill until the box
+      // overflows.
+      if (sentinelVisible()) loadNextPage();
+    } else {
+      setStatus('All ' + totalRows.toLocaleString('en-IN') + ' rows loaded.');
+    }
+  })();
+})();
+</script>
 
 {% endblock %}

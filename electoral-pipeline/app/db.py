@@ -23,11 +23,5 @@ class Base(DeclarativeBase):
 
 
 def get_db():
-    log.debug(f"[DB] Creating new database session")
-    print(f"[DB] Creating new database session")
-    
     with SessionLocal() as db:
         yield db
-    
-    log.debug(f"[DB] Database session closed")
-    print(f"[DB] Database session closed")

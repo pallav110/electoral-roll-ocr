@@ -1,134 +1,213 @@
-{% extends "base.html" %}{% block title %}Overview · Electoral Roll Processing{% endblock %}{% block content %}
+{% extends "base.html" %}
+{% block title %}Dashboard · Electoral Roll Processing{% endblock %}
+{% block content %}
 
-<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
-  <div>
-    <h1 class="text-3xl font-bold text-gray-900 tracking-tight">Dashboard</h1>
-    <p class="text-gray-600 mt-1">Monitor voter roll PDF processing status</p>
-  </div>
-  <div class="flex flex-wrap items-center gap-3">
-    <a href="/folders" class="inline-flex items-center px-4 py-2 bg-white text-slate-800 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium text-sm shadow-sm">
-      <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path>
-      </svg>
-      Scan folders
-    </a>
-    <form method="post" action="/actions/discover">
-      <button type="submit" class="inline-flex items-center px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors font-medium text-sm shadow-sm">
-        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-        </svg>
-        Discover PDFs
-      </button>
-    </form>
-  </div>
-</div>
+<style>
+  .dashboard-shell { display: grid; gap: 1rem; }
+  .dashboard-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.5rem; margin-bottom: .25rem; }
+  .dashboard-header-side { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .7rem; }
+  .dashboard-title { margin: 0; font-size: 1.9rem; line-height: 1.2; letter-spacing: -.025em; }
+  .dashboard-subtitle { color: #64748b; margin: .35rem 0 0; }
+  .health-card { display: flex; align-items: center; gap: .8rem; min-width: 19rem; padding: .85rem 1rem; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: .75rem; }
+  .health-card[data-tone="red"] { background: #fef2f2; border-color: #fecaca; }
+  .health-card[data-tone="amber"] { background: #fffbeb; border-color: #fde68a; }
+  .health-dot { width: .7rem; height: .7rem; flex: 0 0 auto; border-radius: 999px; background: #16a34a; }
+  .health-card[data-tone="red"] .health-dot { background: #dc2626; }
+  .health-card[data-tone="amber"] .health-dot { background: #d97706; }
+  .health-label { font-size: .72rem; color: #64748b; text-transform: uppercase; letter-spacing: .045em; }
+  .health-value { font-size: 1.1rem; color: #166534; font-weight: 750; line-height: 1.15; }
+  .health-card[data-tone="red"] .health-value { color: #991b1b; }
+  .health-card[data-tone="amber"] .health-value { color: #92400e; }
+  .health-time { margin-left: auto; padding-left: .8rem; border-left: 1px solid rgba(100,116,139,.25); color: #475569; font-size: .78rem; line-height: 1.35; }
+  .dashboard-link { display: inline-flex; align-items: center; justify-content: center; min-height: 2.65rem; padding: .65rem .85rem; border: 1px solid #cbd5e1; border-radius: .65rem; background: #fff; color: #334155; font-size: .78rem; font-weight: 700; text-decoration: none; }
+  .dashboard-link:hover { background: #f8fafc; color: #0f172a; text-decoration: none; }
+  .dashboard-link.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .dashboard-link.primary:hover { background: #1d4ed8; color: #fff; }
 
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">Total PDFs</span>
-    <p class="text-3xl font-bold text-gray-900 mt-2">{{ total }}</p>
-  </div>
-  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">Completed</span>
-    <p class="text-3xl font-bold text-green-600 mt-2">{{ counts.get('completed', 0) }}</p>
-  </div>
-  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">In Progress</span>
-    <p class="text-3xl font-bold text-blue-600 mt-2">{{ counts.get('processing', 0) + counts.get('queued', 0) + counts.get('retry', 0) }}</p>
-  </div>
-  <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-    <span class="text-sm font-medium text-gray-500 uppercase tracking-wide">Failed</span>
-    <p class="text-3xl font-bold text-red-600 mt-2">{{ counts.get('failed', 0) }}</p>
-  </div>
-</div>
+  .dashboard-panel { background: #fff; border: 1px solid #e2e8f0; border-radius: .8rem; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+  .overview-panel { display: grid; grid-template-columns: minmax(15rem, 1.1fr) 2.3fr minmax(13rem, .85fr); gap: 1.2rem; padding: 1.3rem; align-items: stretch; }
+  .completion-hero { padding-right: 1.2rem; border-right: 1px solid #e2e8f0; }
+  .eyebrow { font-size: .72rem; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: .055em; }
+  .completion-number { font-size: 3.25rem; line-height: 1; color: #0f172a; font-weight: 800; letter-spacing: -.05em; margin-top: .65rem; }
+  .completion-number small { font-size: 1.15rem; letter-spacing: -.01em; color: #64748b; font-weight: 650; }
+  .completion-copy { margin-top: .45rem; color: #475569; font-size: .9rem; }
+  .progress-track { width: 100%; height: .65rem; overflow: hidden; border-radius: 999px; background: #e2e8f0; margin-top: 1.15rem; }
+  .progress-value { height: 100%; background: #16a34a; border-radius: inherit; }
 
-<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-8">
-  <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-    <h2 class="text-lg font-semibold text-gray-900">Recent PDF Files</h2>
-    <a href="/documents" class="text-sm text-blue-600 hover:text-blue-700 font-medium">View all →</a>
-  </div>
-  <div class="overflow-x-auto">
-    <table class="w-full">
-      <thead class="bg-gray-50">
-        <tr>
-          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">File</th>
-          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">When Found</th>
-          <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Attempts</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-gray-200">
-        {% for d in recent %}
-          <tr class="hover:bg-gray-50 transition-colors">
-            <td class="px-6 py-4">
-              <a href="/documents/{{ d.id }}" class="text-blue-600 hover:text-blue-700 font-medium">{{ d.file_name }}</a>
-            </td>
-            <td class="px-6 py-4">
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-                {% if d.status == 'completed' %}bg-green-100 text-green-800
-                {% elif d.status == 'failed' %}bg-red-100 text-red-800
-                {% elif d.status == 'processing' %}bg-blue-100 text-blue-800
-                {% elif d.status == 'queued' %}bg-yellow-100 text-yellow-800
-                {% else %}bg-gray-100 text-gray-800{% endif %}">
-                {{ status_label(d.status) }}
-              </span>
-              {% if d.last_error %}
-                <div class="text-xs text-gray-500 mt-1">{{ friendly_error(d.last_error_code, d.last_error) }}</div>
-              {% endif %}
-            </td>
-            <td class="px-6 py-4 text-sm text-gray-600">{{ time_ago(d.discovered_at) }}</td>
-            <td class="px-6 py-4 text-sm text-gray-900 text-right font-mono">{{ d.attempt_count }} / {{ d.max_attempts }}</td>
-          </tr>
-        {% else %}
-          <tr>
-            <td colspan="4" class="px-6 py-12 text-center text-gray-500">
-              <div class="flex flex-col items-center">
-                <svg class="w-12 h-12 text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                </svg>
-                <p class="text-sm">No PDFs found yet. Place PDF files in the <code class="bg-gray-100 px-2 py-1 rounded text-xs">sample-pdfs</code> folder and click "Discover PDFs".</p>
-              </div>
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
+  .state-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); align-items: center; }
+  .state-item { min-width: 0; padding: .7rem 1rem; border-right: 1px solid #e2e8f0; }
+  .state-item:last-child { border-right: 0; }
+  .state-label { color: #64748b; font-size: .78rem; white-space: nowrap; }
+  .state-value { margin-top: .35rem; font-size: 1.75rem; line-height: 1; font-weight: 750; color: #0f172a; }
+  .state-value.green { color: #16a34a; }
+  .state-value.blue { color: #2563eb; }
+  .state-value.amber { color: #d97706; }
+  .state-value.red { color: #dc2626; }
+  .state-detail { margin-top: .3rem; color: #94a3b8; font-size: .72rem; }
+  .forecast { display: grid; align-content: center; gap: 1rem; padding-left: .2rem; }
+  .forecast-item + .forecast-item { padding-top: 1rem; border-top: 1px solid #e2e8f0; }
+  .forecast-label { color: #64748b; font-size: .76rem; }
+  .forecast-value { display: block; margin-top: .2rem; color: #0f172a; font-size: 1.35rem; font-weight: 750; }
+  .forecast-detail { color: #94a3b8; font-size: .72rem; }
 
-<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-  <details class="group">
-    <summary class="px-6 py-4 border-b border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors flex items-center justify-between">
-      <h2 class="text-lg font-semibold text-gray-900">Recent Activity (Technical Detail)</h2>
-      <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-      </svg>
-    </summary>
-    <div class="overflow-x-auto">
-      <table class="w-full">
-        <thead class="bg-gray-50">
-          <tr>
-            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">When</th>
-            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Event</th>
-            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Details</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-200">
-          {% for e in events %}
-            <tr class="hover:bg-gray-50 transition-colors">
-              <td class="px-6 py-3 text-sm text-gray-600">{{ short_time(e.created_at) }}</td>
-              <td class="px-6 py-3 text-sm font-medium text-gray-900">{{ event_label(e.event_type) }}</td>
-              <td class="px-6 py-3 text-sm text-gray-600 font-mono">{{ event_detail(e.details, e.message) or '—' }}</td>
-            </tr>
-          {% else %}
-            <tr>
-              <td colspan="3" class="px-6 py-8 text-center text-gray-500 text-sm">No activity recorded yet.</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+  .metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: .8rem; }
+  .metric-card { padding: 1rem 1.05rem; min-height: 7rem; }
+  .metric-label { color: #64748b; font-size: .77rem; line-height: 1.25; }
+  .metric-value { margin-top: .55rem; color: #0f172a; font-size: 1.45rem; line-height: 1; font-weight: 760; letter-spacing: -.02em; }
+  .metric-detail { color: #94a3b8; font-size: .72rem; margin-top: .45rem; }
+
+  .dashboard-lower { display: grid; grid-template-columns: 1.45fr 1fr 1fr; gap: 1rem; align-items: stretch; }
+  .panel-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; padding: 1rem 1.1rem .8rem; }
+  .panel-heading h2 { margin: 0; color: #0f172a; font-size: 1rem; }
+  .panel-note { color: #94a3b8; font-size: .72rem; margin-top: .2rem; }
+  .panel-action { color: #2563eb; font-size: .75rem; font-weight: 650; white-space: nowrap; }
+
+  .velocity-chart { height: 12rem; display: flex; align-items: flex-end; gap: .55rem; padding: .8rem 1.1rem 1rem; border-top: 1px solid #f1f5f9; }
+  .velocity-bucket { flex: 1; height: 100%; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: .32rem; }
+  .velocity-count { color: #475569; font-size: .66rem; font-weight: 700; }
+  .velocity-bar-wrap { width: 100%; height: 8.7rem; display: flex; align-items: flex-end; }
+  .velocity-bar { width: 100%; min-height: .25rem; background: #3b82f6; border-radius: .24rem .24rem 0 0; }
+  .velocity-label { color: #94a3b8; font-size: .61rem; white-space: nowrap; }
+
+  .service-list { border-top: 1px solid #f1f5f9; }
+  .service-row { display: grid; grid-template-columns: 1.2fr auto; gap: .7rem; padding: .72rem 1.05rem; border-bottom: 1px solid #f1f5f9; align-items: center; }
+  .service-row:last-child { border-bottom: 0; }
+  .service-name { color: #334155; font-size: .79rem; font-weight: 650; }
+  .service-detail { color: #94a3b8; font-size: .66rem; margin-top: .12rem; }
+  .status-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 4.5rem; padding: .25rem .55rem; border-radius: 999px; font-size: .68rem; font-weight: 700; background: #dcfce7; color: #166534; }
+  .status-pill.blue { background: #dbeafe; color: #1d4ed8; }
+  .status-pill.amber { background: #fef3c7; color: #92400e; }
+  .status-pill.red { background: #fee2e2; color: #991b1b; }
+  .status-pill.gray { background: #f1f5f9; color: #475569; }
+
+  .source-list { border-top: 1px solid #f1f5f9; padding: .35rem 1.05rem .85rem; }
+  .source-row { padding: .65rem 0; border-bottom: 1px solid #f1f5f9; }
+  .source-row:last-child { border-bottom: 0; }
+  .source-top { display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: #334155; font-size: .76rem; }
+  .source-track { margin-top: .45rem; height: .38rem; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+  .source-fill { height: 100%; border-radius: inherit; background: #2563eb; }
+  .attention-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; padding: .7rem 1.05rem 1rem; border-top: 1px solid #f1f5f9; }
+  .attention-item { padding: .7rem; border-radius: .55rem; background: #f8fafc; border: 1px solid #f1f5f9; }
+  .attention-item[data-tone="red"] { background: #fef2f2; border-color: #fee2e2; }
+  .attention-item[data-tone="amber"] { background: #fffbeb; border-color: #fef3c7; }
+  .attention-label { color: #64748b; font-size: .68rem; }
+  .attention-value { margin-top: .2rem; color: #0f172a; font-size: 1.15rem; font-weight: 750; }
+  .stacked-panels { display: grid; gap: 1rem; }
+
+  @media (max-width: 1100px) {
+    .overview-panel { grid-template-columns: 1fr 2fr; }
+    .forecast { grid-column: 1 / -1; grid-template-columns: repeat(2,1fr); border-top: 1px solid #e2e8f0; padding-top: 1rem; }
+    .forecast-item + .forecast-item { padding-top: 0; padding-left: 1rem; border-top: 0; border-left: 1px solid #e2e8f0; }
+    .metric-grid { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .dashboard-lower { grid-template-columns: 1fr 1fr; }
+    .velocity-panel { grid-column: 1 / -1; }
+  }
+  @media (max-width: 760px) {
+    body { overflow-x: hidden; }
+    header .bar { height: auto; min-height: 4rem; flex-wrap: wrap; padding: .85rem 0; gap: .45rem; }
+    header nav { width: 100%; gap: .35rem; overflow-x: auto; padding-bottom: .1rem; }
+    header nav a { padding: .35rem .55rem; white-space: nowrap; }
+    main { margin-top: 1.25rem; }
+    .dashboard-header { flex-direction: column; }
+    .dashboard-header-side { width: 100%; justify-content: flex-start; }
+    .dashboard-title { font-size: 1.6rem; }
+    .health-card { min-width: 0; width: 100%; flex-wrap: wrap; }
+    .health-time { width: 100%; margin: .15rem 0 0; padding: .55rem 0 0; border-left: 0; border-top: 1px solid rgba(100,116,139,.2); }
+    .overview-panel { grid-template-columns: 1fr; }
+    .completion-hero { padding: 0 0 1rem; border-right: 0; border-bottom: 1px solid #e2e8f0; }
+    .state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .state-item { border: 0; border-bottom: 1px solid #f1f5f9; }
+    .metric-grid, .dashboard-lower { grid-template-columns: 1fr; }
+    .velocity-panel { grid-column: auto; }
+    .velocity-chart { gap: .28rem; }
+    .velocity-label { font-size: .52rem; transform: rotate(-45deg); transform-origin: center; margin-bottom: .45rem; }
+  }
+</style>
+
+<div class="dashboard-shell">
+  <div class="dashboard-header">
+    <div>
+      <h1 class="dashboard-title">Executive control room</h1>
+      <p class="dashboard-subtitle">System-wide monitoring of PDF processing, extraction, and storage</p>
     </div>
-  </details>
+    <div class="dashboard-header-side">
+      <div class="health-card" data-tone="{{ pipeline_tone }}">
+        <span class="health-dot" aria-hidden="true"></span>
+        <div><div class="health-label">Pipeline health</div><div class="health-value">{{ pipeline_state }}</div></div>
+        <div class="health-time">Updated {{ updated_at.strftime('%H:%M') }} IST<br><span>{{ updated_at.strftime('%d %b %Y') }}</span></div>
+      </div>
+      <a class="dashboard-link" href="/documents">View documents</a>
+      <a class="dashboard-link primary" href="/uploads">Open uploads</a>
+    </div>
+  </div>
+
+  <section class="dashboard-panel overview-panel" aria-labelledby="overall-completion-heading">
+    <div class="completion-hero">
+      <div class="eyebrow" id="overall-completion-heading">Overall completion</div>
+      <div class="completion-number">{{ completion_percent|round|int }}% <small>{{ completed }} of {{ total }}</small></div>
+      <div class="completion-copy">PDFs successfully processed</div>
+      <div class="progress-track" role="progressbar" aria-label="PDF completion" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ completion_percent }}"><div class="progress-value" style="width: {{ completion_percent }}%"></div></div>
+    </div>
+    <div class="state-grid" aria-label="Document states">
+      <div class="state-item"><div class="state-label">Finished</div><div class="state-value green">{{ completed }}</div><div class="state-detail">completed PDFs</div></div>
+      <div class="state-item"><div class="state-label">Processing</div><div class="state-value blue">{{ processing }}</div><div class="state-detail">active now</div></div>
+      <div class="state-item"><div class="state-label">Waiting</div><div class="state-value">{{ waiting }}</div><div class="state-detail">queued work</div></div>
+      <div class="state-item"><div class="state-label">Duplicates</div><div class="state-value amber">{{ duplicates }}</div><div class="state-detail">safely skipped</div></div>
+      <div class="state-item"><div class="state-label">Failed</div><div class="state-value {% if failed %}red{% endif %}">{{ failed }}</div><div class="state-detail">needs attention</div></div>
+    </div>
+    <div class="forecast">
+      <div class="forecast-item"><div class="forecast-label">Measured processing speed</div><span class="forecast-value">{{ '%.1f'|format(throughput) }} PDFs/hour</span><span class="forecast-detail">{{ throughput_window_label }}</span></div>
+      <div class="forecast-item"><div class="forecast-label">Estimated time remaining</div><span class="forecast-value">{% if eta_hours is none %}Calculating{% elif eta_hours < 1 %}Under 1 hour{% elif eta_hours < 48 %}{{ eta_hours|round|int }} hours{% else %}{{ (eta_hours / 24)|round(1) }} days{% endif %}</span><span class="forecast-detail">{{ remaining }} PDFs left at current speed</span></div>
+    </div>
+  </section>
+
+  <section class="metric-grid" aria-label="Processing metrics">
+    <div class="dashboard-panel metric-card"><div class="metric-label">PDFs completed today</div><div class="metric-value">{{ processed }}</div><div class="metric-detail">Since midnight IST</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Pages processed</div><div class="metric-value">{{ '{:,}'.format(pages_processed) }}</div><div class="metric-detail">Current document attempts</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Voter records saved</div><div class="metric-value">{{ '{:,}'.format(records_saved) }}</div><div class="metric-detail">Database total</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Average PDF duration</div><div class="metric-value">{% if avg_pdf_seconds %}{{ duration_summary((avg_pdf_seconds * 1000)|int) }}{% else %}—{% endif %}</div><div class="metric-detail">Completed PDFs</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Average seconds per page</div><div class="metric-value">{% if avg_seconds_per_page %}{{ '%.1f'|format(avg_seconds_per_page) }}s{% else %}—{% endif %}</div><div class="metric-detail">Measured completed units</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Active sessions</div><div class="metric-value">{{ active }}</div><div class="metric-detail">Documents with live sessions</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Queue backlog</div><div class="metric-value">{{ waiting }}</div><div class="metric-detail">Waiting to start</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Retrying</div><div class="metric-value">{{ retrying }}</div><div class="metric-detail">Automatic recovery</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Discovered today</div><div class="metric-value">{{ discovered }}</div><div class="metric-detail">New PDFs found</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Records extracted</div><div class="metric-value">{{ '{:,}'.format(records_extracted) }}</div><div class="metric-detail">Current sessions</div></div>
+  </section>
+
+  <section class="dashboard-lower">
+    <div class="dashboard-panel velocity-panel">
+      <div class="panel-heading"><div><h2>Processing velocity</h2><div class="panel-note">Completed PDFs per hour · last 12 hours · IST</div></div><div class="panel-action">{{ '%.1f'|format(throughput) }} PDFs/hour</div></div>
+      <div class="velocity-chart" aria-label="Hourly PDF completion chart">
+        {% for bucket in velocity %}<div class="velocity-bucket" title="{{ bucket.label }} IST: {{ bucket.count }} PDF{% if bucket.count != 1 %}s{% endif %}"><div class="velocity-count">{{ bucket.count }}</div><div class="velocity-bar-wrap"><div class="velocity-bar" style="height: {{ bucket.height }}%"></div></div><div class="velocity-label">{{ bucket.label }}</div></div>{% endfor %}
+      </div>
+    </div>
+
+    <div class="dashboard-panel">
+      <div class="panel-heading"><div><h2>Service health</h2><div class="panel-note">Live operational signals</div></div></div>
+      <div class="service-list">
+        {% for service in services %}<div class="service-row"><div><div class="service-name">{{ service.name }}</div><div class="service-detail">{{ service.detail }}</div></div><span class="status-pill {{ service.tone }}">{{ service.status }}</span></div>{% endfor %}
+      </div>
+    </div>
+
+    <div class="stacked-panels">
+      <div class="dashboard-panel">
+        <div class="panel-heading"><div><h2>Workload by source</h2><div class="panel-note">Where the PDFs arrived from</div></div><a class="panel-action" href="/uploads">Open uploads</a></div>
+        <div class="source-list">
+          {% for source in sources %}<div class="source-row"><div class="source-top"><strong>{{ source.name }}</strong><span>{{ source.count }} · {{ source.share }}%</span></div><div class="source-track"><div class="source-fill" style="width: {{ source.share }}%"></div></div></div>{% else %}<div class="panel-note">No workload has been discovered yet.</div>{% endfor %}
+        </div>
+      </div>
+
+      <div class="dashboard-panel">
+        <div class="panel-heading"><div><h2>Attention &amp; recovery</h2><div class="panel-note">Only actionable pipeline conditions</div></div><a class="panel-action" href="/documents">View documents</a></div>
+        <div class="attention-grid">
+          <div class="attention-item" data-tone="{% if failed %}red{% endif %}"><div class="attention-label">Failed PDFs</div><div class="attention-value">{{ failed }}</div></div>
+          <div class="attention-item" data-tone="{% if retrying %}amber{% endif %}"><div class="attention-label">Retrying</div><div class="attention-value">{{ retrying }}</div></div>
+          <div class="attention-item" data-tone="{% if stale %}amber{% endif %}"><div class="attention-label">Stale OCR units</div><div class="attention-value">{{ stale }}</div></div>
+          <div class="attention-item"><div class="attention-label">Duplicates skipped</div><div class="attention-value">{{ duplicates }}</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
 </div>
 
 {% endblock %}

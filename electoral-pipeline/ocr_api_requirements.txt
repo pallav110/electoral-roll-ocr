@@ -10,6 +10,14 @@
 # PaddleOCR 3.x removes show_log/use_angle_cls and returns a different result
 # structure, so a 3.x install raises ValueError at first use while still
 # reporting paddleocr_available=true.
+#
+# paddlepaddle MUST be the CPU build, not paddlepaddle-gpu. A GPU wheel on a
+# host with no NVIDIA driver fails to import at all --
+# "ImportError: libcuda.so.1: cannot open shared object file" -- which the
+# module's import guard swallows into paddleocr_available=false. The service
+# then reports status "ok" and quietly returns empty house numbers and ages.
+# That exact silent degradation was observed on 2026-10-07: an image built
+# before the CPU pin below had paddlepaddle-gpu installed.
 
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
@@ -33,6 +41,8 @@ opencv-contrib-python-headless==4.10.0.84
 # MUST remain on the 2.x line -- see note above.
 paddleocr==2.10.0
 paddlepaddle==3.0.0
+# Uninstall any GPU build before installing, so a rebuild on a machine that
+# still carries one cannot silently leave the CPU wheel shadowed.
 
 # paddle imports setuptools at module load time (paddle/utils/cpp_extension).
 # Without this, `import paddleocr` raises ModuleNotFoundError, which the

@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Electoral Pipeline{% endblock %}
+
+{#
+  The front page.
+
+  `/` used to redirect straight to the upload form, so the first thing anyone
+  saw was a file picker: no statement of what the system does, no sense of
+  whether it was already working on something, nowhere to send a new person.
+  This page is that missing introduction, and the only page here whose job is
+  to explain rather than to operate.
+
+  Everything on it is either the live state of the database or prose about the
+  pipeline. The numbers come from the same queries the dashboard runs, so a
+  fresh install renders zeroes instead of erroring, and a run in progress says
+  so on the front page.
+#}
+
+{% block content %}
+{# ── Hero. ──────────────────────────────────────────────────────────────────
+   The one paragraph that has to carry the whole explanation, and the two
+   places a person actually wants to go. The facts strip under it is the live
+   database, not marketing copy. #}
+<section class="hero">
+  <div class="hero-layout">
+    <div class="hero-copy">
+      <span class="hero-eyebrow">Electoral Roll OCR</span>
+      <h1 class="hero-title">Turn scanned voter rolls into a searchable database.</h1>
+      
+
+      <div class="hero-actions">
+        <a href="/upload" class="btn btn-primary">Upload PDFs</a>
+        <a href="/dashboard" class="btn btn-ghost">Open the dashboard</a>
+      </div>
+
+      <div class="hero-facts">
+        <div class="hero-fact">
+          <span class="stat-card-value">{{ "{:,}".format(total_docs) }}</span>
+          <span class="stat-card-label">PDFs registered</span>
+        </div>
+        <div class="hero-fact">
+          <span class="stat-card-value">{{ "{:,}".format(records) }}</span>
+          <span class="stat-card-label">Voter records saved</span>
+        </div>
+        <div class="hero-fact">
+          <span class="stat-card-value">{{ "{:,}".format(batches) }}</span>
+          <span class="stat-card-label">Upload batches</span>
+        </div>
+        <div class="hero-fact">
+          <span class="stat-card-value">{{ "{:,}".format(active) }}</span>
+          <span class="stat-card-label">Running now</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-visual" aria-hidden="true">
+      <div class="hero-visual-frame">
+        <svg viewBox="0 0 400 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img">
+          <title>Scanned rolls processed into structured voter data</title>
+          <defs>
+            <linearGradient id="heroScan" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#2563eb" stop-opacity="0"/>
+              <stop offset="45%" stop-color="#2563eb" stop-opacity="0.35"/>
+              <stop offset="55%" stop-color="#2563eb" stop-opacity="0.35"/>
+              <stop offset="100%" stop-color="#2563eb" stop-opacity="0"/>
+            </linearGradient>
+            <filter id="heroSoft" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#1e3a8a" flood-opacity="0.12"/>
+            </filter>
+          </defs>
+
+          <g filter="url(#heroSoft)">
+            <rect x="28" y="52" width="112" height="148" rx="8" fill="#e2e8f0"/>
+            <rect x="40" y="40" width="112" height="148" rx="8" fill="#fff" stroke="#cbd5e1" stroke-width="1.5"/>
+            <rect x="52" y="58" width="56" height="6" rx="3" fill="#94a3b8"/>
+            <rect x="52" y="72" width="88" height="4" rx="2" fill="#e2e8f0"/>
+            <rect x="52" y="82" width="80" height="4" rx="2" fill="#e2e8f0"/>
+            <rect x="52" y="92" width="86" height="4" rx="2" fill="#e2e8f0"/>
+            <rect x="52" y="108" width="40" height="28" rx="4" fill="#dbeafe" stroke="#93c5fd"/>
+            <rect x="96" y="108" width="40" height="28" rx="4" fill="#f1f5f9"/>
+            <rect x="52" y="142" width="88" height="4" rx="2" fill="#e2e8f0"/>
+            <rect x="52" y="152" width="72" height="4" rx="2" fill="#e2e8f0"/>
+            <text x="72" y="168" font-family="system-ui,sans-serif" font-size="9" fill="#64748b">PDF scan</text>
+          </g>
+
+          <rect x="36" y="118" width="120" height="36" fill="url(#heroScan)"/>
+          <path d="M168 128h44" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 6"/>
+          <polygon points="218,128 210,124 210,132" fill="#2563eb"/>
+
+          <rect x="228" y="108" width="88" height="40" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+          <circle cx="248" cy="128" r="8" fill="#2563eb"/>
+          <path d="M244 128l3 3 6-6" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="262" y="132" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#1e40af">OCR + extract</text>
+
+          <path d="M316 128h44" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 6"/>
+          <polygon points="366,128 358,124 358,132" fill="#2563eb"/>
+
+          <g filter="url(#heroSoft)">
+            <rect x="248" y="168" width="128" height="112" rx="10" fill="#fff" stroke="#cbd5e1" stroke-width="1.5"/>
+            <rect x="248" y="168" width="128" height="28" rx="10" fill="#1d4ed8"/>
+            <rect x="248" y="184" width="128" height="12" fill="#1d4ed8"/>
+            <text x="262" y="186" font-family="system-ui,sans-serif" font-size="10" font-weight="600" fill="#fff">Voter records</text>
+            <rect x="258" y="204" width="108" height="8" rx="2" fill="#dcfce7"/>
+            <rect x="258" y="218" width="96" height="8" rx="2" fill="#e2e8f0"/>
+            <rect x="258" y="232" width="102" height="8" rx="2" fill="#e2e8f0"/>
+            <rect x="258" y="246" width="88" height="8" rx="2" fill="#dbeafe"/>
+            <rect x="258" y="260" width="100" height="8" rx="2" fill="#e2e8f0"/>
+            <circle cx="268" cy="208" r="3" fill="#16a34a"/>
+            <circle cx="268" cy="250" r="3" fill="#2563eb"/>
+          </g>
+
+          <circle cx="320" cy="56" r="3" fill="#cbd5e1"/>
+          <circle cx="336" cy="72" r="2" fill="#e2e8f0"/>
+          <circle cx="352" cy="48" r="2.5" fill="#bfdbfe"/>
+          <circle cx="48" cy="248" r="2" fill="#bfdbfe"/>
+          <circle cx="64" cy="264" r="3" fill="#e2e8f0"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+{# ── Live state. ────────────────────────────────────────────────────────────
+   The same split the upload page's progress bar uses, one level up: what is
+   finished, what is moving, what is waiting, what came out. A number that did
+   not fit the four cells (files that failed, or were skipped as duplicates)
+   is only rendered when it is non-zero -- an entry that reads "0 duplicates"
+   on a fresh install is noise, and the absence is the same information. #}
+
+
+
+
+{% endblock %}

@@ -14,7 +14,14 @@
 # reach an E: that is not there, and typing one is reported as an unknown
 # drive rather than silently finding nothing.
 x-host-mounts: &host-mounts
-  - ./sample-pdfs:/data/pdfs
+  # Bind-mount the application package so template and UI edits on the host are
+  # what the web service serves. Without this, only a no-cache image rebuild
+  # picks up changes under app/templates/.
+  - ./app:/code/app
+  # PDF_SOURCE_PATH is honoured here as well as on the ocr service, so one
+  # variable moves the scanned rolls for every service at once. It defaults to
+  # ./sample-pdfs, which is what this hardcoded value was already doing.
+  - ${PDF_SOURCE_PATH:-./sample-pdfs}:/data/pdfs
   - type: bind
     source: //c/Users
     target: /host/c/Users
@@ -29,14 +36,39 @@ x-host-mounts: &host-mounts
     target: /data/ingest
 
 services:
+  minio:
+    build:
+      context: .
+      dockerfile: Dockerfile.minio
+      args:
+        MINIO_RELEASE: RELEASE.2025-10-15T17-29-55Z
+        MINIO_COMMIT: 9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_CONSOLE_PUBLIC_URL}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ${MINIO_DATA_PATH:-./minio-data}:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      retries: 30
+    restart: unless-stopped
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: electoral
       POSTGRES_USER: electoral
       POSTGRES_PASSWORD: electoral
     volumes:
       - pgdata:/var/lib/postgresql/data
+    ports:
+    - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U electoral"]
       interval: 3s
@@ -44,6 +76,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     volumes:
       - redisdata:/data
     healthcheck:
@@ -55,13 +88,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ocr
+    restart: unless-stopped
     ports: ["127.0.0.1:8082:8082"]
     environment:
       # 12 of the 16 cores the WSL2 VM exposes. The code defaults to
       # min(8, cpu_count), which would leave half the box idle. Each worker
       # runs one card through Tesseract subprocesses, and OMP_THREAD_LIMIT=1
       # keeps those from nesting threads, so one core per worker is the unit.
-      - OCR_CARD_WORKERS=14
+      - OCR_CARD_WORKERS=${OCR_CARD_WORKERS:-14}
+      # pytesseract (subprocess per read, the original), tesserocr (cached
+      # in-process engine), or shadow (runs both and counts disagreements).
+      # Defaults to the original so an image without tesserocr behaves as before.
+      - OCR_TESS_BACKEND=${OCR_TESS_BACKEND:-pytesseract}
+      # CPU-safe base default. The GPU override turns this on together with the
+      # NVIDIA device request, so the setting can never claim GPU mode on a host
+      # where no GPU was actually assigned to the container.
+      - PADDLE_USE_GPU=0
+      - OMP_THREAD_LIMIT=1
     volumes:
       # The service module is bind-mounted so a `docker compose up` can never
       # silently revert to an older copy baked into the image. Previously the
@@ -69,7 +112,13 @@ services:
       # edit made with `docker compose cp` and the container ran stale logic
       # while looking perfectly healthy.
       - ./ocr_pdf_api.py:/app/ocr_pdf_api.py:ro
-      - ./sample-pdfs:/data/pdfs
+      # The cover-page reader (/ocr/cover) lives in its own module, mounted
+      # for the same reason.
+      - ./ocr_cover.py:/app/ocr_cover.py:ro
+      # So a born-digital ward roll posted to this service is read by the
+      # text-layer extractor instead of the scanned card grid. The ocr-text
+      # service mounts the same file.
+      - ./ocr_text_pdf_api.py:/app/ocr_text_pdf_api.py:ro
       # PaddleOCR downloads ~16 MB of model weights into /root/.paddleocr on
       # first use. Without a mount that path is part of the container's
       # writable layer, so every `docker compose up` re-downloads all three
@@ -81,10 +130,126 @@ services:
       # /results -- mounting it under the office path instead left every saved
       # extraction JSON in an unnamed directory that a container restart erased.
       - ocr-results:/results
+      # The remote made this configurable and read-only. Read-only is right for
+      # the OCR service: it only ever reads the scanned roll, never writes.
+      - ${PDF_SOURCE_PATH:-./sample-pdfs}:/data/pdfs:ro
+      - ocr-results:/home/spxlpt133/Desktop/OCR/results
+    # No GPU request here, on purpose. Both ways of asking Compose for an
+    # NVIDIA device -- `gpus: all` and a deploy.resources reservation -- are
+    # hard requirements, not requests: on a host with no NVIDIA driver the
+    # prestart hook exits non-zero with "libnvidia-ml.so.1: cannot open
+    # shared object file", the container never starts, and everything waiting
+    # on it -- web and worker, via service_healthy -- never starts either.
+    # Compose has no optional form of the request: `gpus` validates only as
+    # the literal 'all', so there is nothing to switch off.
+    #
+    # The error also names a missing library rather than "this machine has no
+    # GPU", so it reads like a broken install instead of a CPU-only host.
+    #
+    # PaddleOCR needs no GPU to work. ocr_pdf_api.py::_get_paddle reads
+    # PADDLE_USE_GPU, which defaults off, so the default stack runs PaddleOCR
+    # on CPU everywhere. A machine that does have a GPU opts in with the
+    # override file:
+    #
+    #     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 10s
       retries: 20
+
+  # The second reader. Same endpoints, same record schema, same confidence and
+  # review semantics -- the only difference is that it reads rolls carrying a
+  # text layer, and it returns 422 rather than zero records when handed a
+  # scanned one. It exists because the scanned reader's geometry is measured
+  # against a grid that a born-digital roll does not use, so sending a
+  # text-layer PDF to it yields an empty result with no error anywhere.
+  #
+  # It is NOT optional to web/worker the way ocr is: they depend on ocr being
+  # healthy because routing falls back to the scanned reader. ocr-text is
+  # reachable but not a startup gate, so a roll that needs it fails at extract
+  # time with a 502 and the message naming the URL, rather than the whole
+  # stack refusing to boot over a reader that is idle anyway.
+  ocr-text:
+    build:
+      context: .
+      dockerfile: Dockerfile.ocr.text
+    restart: unless-stopped
+    ports: ["127.0.0.1:8083:8083"]
+    environment:
+      - OCR_TEXT_API_PORT=8083
+      - EXTRACTOR_API_KEY=${EXTRACTOR_API_KEY}
+    volumes:
+      # Bind-mounted for the same reason ocr's is: a bind mount means a restart
+      # can never silently revert to the copy baked into the image.
+      - ./ocr_text_pdf_api.py:/app/ocr_text_pdf_api.py:ro
+      # It imports ocr_pdf_api for the shared record/confidence/review layer,
+      # so that file has to be in the image too -- the bind mount above
+      # shadows the baked copy and the module must still import.
+      - ./ocr_pdf_api.py:/app/ocr_pdf_api.py:ro
+      - ocr-text-results:/results
+      - ${PDF_SOURCE_PATH:-./sample-pdfs}:/data/pdfs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 10s
+      retries: 20
+
+  image-extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile.images
+    restart: unless-stopped
+    # Four independent processes can render/crop four completed PDFs at once.
+    # This service never calls the voter-card OCR endpoint.
+    # 8084 serves image extraction. 8095 is the internal, read-only map
+    # evidence helper used by worker-map-verify. Start both together so a
+    # normal image-extractor restart cannot silently remove map verification.
+    command: sh -c 'python /app/map_georef_server.py & exec uvicorn ocr_image_and_details_extractor:app --host 0.0.0.0 --port 8084 --workers 4'
+    environment:
+      - IMAGE_DETAILS_OUTPUT_DIR=/results
+    volumes:
+      - ./ocr_image_and_details_extractor.py:/app/ocr_image_and_details_extractor.py:ro
+      - ./map_georeference.py:/app/map_georeference.py:ro
+      - ./map_georef_server.py:/app/map_georef_server.py:ro
+      - image-extractor-results:/results
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8084/health')"]
+      interval: 10s
+      retries: 20
+
+  # Local India-only OSM geocoder.  This is deliberately capped below the
+  # voter OCR budget: it is an eventual-consistency service for map images,
+  # never a dependency of document extraction.  It imports the free India
+  # extract once, then serves internal landmark searches without public APIs.
+  osm-geocoder:
+    image: mediagis/nominatim:5.3
+    restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 6g
+    shm_size: 1g
+    environment:
+      - PBF_URL=https://download.geofabrik.de/asia/india-latest.osm.pbf
+      - IMPORT_STYLE=full
+      - FREEZE=true
+      - UPDATE_MODE=none
+      - THREADS=2
+      - GUNICORN_WORKERS=1
+      - POSTGRES_SHARED_BUFFERS=512MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=512MB
+      - POSTGRES_AUTOVACUUM_WORK_MEM=256MB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=2GB
+      - POSTGRES_MAX_WAL_SIZE=512MB
+    volumes:
+      - osm-geocoder-data:/var/lib/postgresql/16/main
+      - osm-geocoder-flatnode:/nominatim/flatnode
+    healthcheck:
+      # This endpoint exists only after the one-time India import has finished.
+      # A running importer is not a usable geocoder.
+      test: ["CMD-SHELL", "curl -fsS 'http://localhost:8080/status' >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 240
+      start_period: 30s
 
   init:
     build: .
@@ -100,35 +265,98 @@ services:
 
   web:
     build: .
+    restart: unless-stopped
     env_file: .env
     environment:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
       - TRANSLITERATION_SCHEME=itrans
+      # The born-digital reader. Set explicitly rather than inherited from
+      # .env so the compose service name and the URL can never disagree --
+      # a .env that still points at localhost would resolve to the web
+      # container itself, and every text-layer roll would fail with a 502
+      # that looks exactly like the reader being down.
+      - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - OCR_ROUTER=on
       # Where the host drives are bind-mounted. A folder path typed in the UI
       # is rewritten to sit under this root, so "C:\Users\me\Rolls" becomes
       # /host/c/Users/me/Rolls. Every drive listed in the anchor above is
       # reachable; anything else is reported as an unknown drive.
       - HOST_MOUNT_ROOT=/host
-    ports: ["127.0.0.1:${WEB_PORT:-8088}:8000"]
+    ports: ["${WEB_PORT:-8088}:8000"]
     volumes: *host-mounts
     depends_on:
       init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       ocr: {condition: service_healthy}
+      minio: {condition: service_healthy}
 
-  worker:
+  # Two workers, not one. A single --concurrency=1 worker served every task from
+  # one FIFO, so the beat's own dispatch and recovery messages -- which fire every
+  # 10 and 60 seconds -- queued up in front of the OCR work they exist to
+  # schedule. A 27-page roll reported 7 hr 45 min while its own units had done
+  # about 5 minutes of work. Splitting the queues means a slow unit can no longer
+  # delay the dispatch tick that refills the window.
+  worker-control:
     build: .
-    # Concurrency 1 on purpose. Each unit is a 3-page OCR request, and the OCR
-    # service already runs its 30 cards in parallel. Two units at once put this
-    # 8-core box at load 40 (5x oversubscribed) and every unit slowed to a crawl,
-    # which is what made the earlier runs time out rather than finish.
-    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1
+    restart: unless-stopped
+    # Serves discovery, dispatch, recovery, MinIO ingest and process_document.
+    # All of these are database bookkeeping and finish in milliseconds; none of
+    # them should ever be behind an OCR call.
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q control
     env_file: .env
     environment:
       - EXTRACTOR_TIMEOUT_SECONDS=5400
       - PAGES_PER_UNIT=3
       - TRANSLITERATION_SCHEME=itrans
+      - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - OCR_ROUTER=on
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      ocr: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  # Serves ingest_minio_zip_archives only. The task is routed to the "ingest"
+  # queue, and neither other worker listens there, so without this service the
+  # beat enqueues a poll every 30 seconds and none of them ever runs. Kept off
+  # the control queue because a multi-GB archive download would stall dispatch.
+  worker-ingest:
+    build: .
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q ingest
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
+      - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - OCR_ROUTER=on
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  # Reads page 1 of every roll -- the printed header and the male / female /
+  # third-gender / total counts -- via the OCR service's /ocr/cover endpoint.
+  # Its own queue because a cover read is a 5-10 s OCR call: too slow for the
+  # control queue, and on the ocr queue it would wait behind hour-long card
+  # extractions when its whole point is to have the printed totals early.
+  worker-cover:
+    build: .
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q cover
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
+      - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - OCR_ROUTER=on
       - HOST_MOUNT_ROOT=/host
     volumes: *host-mounts
     depends_on:
@@ -136,8 +364,94 @@ services:
       redis: {condition: service_healthy}
       ocr: {condition: service_healthy}
 
+  worker-ocr:
+    build: .
+    restart: unless-stopped
+    # Serves process_unit only. Concurrency 1 on purpose. Each unit is a 3-page
+    # OCR request, and the OCR service already runs its 30 cards in parallel. Two
+    # units at once put this 8-core box at load 40 (5x oversubscribed) and every
+    # unit slowed to a crawl, which is what made the earlier runs time out rather
+    # than finish.
+    #
+    # Keep this at or above OCR_MAX_INFLIGHT_UNITS (default 2) or the worker
+    # idles waiting for a window that can never fill.
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q ocr
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
+      # This is the service that actually issues extraction requests, so the
+      # routing env has to be here as well as on web -- web only reads the
+      # progress counters.
+      - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - OCR_ROUTER=on
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      ocr: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  # Gallery generation is independent of voter OCR. Four processes make the
+  # one-off visual backfill fast; they consume only the ``images`` queue.
+  worker-images:
+    build: .
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=4 -Q images
+    env_file: .env
+    environment:
+      - IMAGE_EXTRACTOR_URL=http://image-extractor:8084
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+      image-extractor: {condition: service_healthy}
+
+  # Cover-derived map lookups are intentionally separate from both voter OCR
+  # and visual rendering. It only contacts the local India OSM database and
+  # records a coordinate after the returned address passes verification.
+  worker-locations:
+    # Same Python dependencies as the control worker; source is bind-mounted
+    # below, so reusing this image avoids a needless second multi-GB build.
+    image: electoral-pipeline-worker-control
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=2 -Q locations
+    env_file: .env
+    environment:
+      - LOCATION_GEOCODER_URL=http://osm-geocoder:8080
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      osm-geocoder: {condition: service_started}
+
+  # One map image at a time. This queue is not attached to the OCR worker,
+  # the image worker, or the cover worker, so a slow landmark fit cannot
+  # delay voter extraction or gallery rendering.
+  worker-map-verify:
+    image: electoral-pipeline-worker-control
+    restart: unless-stopped
+    command: sh -c "python -m app.map_verify_dispatch & exec celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q map-verify"
+    env_file: .env
+    environment:
+      - LOCATION_GEOCODER_URL=http://osm-geocoder:8080
+      - IMAGE_EXTRACTOR_URL=http://image-extractor:8084
+      - MAP_EVIDENCE_URL=http://image-extractor:8095/map-evidence-rich
+      - MAP_GEOREF_URL=http://image-extractor:8095/georeference
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      redis: {condition: service_healthy}
+      osm-geocoder: {condition: service_started}
+
   beat:
     build: .
+    restart: unless-stopped
     command: celery -A app.tasks.celery_app beat --loglevel=INFO
     env_file: .env
     environment:
@@ -156,3 +470,7 @@ volumes:
   redisdata:
   ocr-results:
   ocr-paddle-cache:
+  ocr-text-results:
+  image-extractor-results:
+  osm-geocoder-data:
+  osm-geocoder-flatnode:

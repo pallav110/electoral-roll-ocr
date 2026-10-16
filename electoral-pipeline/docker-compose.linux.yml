@@ -27,18 +27,27 @@
 # host's filesystem root and let the typed path hang off it.
 #
 # NOTE ON MERGING. Compose APPENDS a service's `volumes` list rather than
-# replacing it, so the base file's Windows mounts ("//c/Users", "//d") are still
-# in the merged result. They are not harmless: on Linux Compose parses
-# "//c/Users" as an ordinary relative path, and Docker creates the missing
-# source directory instead of failing, so the bind appears to succeed while
-# /host/c stays empty. That dead mount is cancelled below with the same target
-# plus bind.create_host_path: false, which makes Compose drop it outright.
-# An empty target list is the documented way to remove an inherited mount.
-x-host-mounts: &host-mounts
+# replacing it, so a plain re-declaration here would leave the base file's
+# Windows mounts ("//c/Users", "//d") in the merged result, where `up` dies with
+# "bind source path does not exist". This file previously tried to cancel them by
+# re-declaring each target with bind.create_host_path: false. That does not work:
+# `docker compose config` showed both entries in the output, the inherited one
+# without the flag and the cancelled one with it, because volumes are merged by
+# target rather than replaced.
+#
+# `!override` is Compose's actual replacement semantics. It was verified against
+# Compose v5.5.1 before being used here: the merged output contains no //c/Users
+# and no //d, and does contain ./app:/code/app.
+x-host-mounts: &host-mounts !override
+  # Bind-mount the application package, so template and UI edits on the host are
+  # what the services serve. The previous version of this file omitted this, and
+  # because volumes are appended rather than replaced the base entry survived --
+  # but only by accident, not by intent.
+  - ./app:/code/app
   - ./sample-pdfs:/data/pdfs
   # Where PDFs from paths the container cannot read are copied so they become
   # discoverable without a new mount. Must be present on all services that run
-  # discover (web, worker, beat).
+  # discover (web, worker-control, worker-ocr, beat).
   - type: bind
     source: ./ingest
     target: /data/ingest
@@ -59,22 +68,6 @@ x-host-mounts: &host-mounts
     target: /host
     read_only: true
 
-  # Cancels the two Windows drive mounts inherited from the base file. Compose
-  # has no "remove this entry" syntax, so re-declaring the same target with
-  # create_host_path: false is what drops it: without that flag Docker would
-  # happily create the missing source directory and the bind would appear to
-  # succeed while /host/c stayed empty.
-  - type: bind
-    source: //c/Users
-    target: /host/c/Users
-    bind:
-      create_host_path: false
-  - type: bind
-    source: //d
-    target: /host/d
-    bind:
-      create_host_path: false
-
 services:
   web:
     environment:
@@ -87,7 +80,19 @@ services:
       - HOST_MOUNT_ROOT=/host
     volumes: *host-mounts
 
-  worker:
+  worker-control:
+    environment:
+      - HOST_MOUNT_STYLE=posix
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+
+  worker-ingest:
+    environment:
+      - HOST_MOUNT_STYLE=posix
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+
+  worker-ocr:
     environment:
       - HOST_MOUNT_STYLE=posix
       - HOST_MOUNT_ROOT=/host

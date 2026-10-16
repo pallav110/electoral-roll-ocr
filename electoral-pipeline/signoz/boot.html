@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Opening SigNoz</title>
+</head>
+<body>
+  <p>Signing you in to SigNoz…</p>
+  <script>
+    var params = new URLSearchParams(location.hash.slice(1));
+    var access = params.get("access") || "";
+    var refresh = params.get("refresh") || "";
+    if (!access) {
+      document.body.textContent = "This page was opened without a login token. Use the SigNoz link in the electoral app.";
+    } else {
+      localStorage.setItem("AUTH_TOKEN", access);
+      localStorage.setItem("REFRESH_AUTH_TOKEN", refresh);
+      localStorage.setItem("IS_LOGGED_IN", "true");
+      localStorage.setItem("LOGGED_IN_USER_EMAIL", params.get("email") || "");
+      location.replace("/dashboard/a6416f42-b06c-4012-b1df-5d20d1ce6da0");
+    }
+  </script>
+</body>
+</html>

@@ -10,6 +10,31 @@ from app.transliterate import gender_en, house_en as house_number_en, relation_e
 
 log = logging.getLogger(__name__)
 
+# A visible marker makes an intentionally absent name component distinct from
+# an accidental blank in Browse and spreadsheet exports.  It is applied only
+# at persistence time, after OCR validation/transliteration, so it never
+# becomes OCR input or a translated voter name.
+MISSING_NAME_MARKER = "—"
+
+# A normal voter card does not print the small box beside the serial. Storing
+# this, rather than a blank, is what stops that cell looking like a missed read.
+NO_LIST_MARK = "Not printed"
+
+# An assembly roll has no municipal ward. A blank ward cell looks like a
+# missed read; this says the roll does not print one. A Jaipur nigam
+# (municipal ward) roll keeps the ward number it actually carries.
+NO_WARD = "Not on this roll"
+
+# The printed relation labels, keyed by the stable English key. Mirrors
+# ``extractor._RELATION_KEY``; kept here so the English→Hindi direction does
+# not have to import the extractor (which pulls in the OCR stack).
+_RELATION_TYPE_HI = {
+    "father": "पिता",
+    "husband": "पति",
+    "mother": "माता",
+    "other": "अन्य",
+}
+
 
 def _int(value, field):
     if value is None or value == "":
@@ -21,6 +46,12 @@ def _int(value, field):
 
 def _text(value):
     return None if value is None else str(value).strip() or None
+
+
+def _name_cell(value):
+    """Return a visible missing-value marker for stored name fields."""
+    text = _text(value)
+    return text if text is not None else MISSING_NAME_MARKER
 
 
 def _confidence(value):
@@ -81,6 +112,27 @@ def _relation_type_en(value):
         return None
     key = str(value).strip().lower()
     return relation_en(key) or key
+
+
+def _relation_type_hi(value):
+    """Relationship type → Hindi, the inverse of ``_relation_type_en``.
+
+    ``relation_name`` and ``relationship_type`` are two columns holding one
+    fact, but they are read from two different fields: the English side from
+    ``common.relationship_type``, the Hindi from ``raw_record.relation_name``.
+    A deployment that passed one and dropped the other left the English
+    populated and the Hindi NULL on 13k rows, which reads on screen as a
+    half-empty record rather than as missing data.
+
+    This is the repair path for that: the four printed relation labels are a
+    closed, 1:1 set (see ``extractor._RELATION_KEY``), so a known English key
+    determines the Hindi word exactly. Anything unrecognised stays None
+    rather than guessing -- an unmapped key means the vocabulary grew, and
+    inventing a word would put a wrong relation on a real voter.
+    """
+    if not value:
+        return None
+    return _RELATION_TYPE_HI.get(str(value).strip().lower())
 
 
 def map_metadata(data: dict, document_id, session_id):
@@ -181,11 +233,17 @@ def map_record(item: dict, document_id, session_id, unit_id):
     sno = _int(raw_record.get("sno"), "sno")
     card_index = _int(raw_record.get("card_index"), "card_index")
     voter_sr_no = _text(raw_record.get("voter_sr_no"))
+    serial_mark = _text(raw_record.get("serial_mark")) or NO_LIST_MARK
     is_deleted = bool(raw_record.get("is_deleted", False))
     state_code = _text(raw_record.get("state_code"))
     ac_code = _text(raw_record.get("ac_code"))
     anubhag_code = _int(raw_record.get("anubhag_code"), "anubhag_code")
     anubhag_name = _text(raw_record.get("anubhag_name"))
+    ward_code = _text(raw_record.get("ward_code"))
+    roll_format = _text(raw_record.get("roll_format")) or "assembly"
+    if not ward_code and roll_format != "municipal_ward":
+        ward_code = NO_WARD
+    anubhag_status = _text(raw_record.get("anubhag_status"))
     booth_code = _text(raw_record.get("booth_code"))
     pdf_name = _text(raw_record.get("pdf_name"))
     needs_review = bool(raw_record.get("needs_review", False))
@@ -213,7 +271,12 @@ def map_record(item: dict, document_id, session_id, unit_id):
     name_hi = " ".join(filter(None, [voter_first_name_hi, voter_middle_name_hi, voter_sur_name_hi])) or name_hi
     
     # Relative name components
-    relation_name = _text(raw_record.get("relation_name"))
+    # relation_name and relationship_type are one fact in two columns, read
+    # from two different payload fields. Fall back to the English key so a
+    # payload that carried only one of them still stores a whole record
+    # rather than leaving the Hindi side silently NULL.
+    relation_name = _text(raw_record.get("relation_name")) or _relation_type_hi(
+        _text(common.get("relationship_type")))
     voter_father_first_name_hi = _text(raw_record.get("voter_father_first_name"))
     voter_father_middle_name_hi = _text(raw_record.get("voter_father_middle_name"))
     voter_father_last_name_hi = _text(raw_record.get("voter_father_last_name"))
@@ -231,7 +294,10 @@ def map_record(item: dict, document_id, session_id, unit_id):
     relative_hi = _text(hi.get("relative_name"))
     
     gender_hi = _text(hi.get("gender"))
-    section_hi = _text(hi.get("section_name"))
+    # The section name and the anubhag name are the same header. Writing it
+    # into only one of them is what left section_name blank on the addition
+    # list after anubhag_name had already been filled.
+    section_hi = _text(hi.get("section_name")) or anubhag_name
     house_hi = _text(hi.get("house_number"))
 
     if not name_hi and not en.get("name"):
@@ -288,6 +354,28 @@ def map_record(item: dict, document_id, session_id, unit_id):
     gender_en_value = gender_en(gender_hi)
     relationship_type = _relation_type_en(_text(common.get("relationship_type")))
 
+    # Keep semantic processing above this point on real values/None.  From
+    # here on, all human-facing voter and relative name cells are explicit:
+    # a single-name voter is ``Name — —`` in split columns, never an
+    # ambiguous run of empty spreadsheet cells.
+    name_hi, name_en = _name_cell(name_hi), _name_cell(name_en)
+    voter_first_name_hi, voter_first_name_en = _name_cell(voter_first_name_hi), _name_cell(voter_first_name_en)
+    voter_middle_name_hi, voter_middle_name_en = _name_cell(voter_middle_name_hi), _name_cell(voter_middle_name_en)
+    voter_sur_name_hi, voter_sur_name_en = _name_cell(voter_sur_name_hi), _name_cell(voter_sur_name_en)
+    relative_hi, relative_en = _name_cell(relative_hi), _name_cell(relative_en)
+    voter_father_first_name_hi, voter_father_first_name_en = _name_cell(voter_father_first_name_hi), _name_cell(voter_father_first_name_en)
+    voter_father_middle_name_hi, voter_father_middle_name_en = _name_cell(voter_father_middle_name_hi), _name_cell(voter_father_middle_name_en)
+    voter_father_last_name_hi, voter_father_last_name_en = _name_cell(voter_father_last_name_hi), _name_cell(voter_father_last_name_en)
+    voter_husband_first_name_hi, voter_husband_first_name_en = _name_cell(voter_husband_first_name_hi), _name_cell(voter_husband_first_name_en)
+    voter_husband_middle_name_hi, voter_husband_middle_name_en = _name_cell(voter_husband_middle_name_hi), _name_cell(voter_husband_middle_name_en)
+    voter_husband_last_name_hi, voter_husband_last_name_en = _name_cell(voter_husband_last_name_hi), _name_cell(voter_husband_last_name_en)
+    voter_mother_first_name_hi, voter_mother_first_name_en = _name_cell(voter_mother_first_name_hi), _name_cell(voter_mother_first_name_en)
+    voter_mother_middle_name_hi, voter_mother_middle_name_en = _name_cell(voter_mother_middle_name_hi), _name_cell(voter_mother_middle_name_en)
+    voter_mother_last_name_hi, voter_mother_last_name_en = _name_cell(voter_mother_last_name_hi), _name_cell(voter_mother_last_name_en)
+    voter_other_first_name_hi, voter_other_first_name_en = _name_cell(voter_other_first_name_hi), _name_cell(voter_other_first_name_en)
+    voter_other_middle_name_hi, voter_other_middle_name_en = _name_cell(voter_other_middle_name_hi), _name_cell(voter_other_middle_name_en)
+    voter_other_last_name_hi, voter_other_last_name_en = _name_cell(voter_other_last_name_hi), _name_cell(voter_other_last_name_en)
+
     # TODO(integration): Extend fields here alongside ElectoralRecord when your API adds fields.
     # OCR extracts anubhag_code/anubhag_name (from page 3 header), not section_number.
     # Use anubhag_code as section_number since they represent the same concept.
@@ -298,8 +386,10 @@ def map_record(item: dict, document_id, session_id, unit_id):
         page_number=page, source_row_number=row,
         serial_number=_int(common.get("serial_number"), "serial_number"), epic_number=_text(common.get("epic_number")),
         # OCR metadata fields
-        sno=sno, card_index=card_index, voter_sr_no=voter_sr_no, is_deleted=is_deleted,
+        sno=sno, card_index=card_index, voter_sr_no=voter_sr_no,
+        serial_mark=serial_mark, is_deleted=is_deleted,
         state_code=state_code, ac_code=ac_code, anubhag_code=anubhag_code, anubhag_name=anubhag_name,
+        ward_code=ward_code, roll_format=roll_format, anubhag_status=anubhag_status,
         booth_code=booth_code, pdf_name=pdf_name, needs_review=needs_review,
         review_reasons=review_reasons, field_sources=field_sources,
         # Voter name components

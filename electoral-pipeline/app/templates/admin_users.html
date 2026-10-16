@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-shell" style="max-width: 760px">
+  <div class="page-heading"><div><p class="eyebrow">Access control</p><h1>Authorised users</h1><p>Only active users can view voter data or use operational actions.</p></div></div>
+  <div class="panel" style="padding: 1.25rem; margin-bottom: 1.5rem">
+    <h2>Create user</h2>
+    <form method="post" action="/admin/users" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Username <input name="username" required minlength="3" maxlength="128" autocomplete="username"></label>
+      <label>Temporary password <input name="password" type="password" required minlength="14" autocomplete="new-password"></label>
+      <button class="button button-primary" type="submit">Create authorised user</button>
+    </form>
+  </div>
+  <div class="panel" style="padding: 1.25rem">
+    <h2>Current users</h2>
+    <table><thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Last sign-in</th></tr></thead>
+      <tbody>{% for user in users %}<tr><td>{{ user.username }}</td><td>{{ 'Super admin' if user.is_superadmin else 'Admin' }}</td><td>{{ 'Active' if user.is_active else 'Disabled' }}</td><td>{{ short_time(user.last_login_at) if user.last_login_at else 'Never' }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

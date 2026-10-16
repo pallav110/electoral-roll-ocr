@@ -13,7 +13,15 @@ The friendly names are display only. They never reach the database.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+    _IST = ZoneInfo("Asia/Kolkata")
+except Exception:  # pragma: no cover
+    _IST = timezone(timedelta(hours=5, minutes=30), name="IST")
 
 
 @dataclass(frozen=True)
@@ -40,6 +48,56 @@ class Table:
 
     def column(self, name: str) -> Column | None:
         return next((c for c in self.columns if c.name == name), None)
+
+
+# Columns a person reading a voter card does not ask for. They stay available
+# on the export page, inside "More columns", and they start unticked.
+_EXPORT_EXTRA = frozenset({
+    "serial_number", "sno", "card_index",
+    "relationship_type", "roll_format", "needs_review", "confidence",
+    "state_code", "ac_code", "anubhag_status",
+})
+
+
+def export_is_extra(name: str) -> bool:
+    """True for split name parts and the internal numbers on the export page."""
+    return (
+        name in _EXPORT_EXTRA
+        or "_first_name_" in name
+        or "_middle_name_" in name
+        or "_sur_name_" in name
+        or "_last_name_" in name
+    )
+
+
+def export_choices(columns, lang: str) -> list[dict]:
+    """How each column is offered on the export page.
+
+    The usual columns start ticked. Split name parts and the internal
+    numbers start unticked, and a Hindi-only or English-only visit does
+    not show the other language.
+    """
+    if lang not in {"both", "hi", "en"}:
+        lang = "both"
+    choices = []
+    for column in columns:
+        if column.name.endswith("_hi"):
+            language = "hi"
+        elif column.name.endswith("_en") or column.name == "relationship_type":
+            language = "en"
+        else:
+            language = "common"
+        visible = lang == "both" or language in {lang, "common"}
+        extra = export_is_extra(column.name)
+        choices.append({
+            "name": column.name,
+            "label": column.label,
+            "language": language,
+            "extra": extra,
+            "checked": visible and not extra,
+            "hidden": not visible,
+        })
+    return choices
 
 
 def _c(name: str, label: str, *, hint: str = "", expandable: bool = False,
@@ -77,15 +135,24 @@ _TABLES: list[Table] = [
         name="electoral_records",
         label="Voter records",
         description=(
-            "The voter list itself -- one row per card on a page. This is the "
-            "table people usually want."
+            "Search the voters extracted from your uploaded electoral rolls."
         ),
         columns=[
+            # First, so it is the frozen column and stays in view while the
+            # rest of the row scrolls. A deleted card is a person who is no
+            # longer a voter here; the whole row is tinted red in the UI.
+            _c("is_deleted", "On the roll?",
+               hint="\"Deleted\" means the roll has struck this card through. "
+               "The person is no longer a voter here and is not counted."),
             _c("page_number", "Page", hint="Which page of the PDF", numeric=True),
             _c("source_row_number", "Row", hint="Position on the page", numeric=True),
             _c("voter_sr_no", "Roll number",
                hint="The number printed on the roll, kept as text so its "
                "formatting is preserved"),
+            _c("serial_mark", "List mark",
+               hint="The small box beside the serial on an addition-list "
+               "card (परिवर्धन की सूची). A normal card does not print that "
+               "box, so the cell says Not printed."),
             _c("epic_number", "Voter ID",
                hint="The 10-character voter identity number"),
             _c("serial_number", "Serial", numeric=True),
@@ -108,32 +175,39 @@ _TABLES: list[Table] = [
             _c("gender_en", "Gender (English)"),
             _c("house_number_hi", "House number (Hindi)"),
             _c("house_number_en", "House number (English)"),
-            _c("section_number", "Section", numeric=True),
-            _c("section_name_hi", "Section name (Hindi)"),
-            _c("section_name_en", "Section name (English)"),
-            _c("is_deleted", "Marked deleted"),
-            _c("is_valid", "Passed checks"),
-            _c("needs_review", "Needs a human check",
-               hint="Set when OCR was unsure about some field"),
-            _c("review_reasons", "Why it needs review",
-               hint="Click to expand", expandable=True),
-            _c("validation_errors", "Validation problems",
-               hint="Click to expand", expandable=True),
-            _c("field_sources", "Where each value came from",
-               hint="Click to expand", expandable=True),
+            _c("ward_code", "Ward number",
+               hint="The municipal ward number, printed on a Jaipur nigam "
+               "roll. An assembly roll has no ward, so the cell says "
+               "Not on this roll."),
+            _c("roll_format", "Roll format"),
+            _c("needs_review", "Check recommended",
+               hint="Yes means one or more fields may need a human check"),
             _c("confidence", "Confidence", numeric=True),
             _c("state_code", "State code"),
             _c("ac_code", "Constituency code"),
-            _c("anubhag_code", "Anuvargh code", numeric=True),
-            _c("anubhag_name", "Anuvargh name"),
+            # Anubhag is the voter-roll term users see on the official PDF.
+            # Do not show the legacy duplicate `section_*` columns above: old
+            # imports did not always populate them and that made a filled
+            # anubhag look falsely empty in Browse.
+            #
+            # The status sits with the pair it qualifies rather than up in the
+            # roll-format block, because a blank anubhag number only reads as
+            # "not applicable" when the reason is beside it.  On a municipal
+            # ward roll there is no anubhag at all, and an unexplained blank
+            # beside a filled name looks exactly like a failed extraction.
+            _c("anubhag_status", "Anubhag status",
+               hint="Not applicable for municipal ward rolls"),
+            _c("anubhag_code", "Anubhag number", numeric=True,
+               hint="अनुभाग संख्या — the polling section number printed on the roll"),
+            _c("anubhag_name", "Anubhag name (Hindi)",
+               hint="अनुभाग का नाम — the polling section/locality printed on the roll"),
             _c("booth_code", "Booth code"),
-            _c("source_record_hash", "Record fingerprint"),
-            _c("translit_source_hash", "English source fingerprint",
-               hint="Changes when the Hindi is corrected, so a stale English "
-               "value can be spotted"),
-            _c("document_id", "Document"),
-            _c("session_id", "Session"),
-            _c("extraction_unit_id", "Work unit"),
+            # Record fingerprint, English source fingerprint, document,
+            # session and work unit stay in the database for tracing. They
+            # are not shown here: a person reading the roll cannot use them,
+            # and an empty-looking cell is not the problem — the columns
+            # themselves are. Source PDF and Saved at stay, because those
+            # answer "which file" and "when".
             _c("pdf_name", "Source PDF"),
             _c("created_at", "Saved at"),
         ],
@@ -274,6 +348,16 @@ _TABLES: list[Table] = [
 TABLES: dict[str, Table] = {t.name: t for t in _TABLES}
 TABLE_ORDER: list[str] = [t.name for t in _TABLES]
 
+# The data browser is a daily-user tool, not a database administration screen.
+# Documents have their own purpose-built page; the remaining tables are
+# pipeline diagnostics that would confuse a non-technical user and expose no
+# action they can safely take. Keeping this allow-list separate preserves the
+# internal registry for support/debugging code without making it a public UI.
+PUBLIC_TABLE_ORDER: list[str] = [
+    "electoral_records",
+    "electoral_document_metadata",
+]
+
 
 def get_table(name: str) -> Table | None:
     """Look up a table by name, or None if it is not exposed."""
@@ -295,17 +379,92 @@ def default_table() -> Table:
     return TABLES["electoral_records"]
 
 
-def cell_text(value) -> str:
+# Booleans whose yes/no reads wrong to someone who does not know the column
+# name. "is_deleted: yes" asks the reader to flip it in their head; "Deleted"
+# does not. Shared by the browser cells and the spreadsheet export so the
+# two say the same thing.
+_BOOL_WORDS: dict[str, tuple[str, str]] = {
+    "is_deleted": ("Deleted", "On the roll"),
+    "needs_review": ("Check", "OK"),
+    "is_valid": ("Passed", "Failed"),
+}
+
+
+def excel_cell(value, column: str | None = None):
+    """A value openpyxl can store.
+
+    Excel refuses a datetime that still carries a timezone. The browser shows
+    the same instant in IST, so the workbook keeps that clock time with the
+    timezone removed. A boolean with a known column is written as the same
+    word the browser shows ("Deleted" / "On the roll"), not TRUE / FALSE.
+    """
+    if isinstance(value, bool) and column in _BOOL_WORDS:
+        on, off = _BOOL_WORDS[column]
+        return on if value else off
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(_IST).replace(tzinfo=None)
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False)
+    if value is None or isinstance(value, (str, int, float, bool, date)):
+        return value
+    return str(value)
+
+
+def anubhag_display(row: dict) -> tuple[str, str]:
+    """Return (anubhag number cell, anubhag name cell) for one row.
+
+    A municipal ward roll has no assembly anubhag, so its anubhag number is
+    an honest blank rather than a failed read.  Shown beside a filled name it
+    is indistinguishable from an extraction failure, which is the confusion
+    the pipeline goes out of its way to avoid.  Where the roll format says
+    the anubhag does not apply, the ward is shown instead, and the name cell
+    says why it is empty.
+    """
+    if (row.get("anubhag_status") or "") == "not_applicable":
+        ward = cell_text(row.get("ward_code")).strip()
+        name = cell_text(row.get("anubhag_name")).strip()
+        number = f"Ward {ward}" if ward else "n/a (municipal ward roll)"
+        if name:
+            return number, f"{name} — no anubhag on a ward roll"
+        return number, "n/a — municipal ward roll"
+    if (row.get("anubhag_status") or "") == "header_needs_verification":
+        code = cell_text(row.get("anubhag_code")).strip()
+        # This is roll-level metadata, not a blank voter-card field.  Naming
+        # that distinction prevents a single unreadable PDF header from being
+        # mistaken for hundreds of corrupt voter records in Browse/export UI.
+        return (
+            code,
+            "Header name needs verification from the source PDF",
+        )
+    return (
+        cell_text(row.get("anubhag_code")),
+        cell_text(row.get("anubhag_name")),
+    )
+
+
+def cell_text(value, column: str | None = None) -> str:
     """Render any column value as a short, safe string for the table.
 
     Long values (JSON, error text) are cut here so the browser never has to
     render a 40 KB cell; the full value stays in the row and the template
-    reveals it on click.
+    reveals it on click. `column` lets a boolean be worded for its meaning
+    rather than as yes/no.
     """
     if value is None:
         return ""
     if isinstance(value, bool):
+        if column in _BOOL_WORDS:
+            on, off = _BOOL_WORDS[column]
+            return on if value else off
         return "yes" if value else "no"
+    if isinstance(value, datetime):
+        # Raw browser cells used to show server-local/UTC text; every
+        # UI timestamp goes out in IST instead.
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(_IST).strftime("%d %b %Y, %H:%M:%S IST")
     if isinstance(value, (dict, list)):
         # Compact but still recognisable, e.g. {"age": "tesseract"}.
         text = ", ".join(f"{k}: {v}" for k, v in value.items()) \
@@ -313,6 +472,22 @@ def cell_text(value) -> str:
     else:
         text = str(value)
     text = " ".join(text.split())
+    # A dash (and a few OCR-equivalent glyphs) is how the electoral roll
+    # explicitly says that no house number was supplied.  It is not a failed
+    # extraction and must not be made to look like a blank or fabricated into
+    # a number.  Keep the stored source value unchanged; this is presentation
+    # only and is used by Browse and its JSON endpoint.
+    if column in {"house_number_hi", "house_number_en"} and text in {"-", "—", "–", "«", ","}:
+        return "Not provided in roll"
     if len(text) > 80:
         text = text[:80] + "…"
     return text
+
+
+def house_number_display(value) -> str:
+    """Return the user-facing house number without changing source data.
+
+    ``None`` remains blank so a genuine OCR/data gap is still distinguishable
+    from the roll's explicit '-' placeholder.
+    """
+    return cell_text(value, "house_number_hi") if value is not None else ""

@@ -1,0 +1,187 @@
+{#
+  Shared presentation pieces.
+
+  The status badge was previously inlined as the same five-line if/elif chain
+  in documents.html, document.html and dashboard.html, and a fourth copy would
+  have arrived with the uploads table. status_tone() already returns the right
+  colour key for every status; this is the one place that turns a tone into
+  classes.
+
+  Classes here are the semantic ones from base.html (`.pill`, `.is-bad`) rather
+  than Tailwind colour utilities. Two reasons: the hand-written fallback
+  stylesheet would otherwise need a copy of every Tailwind shade in existence,
+  and a tailwind bg/text pair has a failure mode this project already hit --
+  the badge is a <span> inside a flex row, and a `display` utility on it
+  silently overrides the inline-flex that puts the dot and the label on one
+  line. Semantic classes have one author and one meaning.
+
+  Two badges exist and the difference is deliberate:
+
+    status_badge()  the original `.pill`, colour + label. Still used by the
+                    other pages, which are not part of this change.
+    state_badge()   the new `.badge`, which adds a per-tone glyph so the state
+                    survives being printed in greyscale or read by someone who
+                    cannot separate the hues.
+
+  That second point is a real accessibility requirement, not decoration. The
+  Carbon status-indicator guidance is explicit that colour alone is
+  insufficient and that an indicator needs at least three of symbol, shape,
+  colour and type; `.pill` carried only two of them. `.badge` carries all
+  four -- a distinct mark per tone, a distinct fill shape, the tone colour, and
+  the written label.
+#}
+
+{# The glyph per tone. Deliberately not one shape reused in several colours:
+   Carbon's guidance is that a shape's meaning is learned, so reusing it
+   dilutes it. Each mark is also paired with the written label, so it never has
+   to stand on its own. #}
+{% macro _tone_mark(tone) -%}
+  {%- if tone == 'good' -%}&#10003;
+  {%- elif tone == 'bad' -%}&#10005;
+  {%- elif tone == 'warn' -%}&hellip;
+  {%- elif tone == 'busy' -%}&bull;
+  {%- else -%}&ndash;{%- endif -%}
+{%- endmacro %}
+
+{% macro status_badge(status) -%}
+  {%- set tone = status_tone(status) -%}
+  <span class="pill
+    {%- if tone == 'good' %} is-good
+    {%- elif tone == 'bad' %} is-bad
+    {%- elif tone == 'busy' %} is-busy
+    {%- elif tone == 'warn' %} is-warn
+    {%- else %} is-neutral{% endif %}">
+    {%- if tone == 'busy' %}<span class="pill-dot" aria-hidden="true"></span>{% endif -%}
+    {{ status_label(status) }}
+  </span>
+{%- endmacro %}
+
+
+{# The accessible status badge used by the upload list.
+
+   Takes the document so the mark can be decorative-hidden: the word next to it
+   already says the state, so announcing the glyph as well would make a screen
+   reader read "tick, Finished". The mark is therefore aria-hidden and the
+   label carries the whole meaning. #}
+{% macro state_badge(status) -%}
+  {%- set tone = status_tone(status) -%}
+  <span class="badge
+    {%- if tone == 'good' %} is-good
+    {%- elif tone == 'bad' %} is-bad
+    {%- elif tone == 'busy' %} is-busy
+    {%- elif tone == 'warn' %} is-warn
+    {%- else %} is-neutral{% endif %}">
+    <span class="badge-mark" aria-hidden="true">{{ _tone_mark(tone) }}</span>{{ status_label(status) }}
+  </span>
+{%- endmacro %}
+
+
+{# The ⋮ action menu.
+
+   Rendered as a <details> element rather than a scripted dropdown: it opens,
+   closes and stays keyboard-reachable with no JavaScript at all, which the
+   checkbox script below then layers a click-outside-to-close on top of.
+
+   Items are plain links, not <form> submissions, and that is load-bearing
+   rather than stylistic. The whole upload list is itself one <form> so the
+   tick boxes can share a submit, and a <form> inside a <form> is invalid HTML
+   that the parser resolves by discarding the inner start tag and closing the
+   OUTER form early -- which silently detached 23 of the 24 rows from
+   #selection-form, so "Extract data" submitted one arbitrary PDF instead of
+   the ticked ones. Deleting the nested forms fixes that: the per-document
+   endpoints each grow a GET variant, so a link can reach them with no form
+   at all. A GET on these paths is safe precisely because the work is
+   idempotent -- queueing an already-queued document is refused with a 409 and
+   deleting a missing document with a 404, and both land on the upload page
+   rather than doing anything irreversible to a list the user did not intend.
+
+   The positioning is the other half of why this menu was once unusable.
+   `.action-menu` carries `position: relative` and NO z-index, so the panel
+   paints in the row's own stacking order and wins against the static rows
+   below it. `.action-panel` sets `z-index: 60`, and nothing on this page is
+   above that. The container around the list must not carry `overflow: hidden`,
+   which clips a dropdown at the panel edge instead.
+
+   Items are gated on what the backend can actually do. Retry only appears for
+   failed/cancelled because retry_document refuses everything else with a 409;
+   Delete is hidden while a document is queued or processing because
+   delete_documents refuses those too. Offering an action that always fails is
+   worse than not offering it. #}
+{% macro action_menu(document_id, status) -%}
+<details class="action-menu">
+  <summary class="action-trigger" aria-label="Actions">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <circle cx="8" cy="3.5" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/>
+    </svg>
+  </summary>
+  <div class="action-panel">
+    <a href="/documents/{{ document_id }}">Open</a>
+    <a href="/documents/{{ document_id }}/pdf" target="_blank" rel="noopener">View PDF</a>
+    {% if status == 'failed' or status == 'cancelled' %}
+      <a href="/documents/{{ document_id }}/retry">Retry</a>
+    {% endif %}
+    {% if status == 'pending' or status == 'retry' %}
+      <a href="/uploads/document/{{ document_id }}/pause"
+         data-confirm="Pause this PDF? The dispatcher will skip it until you resume it.">Pause</a>
+    {% endif %}
+    {% if status == 'paused' %}
+      <a href="/uploads/document/{{ document_id }}/resume">Resume</a>
+    {% endif %}
+    {% if status != 'queued' and status != 'processing' %}
+      <a href="/uploads/document/{{ document_id }}/extract"
+         data-confirm="Start extracting data from this PDF?">
+        {%- if status == 'completed' %}Extract again{% else %}Extract this PDF{% endif -%}
+      </a>
+    {% endif %}
+    {% if status != 'queued' and status != 'processing' %}
+      <div class="action-sep" role="separator"></div>
+      <a href="/uploads/document/{{ document_id }}/delete" class="is-danger"
+         data-confirm="Delete this PDF and everything extracted from it? This cannot be undone.">Delete</a>
+    {% endif %}
+  </div>
+</details>
+{%- endmacro %}
+
+
+{# The ⋮ action menu for a whole batch strip.
+
+   The row menu above acts on one PDF. This one acts on the batch of them the
+   strip heads, which is the other thing you actually want to do with a batch:
+   tick all 50 at once, or send all 50 to extraction without ticking 50 rows.
+
+   It is a <details> for the same reason as the row menu -- it opens and closes
+   with no JavaScript -- but its items are <button>s rather than links. There is
+   no per-batch endpoint and there does not need to be one: the batch's PDFs
+   are already in the DOM as their own .doc-check boxes, so ticking them and
+   pressing the selection bar's existing buttons does the work through the
+   existing POST routes. Inventing a /uploads/batch/{id}/extract would have been
+   a second path into the same queue, and a second path is the one that drifts.
+
+   Each button carries a data-batch-action name; the page script finds the
+   enclosing [data-batch-group], ticks or unticks it, and clicks the real
+   selection-bar button, so the confirm dialog still fires and the request still
+   goes where every other bulk action goes.
+
+   open_upload_id is passed only where a full page for that upload exists and is
+   not already linked from the header directly above the list. Repeating a link
+   the reader can already see is the kind of clutter this menu exists to cut. #}
+{% macro batch_action_menu(open_upload_id=None) -%}
+<details class="action-menu batch-action">
+  <summary class="action-trigger" aria-label="Actions for this batch">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <circle cx="8" cy="3.5" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/>
+    </svg>
+  </summary>
+  <div class="action-panel">
+    <button type="button" data-batch-action="select">Select every PDF here</button>
+    <button type="button" data-batch-action="deselect">Clear this selection</button>
+    <div class="action-sep" role="separator"></div>
+    <button type="button" data-batch-action="extract">Start extraction</button>
+    <button type="button" data-batch-action="delete" class="is-danger">Delete</button>
+    {% if open_upload_id %}
+      <div class="action-sep" role="separator"></div>
+      <a href="/uploads/{{ open_upload_id }}">Open the whole upload</a>
+    {% endif %}
+  </div>
+</details>
+{%- endmacro %}

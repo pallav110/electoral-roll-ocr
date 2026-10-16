@@ -118,12 +118,15 @@ class TestTimestamps:
         assert time_ago(None) is None
 
     def test_short_time_handles_both_kinds(self):
-        assert short_time(datetime(2026, 9, 30, 14, 5)) == "30 Sep, 14:05"
+        assert short_time(datetime(2026, 9, 30, 14, 5)) == "30 Sep, 19:35 IST"
         assert short_time(None) is None
 
     def test_string_timestamps_are_accepted(self):
         assert time_ago("2026-09-30T12:00:00")
-        assert short_time("2026-09-30T12:00:00") == "30 Sep, 12:00"
+        assert short_time("2026-09-30T12:00:00") == "30 Sep, 17:30 IST"
+
+    def test_short_time_handles_utc_suffix_and_date_rollover(self):
+        assert short_time("2026-09-30T22:30:00Z") == "01 Oct, 04:00 IST"
 
 
 class TestFormatting:

@@ -183,8 +183,8 @@ def test_correct_devanagari_house_is_NOT_flagged(house):
     "run,expected",
     [
         ("बी", 1),      # b + ii-matra: one consonant
-        ("इ", 1),
-        ("ई", 1),
+        ("इ", 0),       # independent vowel, not a consonant
+        ("ई", 0),
         ("शी", 1),
         ("ये", 1),
         ("ग", 1),
@@ -211,6 +211,10 @@ def test_consonant_count_ignores_marks(run, expected):
         ("एचएनओ 146", "clean"),
         ("प्लॉट नं 279 ख नं 79", "clean"),
         ("142", "clean"),
+        ("अशोक विहार", "plot"),
+        ("प्रेम नगर", "plot"),
+        ("30 फ़ुता रोड", "plot"),
+        ("आजाद एंक्लेव", "plot"),
     ],
 )
 def test_classifier_verdicts(house, verdict):

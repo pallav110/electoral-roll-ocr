@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Virtual environments
+venv/
+# Playwright needs its own environment; the browser binaries live in ~/.cache
+# so only the venv itself is repo-local.
+.venv-test/
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Output files
+downloaded_pdfs/
+*.zip
+download_log.json
+captcha.png
+# Captcha images captured from the live ECI site, plus the proof shot and the
+# submit probe's artefacts. All are one-off diagnostics, not sources.
+captcha_proof.png
+probe_captcha.png
+probe_after_submit.png
+
+# HTML debug files
+*.html
+
+# Temporary files
+*.tmp
+*.temp
+
+# MinIO
+minio_data/
+
+# Test outputs
+test_output/

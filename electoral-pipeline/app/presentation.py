@@ -11,7 +11,9 @@ way the wording is testable and identical on every page.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from app.durations import completed_unit_processing_time_ms
 
 # Machine status -> what the operator should read.
 # Anything not listed falls back to the raw value, so a new status shows up
@@ -25,6 +27,7 @@ STATUS_LABEL = {
     "failed": "Failed",
     "cancelled": "Stopped",
     "partial": "Partly finished",
+    "paused": "Paused",
 }
 
 # A colour hint for the operator. Kept separate from the wording so the
@@ -38,7 +41,12 @@ STATUS_TONE = {
     "failed": "bad",
     "cancelled": "bad",
     "partial": "warn",
+    "paused": "warn",
 }
+
+# The operators and source data are in India. Store and compare timestamps in
+# UTC, but never make an operator mentally add 5:30 when reading the UI.
+INDIA_TIMEZONE = timezone(timedelta(hours=5, minutes=30), name="IST")
 
 # Error code -> (plain headline, what to do about it).
 # The codes are internal; the sentences are the whole point of this module.
@@ -301,6 +309,11 @@ def live_progress(units, pages_total=None, at: datetime | None = None) -> dict:
       *_estimate  -- how far the running batch has got, worked out from the
                      rate the finished batches actually achieved.
 
+    compute_time_ms is the third distinction, and the one the page got wrong for
+    a long time: time spent extracting versus time elapsed. A session's wall
+    clock includes queue wait, so labelling it "how long it took" reported hours
+    of standing in a queue as if they were OCR.
+
     The distinction is the whole point. workflow.py already refuses to
     present a derived number as a stored one, and a counter that ticks up
     every five seconds while nothing has been written must not sit under a
@@ -367,6 +380,17 @@ def live_progress(units, pages_total=None, at: datetime | None = None) -> dict:
         if start:
             elapsed_seconds = max(0.0, (now - start).total_seconds())
 
+    # Time actually spent extracting, as opposed to time elapsed.
+    #
+    # session.processing_time_ms is completed_at - started_at on the SESSION,
+    # which is pure wall clock and therefore includes every second a unit spent
+    # waiting behind the OCR queue. A 27-page roll reported "7 hr 45 min" under a
+    # label reading "How long it took" when its own units had done about 5
+    # minutes of work between them. Summing each settled unit's own
+    # started_at -> completed_at excludes the waiting, because that gap falls
+    # outside every individual unit's span.
+    compute_time_ms = completed_unit_processing_time_ms(settled)
+
     if seconds_per_page and running_pages and elapsed_seconds is not None:
         expected = seconds_per_page * running_pages
         if expected > 0:
@@ -407,6 +431,7 @@ def live_progress(units, pages_total=None, at: datetime | None = None) -> dict:
         "running_unit_number": getattr(running_unit, "unit_number", None) if running_unit else None,
         "running_pages": running_pages,
         "elapsed_seconds": int(elapsed_seconds) if elapsed_seconds is not None else None,
+        "compute_time_ms": compute_time_ms,
         "seconds_per_page": round(seconds_per_page, 2) if seconds_per_page else None,
         "records_per_page": round(records_per_page, 2) if records_per_page else None,
         "eta_seconds": eta_seconds,
@@ -562,12 +587,17 @@ def time_ago(value: datetime | None) -> str | None:
 
 
 def short_time(value: datetime | None) -> str | None:
-    """'30 Sep, 14:05' -- compact, sortable-looking, no timezone noise."""
+    """Render a stored UTC timestamp explicitly in Indian Standard Time."""
     if value is None:
         return None
     if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.strftime("%d %b, %H:%M")
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    # SQLAlchemy normally returns aware values for these columns. Treat a
+    # legacy/fixture naive value as UTC; interpreting it as server-local time
+    # is exactly what caused the five-and-a-half-hour display error.
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(INDIA_TIMEZONE).strftime("%d %b, %H:%M IST")
 
 
 def file_size_summary(num_bytes: int | None) -> str | None:

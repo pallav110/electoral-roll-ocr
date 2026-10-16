@@ -1,0 +1,5 @@
+pymupdf==1.25.5
+pytesseract==0.3.13
+Pillow==11.2.1
+numpy==2.2.5
+opencv-python-headless==4.11.0.86

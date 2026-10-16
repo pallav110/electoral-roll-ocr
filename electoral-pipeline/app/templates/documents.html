@@ -1,99 +1,1310 @@
-{% extends "base.html" %}{% block title %}PDF files · Electoral Roll Processing{% endblock %}{% block content %}
+{% extends "base.html" %}
+{% from "macros.html" import state_badge, action_menu, batch_action_menu %}
+{% block title %}Documents · Electoral Roll Processing{% endblock %}
+{% block content %}
 
-<div class="mb-8">
-  <h1 class="text-3xl font-bold text-gray-900 tracking-tight">PDF Files</h1>
-  <p class="text-gray-600 mt-1">{{ total }} voter roll PDF{{ '' if total == 1 else 's' }} found</p>
-</div>
+{#
+  This page's own CSS.
 
-<form class="flex flex-wrap gap-3 mb-6" method="get">
-  <select name="status" class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white" aria-label="Filter by status">
-    <option value="">Any status</option>
-    {% for s in ['pending','queued','processing','completed','retry','failed','cancelled'] %}
-      <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ status_label(s) }}</option>
-    {% endfor %}
-  </select>
-  <input name="filename" placeholder="File name contains…" value="{{ filters.filename }}" class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" aria-label="File name contains">
-  <input name="date_from" type="date" value="{{ filters.date_from }}" class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" aria-label="Found after this date">
-  <button type="submit" class="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors text-sm font-medium">Apply filter</button>
-  {% if filters.status or filters.filename or filters.date_from or filters.session_id or filters.document_id %}
-    <a href="/documents" class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900">Clear</a>
-  {% endif %}
-</form>
+  The last pass boxed everything. Five summary cells behind a border with
+  hairlines between them; a full-width bordered panel holding three small
+  fields; a header, then a scope row, then the summary, then the filter panel
+  -- 270px of furniture before the first number, most of it empty.
 
-<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-6">
-  <div class="overflow-x-auto">
-    <table class="w-full">
-      <thead class="bg-gray-50">
-        <tr>
-          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">File</th>
-          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-          <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Progress</th>
-          <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Records</th>
-          <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Attempts</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-gray-200">
-        {% for d in rows %}
-          {% set s = sessions.get(d.current_session_id) %}
-          <tr class="hover:bg-gray-50 transition-colors">
-            <td class="px-6 py-4">
-              <a href="/documents/{{ d.id }}" class="text-blue-600 hover:text-blue-700 font-medium">{{ d.file_name }}</a>
-              <div class="text-xs text-gray-500 mt-1">{{ file_size_summary(d.file_size) or 'Size unknown' }}</div>
-            </td>
-            <td class="px-6 py-4">
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-                {% if d.status == 'completed' %}bg-green-100 text-green-800
-                {% elif d.status == 'failed' %}bg-red-100 text-red-800
-                {% elif d.status == 'processing' %}bg-blue-100 text-blue-800
-                {% elif d.status == 'queued' %}bg-yellow-100 text-yellow-800
-                {% else %}bg-gray-100 text-gray-800{% endif %}">
-                {{ status_label(d.status) }}
-              </span>
-              {% if d.last_error %}
-                <div class="text-xs text-gray-500 mt-2">
-                  <span>{{ friendly_error(d.last_error_code, d.last_error) }}</span>
-                </div>
-              {% endif %}
-            </td>
-            <td class="px-6 py-4" style="min-width:150px">
-              {% if s and s.pages_total %}
-                <div class="text-xs text-gray-500 mb-1">{{ progress_summary(s.pages_processed, s.pages_total) }}</div>
-                <div class="w-full bg-gray-200 rounded-full h-2">
-                  <div class="bg-blue-600 h-2 rounded-full" style="width: {{ (s.pages_processed / s.pages_total * 100) if s.pages_total else 0 }}%"></div>
-                </div>
-              {% else %}
-                <span class="text-gray-400 text-sm">Not started</span>
-              {% endif %}
-            </td>
-            <td class="px-6 py-4 text-sm text-gray-900 text-right font-mono">{{ s.records_extracted if s else '—' }}</td>
-            <td class="px-6 py-4 text-sm text-gray-900 text-right font-mono">{{ d.attempt_count }} / {{ d.max_attempts }}</td>
-          </tr>
-        {% else %}
-          <tr>
-            <td colspan="5" class="px-6 py-12 text-center text-gray-500">
-              <div class="flex flex-col items-center">
-                <svg class="w-12 h-12 text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                </svg>
-                <p class="text-sm">No PDF files match. Try clearing the filter.</p>
-              </div>
-            </td>
-          </tr>
+  A box is worth drawing when it holds something you would otherwise lose track
+  of. A border around three dropdowns is not that, and the ruled summary cells
+  turned one partition of 600 into five unrelated headlines, which is the thing
+  the summary was introduced to stop being.
+
+  So: no boxes up here at all. The figures are a line of text, the filters are a
+  line of controls, and the only rectangle left on the page is the one that holds
+  the PDF rows -- because that is the one thing that is genuinely a list and
+  genuinely needs an edge.
+
+  The one rule everywhere below: put the slack in one place and let the rest sit
+  on an edge. Left cluster, gap, right cluster. Centring a middle group inside
+  the leftover space -- which is what the strip used to do -- puts a void down
+  both sides of it, and a void on the left reads as a broken layout.
+#}
+<style>
+  /* ══════════════════════════════════════════════════════════════════════
+     DOCUMENTS PAGE — POLISHED PROFESSIONAL RESKIN
+     All class names, JS hooks, and data attributes preserved.
+     Only visual presentation is changed.
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* ── Page shell ──────────────────────────────────────────────────────── */
+  .documents-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  /* ── Header: title + breadcrumb + action buttons ─────────────────────── */
+  .documents-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 0;
+  }
+
+  .section-label {
+    font: 600 .6875rem/1.4 var(--sans);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--brand-600);
+    margin-bottom: .375rem;
+  }
+  .section-label a {
+    color: var(--brand-600);
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: .25rem;
+    transition: color .12s;
+  }
+  .section-label a:hover { color: var(--brand-800); text-decoration: none; }
+
+  .documents-title {
+    margin: 0;
+    color: var(--ink-950);
+    font-size: 1.625rem;
+    line-height: 1.2;
+    letter-spacing: -.025em;
+    font-weight: 800;
+  }
+  .documents-subtitle {
+    margin: .3rem 0 0;
+    color: var(--ink-500);
+    font-size: .875rem;
+    line-height: 1.55;
+  }
+  .documents-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .5rem;
+    flex: 0 0 auto;
+  }
+
+  /* Header action buttons — clean, distinct ghost vs. primary style */
+  .documents-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.25rem;
+    padding: 0 1rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink-700);
+    font-size: .8125rem;
+    font-weight: 600;
+    letter-spacing: -.005em;
+    text-decoration: none;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(15,23,42,.06);
+    transition: background-color .12s ease, border-color .12s ease, box-shadow .12s ease;
+  }
+  .documents-action:hover {
+    background: var(--ink-50);
+    border-color: var(--ink-300);
+    color: var(--ink-950);
+    text-decoration: none;
+    box-shadow: 0 2px 4px rgba(15,23,42,.08);
+  }
+  .documents-action.primary {
+    background: var(--brand-700);
+    border-color: var(--brand-700);
+    color: #fff;
+    box-shadow: 0 1px 3px rgba(29,78,216,.3);
+  }
+  .documents-action.primary:hover {
+    background: var(--brand-800);
+    border-color: var(--brand-800);
+    color: #fff;
+    box-shadow: 0 2px 6px rgba(29,78,216,.35);
+  }
+
+  /* ── Header filter row: scope + filters grouped on the right ─────────── */
+  .documents-filter-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: .5rem;
+    flex-wrap: wrap;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .scope-label {
+    font: 700 .625rem/1 var(--sans);
+    color: var(--ink-400);
+    text-transform: uppercase;
+    letter-spacing: .09em;
+    flex-shrink: 0;
+  }
+
+  .document-filters {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    flex-wrap: nowrap;
+    flex: 0 0 auto;
+  }
+
+  .filter-field { flex: 1 1 14rem; min-width: 0; }
+
+  /* Shared input / select look */
+  .filter-control {
+    width: 100%;
+    min-height: 2.125rem;
+    padding: 0 .75rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink-900);
+    font: inherit;
+    font-size: .8125rem;
+    box-shadow: 0 1px 2px rgba(15,23,42,.04);
+    transition: border-color .12s, box-shadow .12s;
+  }
+  .filter-control::placeholder { color: var(--ink-400); }
+  .filter-control:focus {
+    outline: none;
+    border-color: var(--brand-500);
+    box-shadow: 0 0 0 3px var(--brand-100);
+  }
+
+  .scope-select {
+    width: auto;
+    min-width: 15rem;
+    max-width: 30rem;
+    min-height: 2.125rem;
+    cursor: pointer;
+  }
+
+  .filter-submit {
+    flex: none;
+    min-height: 2.125rem;
+    padding: 0 1rem;
+    border: 1px solid var(--brand-700);
+    border-radius: 8px;
+    background: var(--brand-700);
+    color: #fff;
+    font-size: .8125rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(29,78,216,.25);
+    transition: background-color .12s, box-shadow .12s;
+  }
+  .filter-submit:hover {
+    background: var(--brand-800);
+    border-color: var(--brand-800);
+    box-shadow: 0 2px 5px rgba(29,78,216,.3);
+  }
+
+  .filter-reset {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.125rem;
+    padding: 0 1rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink-700);
+    font-size: .8125rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(15,23,42,.04);
+    transition: background-color .12s, border-color .12s, color .12s;
+  }
+  .filter-reset:hover {
+    color: var(--ink-900);
+    background: var(--ink-50);
+    border-color: var(--ink-300);
+  }
+
+  /* ── Stat cards — five equal tiles replacing the flat figures line ──── */
+  .stat-cards {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: .75rem;
+    padding: 1rem 0 1.125rem;
+  }
+
+  .stat-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: .1875rem;
+    padding: .875rem 1rem .75rem;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(15,23,42,.06);
+    overflow: hidden;        /* clips the bottom accent bar */
+  }
+
+  /* Thin coloured bottom bar as the only accent — sits flush at the bottom */
+  .stat-card-bar {
+    position: absolute;
+    bottom: 0; left: 0;
+    height: 3px;
+    max-width: 100%;
+    border-radius: 0 3px 0 0;
+    transition: width .4s ease;
+  }
+
+  .stat-card-value {
+    font: 700 1.875rem/1 var(--mono);
+    color: var(--ink-950);
+    letter-spacing: -.035em;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-card-label {
+    font: 500 .75rem/1.3 var(--sans);
+    color: var(--ink-400);
+    letter-spacing: .02em;
+  }
+
+  /* Tone overrides — only colour the value when the state is notable */
+  .stat-card.is-done   .stat-card-value { color: var(--ok-700); }
+  .stat-card.is-active .stat-card-value { color: var(--live-700); }
+  .stat-card.is-alarm  .stat-card-value { color: var(--bad-700); }
+  .stat-card.is-alarm  .stat-card-label { color: var(--ink-500); }
+
+  @media (max-width: 860px) {
+    .stat-cards { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 520px) {
+    .stat-cards { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* ── List intro sentence ──────────────────────────────────────────────── */
+  .documents-list-intro {
+    margin: .75rem 0 .625rem;
+    color: var(--ink-400);
+    font-size: .8125rem;
+    line-height: 1.5;
+    letter-spacing: .005em;
+  }
+  .documents-list-intro strong {
+    color: var(--ink-800);
+    font-weight: 600;
+    font-family: var(--mono);
+  }
+
+  /* ── Empty state ──────────────────────────────────────────────────────── */
+  .empty-documents {
+    padding: 5rem 1rem;
+    text-align: center;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(15,23,42,.05);
+  }
+  .empty-title { color: var(--ink-800); font-size: 1rem; font-weight: 700; letter-spacing: -.01em; }
+  .empty-copy  { margin-top: .5rem; color: var(--ink-500); font-size: .875rem; }
+
+  /* ── Upload frame: card shell ───────────────────────────────────────── */
+  .upload-frame {
+    border-radius: 12px !important;
+    border-color: var(--line) !important;
+    box-shadow: 0 1px 3px rgba(15,23,42,.07), 0 4px 16px rgba(15,23,42,.04) !important;
+    margin-bottom: .75rem !important;
+    overflow: visible !important;
+  }
+
+  /* ── Folder row — the always-visible single-line header ─────────────── */
+  .folder-row {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    padding: .875rem 1.25rem;
+    background: #fff;
+    border-radius: 12px;
+    transition: background .12s;
+    min-width: 0;
+  }
+  /* When batches are shown below, square off the bottom corners */
+  .upload-frame:not(.is-hub) .folder-row {
+    border-radius: 12px 12px 0 0;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--ink-50) 0%, #fff 100%);
+  }
+
+  .folder-icon {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem; height: 2rem;
+    border-radius: 8px;
+    background: var(--ink-100);
+    color: var(--ink-500);
+  }
+  /* Open folder gets a slightly warmer tint */
+  .upload-frame:not(.is-hub) .folder-icon {
+    background: var(--brand-50);
+    color: var(--brand-600);
+  }
+
+  .folder-source {
+    flex: none;
+    font-size: .625rem !important;
+    letter-spacing: .08em !important;
+  }
+
+  .folder-info {
+    display: flex;
+    flex-direction: column;
+    gap: .125rem;
+    min-width: 0;
+    flex: 1 1 0;
+  }
+
+  .folder-name {
+    font: 600 .9375rem/1.3 var(--sans);
+    color: var(--ink-900);
+    letter-spacing: -.012em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .folder-meta {
+    font: 400 .75rem/1.4 var(--sans);
+    color: var(--ink-400);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .upload-meta-warn { color: var(--warn-800); font-weight: 500; }
+
+  .folder-spacer { flex: 0 0 0; } /* no spacer needed — folder-info takes flex:1 */
+
+  /* Open / back buttons */
+  .folder-btn {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: .3125rem;
+    min-height: 1.875rem;
+    padding: 0 .875rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    background: #fff;
+    color: var(--ink-700);
+    font: 600 .8125rem/1 var(--sans);
+    white-space: nowrap;
+    text-decoration: none;
+    box-shadow: 0 1px 2px rgba(15,23,42,.05);
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .folder-btn:hover {
+    background: var(--brand-50);
+    border-color: var(--brand-400);
+    color: var(--brand-700);
+    text-decoration: none;
+  }
+  .folder-btn.is-back {
+    background: var(--ink-50);
+    border-color: var(--line);
+    color: var(--ink-600);
+  }
+  .folder-btn.is-back:hover {
+    background: var(--ink-100);
+    color: var(--ink-900);
+    border-color: var(--ink-300);
+    text-decoration: none;
+  }
+
+  /* Untied group — no button, just a count label */
+  .folder-label-inline {
+    flex: none;
+    font: 500 .75rem/1 var(--sans);
+    color: var(--ink-400);
+    padding: 0 .25rem;
+  }
+
+  /* Untied upload-frame always shows its contents — never fully collapsed */
+  .upload-frame.is-hub:has(.folder-label-inline) .folder-row {
+    border-radius: 12px 12px 0 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* ── Upload toolbar (select-all / count label) ───────────────────────── */
+  .upload-toolbar {
+    padding: .5rem 1.5rem;
+    background: var(--ink-50);
+    border-bottom: 1px solid var(--line);
+    font-size: .8125rem;
+    color: var(--ink-500);
+  }
+  .upload-toolbar-note { font-size: .8125rem; color: var(--ink-400); letter-spacing: .005em; }
+  .upload-select-all { display: inline-flex; align-items: center; gap: .5rem; cursor: pointer; font-size: .8125rem; font-weight: 500; color: var(--ink-700); }
+  .upload-select-all:hover { color: var(--ink-900); }
+
+  /* ── Batch strip ─────────────────────────────────────────────────────── */
+  /* Polished sticky header for each batch — use inline override since
+     base.html defines .batch-strip without !important */
+  .batch-strip {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 20 !important;
+    display: grid !important;
+    grid-template-columns: 1fr auto 1fr !important;
+    align-items: center !important;
+    column-gap: 1rem !important;
+    padding: .6875rem 1.5rem !important;
+    min-height: 0 !important;
+    background: var(--ink-50) !important;
+    border-top: 1px solid var(--line) !important;
+    border-bottom: 1px solid var(--line) !important;
+  }
+  .batch-strip-lead {
+    grid-column: 1 !important;
+    justify-self: start !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: .875rem !important;
+    min-width: 0 !important;
+  }
+  .batch-strip-lead .batch-check {
+    margin: 0 !important;
+    flex: none !important;
+  }
+
+  /* First batch strip has no extra top border */
+  [data-batch-group]:first-of-type .batch-strip {
+    border-top: 0 !important;
+    background: linear-gradient(180deg, #fff 0%, var(--ink-50) 100%) !important;
+  }
+
+  /* Batch name heading */
+  .batch-name {
+    font: 700 .9375rem/1.35 var(--sans) !important;
+    color: var(--ink-800) !important;
+    letter-spacing: -.015em !important;
+    white-space: nowrap !important;
+  }
+
+  .batch-progress {
+    display: none !important;
+    min-width: 0 !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    gap: .4375rem !important;
+    padding: .125rem 0 !important;
+  }
+  .batch-progress-head {
+    display: flex !important;
+    align-items: baseline !important;
+    justify-content: space-between !important;
+    gap: .75rem !important;
+    min-width: 0 !important;
+  }
+  .batch-say {
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    font: 500 .9375rem/1.35 var(--sans) !important;
+    color: var(--ink-600) !important;
+    font-variant-numeric: tabular-nums !important;
+    letter-spacing: -.01em !important;
+  }
+  .batch-say b {
+    font: 700 1rem/1.35 var(--mono) !important;
+    color: var(--ink-900) !important;
+    letter-spacing: -.02em !important;
+  }
+  .batch-progress-pct {
+    flex: none !important;
+    font: 600 .8125rem/1 var(--mono) !important;
+    color: var(--ink-500) !important;
+    font-variant-numeric: tabular-nums !important;
+    letter-spacing: -.02em !important;
+  }
+  .batch-progress-bar {
+    width: 100% !important;
+    height: .3125rem !important;
+    border-radius: 999px !important;
+    background: var(--ink-200) !important;
+    overflow: hidden !important;
+  }
+  .batch-progress-fill {
+    display: block !important;
+    height: 100% !important;
+    border-radius: inherit !important;
+    background: var(--brand-500) !important;
+    min-width: 0 !important;
+    transition: width .2s ease !important;
+  }
+
+  .batch-metrics-wrap {
+    grid-column: 2 !important;
+    justify-self: center !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .batch-metrics {
+    display: inline-grid !important;
+    grid-template-columns: repeat(5, 5.5rem) !important;
+    align-items: stretch !important;
+    gap: .6875rem !important;
+    width: auto !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+  }
+
+  .batch-metric {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: .1875rem !important;
+    width: 5.5rem !important;
+    min-height: 3.625rem !important;
+    max-height: 4.0625rem !important;
+    padding: .375rem .25rem !important;
+    box-sizing: border-box !important;
+    border: none !important;
+    border-radius: 6px !important;
+    position: static !important;
+    text-align: center !important;
+  }
+
+  .batch-metric::before { display: none !important; }
+
+  .batch-metric-n {
+    font: 700 1.1875rem/1.1 var(--mono) !important;
+    font-variant-numeric: tabular-nums !important;
+    letter-spacing: -.02em !important;
+  }
+  .batch-metric-l {
+    font: 600 .6875rem/1.2 var(--sans) !important;
+    text-transform: uppercase !important;
+    letter-spacing: .05em !important;
+    white-space: nowrap !important;
+  }
+
+  /* Soft pastel status chips — backgrounds stay visible; text muted for readability */
+  .batch-metric.is-done {
+    background: #ecfdf3 !important;
+  }
+  .batch-metric.is-done .batch-metric-n,
+  .batch-metric.is-done .batch-metric-l { color: #3d8560 !important; }
+  .batch-metric.is-done.is-zero .batch-metric-n,
+  .batch-metric.is-done.is-zero .batch-metric-l { color: #6aab82 !important; }
+
+  .batch-metric.is-active {
+    background: #eff8ff !important;
+  }
+  .batch-metric.is-active .batch-metric-n,
+  .batch-metric.is-active .batch-metric-l { color: #4a7fc4 !important; }
+  .batch-metric.is-active.is-zero .batch-metric-n,
+  .batch-metric.is-active.is-zero .batch-metric-l { color: #7a9fd4 !important; }
+
+  .batch-metric.is-problem {
+    background: #fff1f2 !important;
+  }
+  .batch-metric.is-problem .batch-metric-n,
+  .batch-metric.is-problem .batch-metric-l { color: #c44d5a !important; }
+  .batch-metric.is-problem.is-zero .batch-metric-n,
+  .batch-metric.is-problem.is-zero .batch-metric-l { color: #d4848c !important; }
+
+  .batch-metric.is-skipped {
+    background: #f5f7f9 !important;
+  }
+  .batch-metric.is-skipped .batch-metric-n,
+  .batch-metric.is-skipped .batch-metric-l { color: #64748b !important; }
+  .batch-metric.is-skipped.is-zero .batch-metric-n,
+  .batch-metric.is-skipped.is-zero .batch-metric-l { color: #8b97a8 !important; }
+
+  .batch-metric.is-waiting {
+    background: #fff9e8 !important;
+  }
+  .batch-metric.is-waiting .batch-metric-n,
+  .batch-metric.is-waiting .batch-metric-l { color: #b36a1e !important; }
+  .batch-metric.is-waiting.is-zero .batch-metric-n,
+  .batch-metric.is-waiting.is-zero .batch-metric-l { color: #c9925a !important; }
+
+  .batch-rail { display: none !important; }
+
+  /* View + ⋮ menu — far-right column */
+  .batch-strip-end {
+    grid-column: 3 !important;
+    justify-self: end !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+    gap: .5rem !important;
+    flex: none !important;
+  }
+
+  /* "View →" button — compact, aligned with the batch action menu */
+  .batch-open {
+    flex: none !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: .375rem !important;
+    min-height: 1.875rem !important;
+    padding: 0 .875rem !important;
+    border: 1px solid var(--line-strong) !important;
+    border-radius: 7px !important;
+    background: #fff !important;
+    color: var(--ink-700) !important;
+    font-size: .8125rem !important;
+    font-weight: 600 !important;
+    white-space: nowrap !important;
+    cursor: pointer !important;
+    box-shadow: none !important;
+    transition: background .12s, border-color .12s, color .12s !important;
+  }
+  /* Hide "the N PDFs" part — only show the "View" label + arrow */
+  .batch-open-tail { display: none !important; }
+  .batch-open-label::after { content: ' →'; }
+
+  .batch-open:hover {
+    background: var(--ink-50) !important;
+    border-color: var(--ink-400) !important;
+    color: var(--ink-900) !important;
+  }
+  .batch-open[aria-expanded="true"] {
+    background: var(--ink-900) !important;
+    border-color: var(--ink-900) !important;
+    color: #fff !important;
+  }
+  .batch-open[aria-expanded="true"] .batch-open-label::after { content: ' ×'; }
+
+  /* ── Document rows ────────────────────────────────────────────────────── */
+  .doc-row {
+    display: grid;
+    grid-template-columns: 2.5rem 1fr auto auto;
+    align-items: center;
+    gap: 0 1rem;
+    padding: .75rem 1.5rem;
+    background: #fff;
+    border-bottom: 1px solid var(--ink-100);
+    transition: background .1s;
+  }
+  .doc-row:last-child { border-bottom: none; }
+  .doc-row:hover { background: var(--ink-50); }
+  .doc-row.is-picked { background: var(--brand-50) !important; }
+  .doc-row.is-picked:hover { background: #dbeafe !important; }
+
+  .doc-row-check { display: flex; align-items: center; justify-content: center; }
+
+  .doc-name {
+    display: block;
+    font: 500 .875rem/1.4 var(--sans);
+    color: var(--brand-700);
+    text-decoration: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .doc-name:hover { color: var(--brand-800); text-decoration: underline; }
+  .doc-sub {
+    display: flex;
+    align-items: center;
+    gap: .375rem;
+    margin-top: .125rem;
+    font: 400 .75rem/1.4 var(--sans);
+    color: var(--ink-400);
+  }
+  .doc-sub-sep { color: var(--ink-200); }
+  .doc-view-link { color: var(--ink-400); text-decoration: none; }
+  .doc-view-link:hover { color: var(--brand-600); text-decoration: underline; }
+  .doc-cell-status { display: flex; align-items: center; }
+  .doc-cell-actions { display: flex; align-items: center; }
+
+  /* ── Rename form inline in header ────────────────────────────────────── */
+  .documents-rename {
+    display: flex;
+    align-items: center;
+    gap: .375rem;
+    margin: 0;
+  }
+  .documents-rename .filter-control { width: 14rem; min-height: 2.125rem; }
+
+  /* ── Sticky action bar (bottom) ─────────────────────────────────────── */
+  /* Override base.html's actionbar for a more polished look */
+  .actionbar {
+    border-radius: 12px !important;
+    border: 1px solid var(--line) !important;
+    box-shadow: 0 -2px 16px rgba(15,23,42,.09), 0 2px 6px rgba(15,23,42,.04) !important;
+    background: rgba(255,255,255,.97) !important;
+    backdrop-filter: blur(8px) !important;
+    -webkit-backdrop-filter: blur(8px) !important;
+    padding: .875rem 1.5rem !important;
+    gap: 1.25rem !important;
+  }
+
+  /* Selected count in actionbar */
+  .actionbar #selected-count {
+    font: 700 1.125rem/1 var(--mono);
+    letter-spacing: -.025em;
+    color: var(--brand-700);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Responsive ──────────────────────────────────────────────────────── */
+  @media (max-width: 900px) {
+    .filter-field { flex-basis: 100%; }
+  }
+  @media (max-width: 760px) {
+    .documents-header { flex-direction: column; align-items: flex-start; }
+    .documents-filter-bar {
+      width: 100%;
+      justify-content: flex-start;
+    }
+    .document-filters { flex-wrap: wrap; }
+    .documents-title  { font-size: 1.375rem; }
+    .scope-select     { min-width: 0; max-width: none; }
+    .batch-strip {
+      grid-template-columns: 1fr auto 1fr !important;
+    }
+    .doc-row          { grid-template-columns: 2.25rem 1fr auto auto; gap: 0 .625rem; padding: .625rem 1rem; }
+  }
+  @media (max-width: 640px) {
+    .batch-strip {
+      padding: .5625rem 1rem !important;
+      column-gap: .625rem !important;
+      grid-template-columns: 1fr auto 1fr !important;
+    }
+    .batch-metrics-wrap { padding: 0 .375rem !important; }
+    .batch-metrics {
+      grid-template-columns: repeat(5, minmax(3.25rem, 1fr)) !important;
+      gap: .4375rem !important;
+      width: 100% !important;
+    }
+    .batch-metric {
+      width: auto !important;
+      min-height: 3.25rem !important;
+      padding: .3125rem .125rem !important;
+    }
+    .batch-metric-n { font-size: 1.0625rem !important; }
+    .batch-metric-l { font-size: .625rem !important; }
+    .batch-open   { padding: 0 .625rem !important; font-size: .75rem !important; }
+    .actionbar    { flex-direction: column; align-items: stretch !important; }
+    .actionbar > div:last-child { justify-content: flex-end; }
+  }
+  @media (max-width: 480px) {
+    .batch-metrics {
+      display: flex !important;
+      flex-wrap: wrap !important;
+      justify-content: center !important;
+      gap: .375rem !important;
+    }
+    .batch-metric {
+      flex: 0 0 calc(33.333% - .375rem) !important;
+      width: auto !important;
+      max-width: 5.5rem !important;
+    }
+  }
+</style>
+
+<div class="documents-shell">
+  {% if notice %}<div class="alert alert-ok">{{ notice }}</div>{% endif %}
+
+  <div class="documents-header">
+    <div>
+      {% if focus %}
+        <a href="/documents" class="page-back">&larr; Back</a>
+        <h1 class="documents-title">{{ focus.label }}</h1>
+        <p class="documents-subtitle">
+          Started {{ time_ago(focus.created_at) }}
+          &middot; {{ focus.source }}
+        </p>
+      {% else %}
+        <h1 class="documents-title">Documents</h1>
+      {% endif %}
+    </div>
+    {# Scope + filters in one GET form; both apply only when Filter is clicked. #}
+    <div class="documents-filter-bar">
+    <form class="document-filters" method="get" aria-label="Filter documents">
+      {# An open batch survives a filter submit so the list does not lose your place. #}
+      {% if filters.open_batch %}<input type="hidden" name="open_batch" value="{{ filters.open_batch }}">{% endif %}
+      <!-- <label class="scope-label" for="scope-upload">Showing</label> -->
+      <select id="scope-upload" name="upload" class="filter-control scope-select"
+              aria-label="Choose which upload to list">
+        <option value=""{% if not focus %} selected{% endif %}>Search PDF's Batch</option>
+        {% for u in all_uploads %}
+          <option value="{{ u.id }}"{% if focus and u.id == focus.id %} selected{% endif %}>{{ u.label }}</option>
         {% endfor %}
-      </tbody>
-    </table>
+      </select>
+      <!-- <div class="filter-field">
+        <!-- <input id="document-filename" name="filename" placeholder="Search file name or path…" value="{{ filters.filename }}"
+               class="filter-control" aria-label="Search by file name or path"> -->
+      <!-- </div> -->
+      <div class="filter-field" style="flex:0 0 10rem">
+        <select id="document-status" name="status" class="filter-control" aria-label="Filter by status">
+          <option value="">Status</option>{% for value in ['pending','queued','processing','completed','retry','failed','cancelled','paused'] %}<option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ status_label(value) }}</option>{% endfor %}
+        </select>
+      </div>
+      <!-- <div class="filter-field" style="flex:0 0 10.5rem">
+        <input id="document-date" name="date_from" type="date" title="Found on or after" value="{{ filters.date_from }}"
+               class="filter-control" aria-label="Found on or after">
+      </div> -->
+      <button type="submit" class="filter-submit">Filter</button>
+      <a href="/documents" class="filter-reset">Reset</a>
+    </form>
+    </div>
   </div>
-</div>
 
-<div class="flex justify-between items-center">
-  {% if page > 1 %}
-    <a href="?page={{ page-1 }}&status={{ filters.status }}&filename={{ filters.filename }}&date_from={{ filters.date_from }}" class="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">← Previous</a>
+  {# The figures. One line of text.
+
+     These five numbers are a partition of one quantity: 600 PDFs, each in
+     exactly one of these five states. Drawn as five cards they read as five
+     unrelated headlines, which is why each needed a large coloured number to
+     shout. Drawn as a sentence you read across they read as what they are --
+     one number, divided up -- and the colour stops carrying the message, so
+     it can drop to a hairline under the row.
+
+     The duplicates are counted in the bar and not printed here. They are the
+     one figure of the five that is not something to act on: a duplicate that
+     was skipped is a correct outcome, not a state, and giving it the same
+     weight as "0 need attention" made the row longer and the answer weaker.
+     It is still on the bar and in the aria-label, so nothing is hidden. #}
+  <section class="stat-cards" aria-label="Document status overview">
+    {% set bar_total = total if total else 1 %}
+    {% set bar_done = summary.completed * 100 / bar_total %}
+    {% set bar_active = summary.processing * 100 / bar_total %}
+    {% set bar_waiting = summary.waiting * 100 / bar_total %}
+    {% set bar_problem = summary.attention * 100 / bar_total %}
+    {% set bar_skipped = summary.duplicates * 100 / bar_total %}
+
+    <div class="stat-card">
+      <span class="stat-card-value">{{ total }}</span>
+      <span class="stat-card-label">Total PDFs</span>
+      <span class="stat-card-bar" style="width:100%;background:var(--ink-200)"></span>
+    </div>
+    <div class="stat-card is-done">
+      <span class="stat-card-value">{{ summary.completed }}</span>
+      <span class="stat-card-label">Finished</span>
+      <span class="stat-card-bar" style="width:{{ '%.1f' % bar_done }}%;background:var(--ok-600)"></span>
+    </div>
+    <div class="stat-card is-active">
+      <span class="stat-card-value">{{ summary.processing }}</span>
+      <span class="stat-card-label">In Progress</span>
+      <span class="stat-card-bar" style="width:{{ '%.1f' % bar_active }}%;background:var(--live-700)"></span>
+    </div>
+    <div class="stat-card is-waiting">
+      <span class="stat-card-value">{{ summary.waiting }}</span>
+      <span class="stat-card-label">Waiting</span>
+      <span class="stat-card-bar" style="width:{{ '%.1f' % bar_waiting }}%;background:var(--ink-400)"></span>
+    </div>
+    <div class="stat-card{% if summary.attention %} is-alarm{% endif %}">
+      <span class="stat-card-value">{{ summary.attention }}</span>
+      <span class="stat-card-label">Need Attention</span>
+      <span class="stat-card-bar" style="width:{{ '%.1f' % bar_problem }}%;background:{% if summary.attention %}var(--bad-600){% else %}var(--ink-200){% endif %}"></span>
+    </div>
+  </section>
+
+  <p class="documents-list-intro" id="document-results-heading">
+    {# Never paged, so this never has to say "showing 1-50 of 600" -- a count
+       of what is on screen that is smaller than the count of what exists is
+       the shape of a page that is hiding something. Every matching PDF is
+       below this line. #}
+    
+  </p>
+
+  {% if batch_groups %}
+  <form method="post" action="/uploads/extract" id="selection-form">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+
+    {% for group in batch_groups %}
+    {# Show all groups: named uploads, and the untied group (no upload.id) #}
+    <div class="upload-frame{% if not focus %} is-hub{% endif %}">
+
+      {# ── Folder row ─────────────────────────────────────────────────── #}
+      <div class="folder-row">
+        <span class="folder-icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+          </svg>
+        </span>
+        {% if group.upload %}
+          <span class="pill is-neutral folder-source">{{ group.upload.source }}</span>
+        {% else %}
+          <span class="pill is-neutral folder-source">other</span>
+        {% endif %}
+        <div class="folder-info">
+          <span class="folder-name">
+            {% if group.upload %}{{ group.upload.label }}{% else %}Not tied to a named upload{% endif %}
+          </span>
+          <span class="folder-meta">
+            {% if group.upload %}
+              Uploaded {{ time_ago(group.upload.created_at) }}
+              &middot; {{ group.registered }} PDF{{ 's' if group.registered != 1 else '' }}
+              &middot; {{ group.subgroups | length }} batch{{ 'es' if group.subgroups | length != 1 else '' }}
+              {% if group.upload.file_count > group.registered %}
+                <span class="upload-meta-warn">&middot; {{ group.upload.file_count - group.registered }} never arrived</span>
+              {% endif %}
+            {% else %}
+              {{ group.on_page }} PDF{{ 's' if group.on_page != 1 else '' }}, not tied to a named upload
+            {% endif %}
+          </span>
+        </div>
+        <span class="folder-spacer" aria-hidden="true"></span>
+        {% if group.upload %}
+          {% if focus and focus.id == group.upload.id %}
+            <!-- <a href="/documents" class="folder-btn is-back">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"/>
+              </svg>
+              All uploads
+            </a> -->
+          {% else %}
+            <a href="/documents?upload={{ group.upload.id }}" class="folder-btn">
+              Open
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </a>
+          {% endif %}
+        {% elif filters.unassigned %}
+          <a href="/documents" class="folder-btn is-back">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"/>
+            </svg>
+            All uploads
+          </a>
+        {% else %}
+          <a href="/documents?unassigned=true" class="folder-btn">
+            Open
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </a>
+        {% endif %}
+      </div>
+
+      {# ── Batches — only shown when this specific upload is focused.
+         The untied group has no upload.id so it can never be "focused";
+         its batches are therefore never shown (same behaviour as named uploads
+         on the hub). #}
+      {% if (focus and group.upload and focus.id == group.upload.id) or (filters.unassigned and not group.upload) %}
+
+        {% set frame_total = group.on_page %}
+        {% set open_sub = group.subgroups | selectattr('key', 'equalto', filters.open_batch) | first %}
+
+        <div class="upload-toolbar">
+          <label class="upload-select-all">
+            <input type="checkbox" class="upload-check-all" data-upload="{{ group.upload.id if group.upload else 'other' }}"
+                   aria-label="Select all {{ frame_total }} PDFs in {{ group.upload.label if group.upload else 'documents not tied to an upload' }}">
+            <span>Select all {{ frame_total }} PDF{{ 's' if frame_total != 1 else '' }} across {{ group.subgroups | length }} batch{{ 'es' if group.subgroups | length != 1 else '' }}</span>
+          </label>
+        </div>
+
+        {% for subgroup in group.subgroups %}
+        {% set batch_done_pct = ((subgroup.settled * 100) / subgroup.size)|round|int if subgroup.size else 0 %}
+        <div data-batch-group>
+          <div class="batch-strip">
+            <div class="batch-strip-lead">
+              <input type="checkbox" class="batch-check" data-batch="{{ group.upload.id if group.upload else 'other' }}"
+                     aria-label="Select all PDFs in batch {{ subgroup.batch_num }}">
+              <span class="batch-name">Batch {{ subgroup.batch_num }}</span>
+            </div>
+            <div class="batch-progress">
+              <div class="batch-progress-head">
+                <span class="batch-say">
+                  <b>{{ subgroup.settled }}</b> of <b>{{ subgroup.size }}</b> PDF{{ 's' if subgroup.size != 1 else '' }} done
+                </span>
+                <span class="batch-progress-pct">{{ batch_done_pct }}%</span>
+              </div>
+              <div class="batch-progress-bar" role="progressbar"
+                   aria-valuenow="{{ batch_done_pct }}" aria-valuemin="0" aria-valuemax="100"
+                   aria-label="{{ subgroup.settled }} of {{ subgroup.size }} PDFs done">
+                <span class="batch-progress-fill" style="width: {{ batch_done_pct }}%;"></span>
+              </div>
+            </div>
+            <div class="batch-metrics-wrap">
+            <div class="batch-metrics" role="group"
+                 aria-label="Batch {{ subgroup.batch_num }} status summary">
+              <span class="batch-metric is-done{% if not subgroup.counts.done %} is-zero{% endif %}">
+                <span class="batch-metric-n">{{ subgroup.counts.done }}</span>
+                <span class="batch-metric-l">Done</span>
+              </span>
+              <span class="batch-metric is-active{% if not subgroup.counts.active %} is-zero{% endif %}">
+                <span class="batch-metric-n">{{ subgroup.counts.active }}</span>
+                <span class="batch-metric-l">Active</span>
+              </span>
+              <span class="batch-metric is-problem{% if not subgroup.counts.problem %} is-zero{% endif %}">
+                <span class="batch-metric-n">{{ subgroup.counts.problem }}</span>
+                <span class="batch-metric-l">Errors</span>
+              </span>
+              <span class="batch-metric is-skipped{% if not subgroup.counts.skipped %} is-zero{% endif %}">
+                <span class="batch-metric-n">{{ subgroup.counts.skipped }}</span>
+                <span class="batch-metric-l">Skipped</span>
+              </span>
+              <span class="batch-metric is-waiting{% if not subgroup.counts.waiting %} is-zero{% endif %}">
+                <span class="batch-metric-n">{{ subgroup.counts.waiting }}</span>
+                <span class="batch-metric-l">Waiting</span>
+              </span>
+            </div>
+            </div>
+            <span class="batch-rail" role="img" hidden aria-hidden="true"
+                  aria-label="Batch {{ subgroup.batch_num }}: {{ subgroup.counts.done }} finished, {{ subgroup.counts.active }} in progress, {{ subgroup.counts.problem }} needing attention, {{ subgroup.counts.skipped }} skipped as duplicates, {{ subgroup.counts.waiting }} waiting, out of {{ subgroup.size }} PDFs">
+              {% if subgroup.pct.done %}<span class="batch-rail-seg" style="width:{{ subgroup.pct.done }}%;background:var(--ok-100)"></span>{% endif %}
+              {% if subgroup.pct.active %}<span class="batch-rail-seg" style="width:{{ subgroup.pct.active }}%;background:var(--live-100)"></span>{% endif %}
+              {% if subgroup.pct.skipped %}<span class="batch-rail-seg" style="width:{{ subgroup.pct.skipped }}%;background:var(--ink-300)"></span>{% endif %}
+              {% if subgroup.pct.problem %}<span class="batch-rail-seg" style="width:{{ subgroup.pct.problem }}%;background:var(--bad-100)"></span>{% endif %}
+              {% if subgroup.pct.waiting %}<span class="batch-rail-seg" style="width:{{ subgroup.pct.waiting }}%;background:var(--ink-200)"></span>{% endif %}
+            </span>
+            <span class="batch-strip-end">
+              <a href="/documents/batches/{{ subgroup.key }}" class="batch-open"
+                 aria-label="View batch {{ subgroup.batch_num }} PDFs">
+                <span class="batch-open-label">View</span><span class="batch-open-tail"> the <b>{{ subgroup.size }}</b> PDF{{ 's' if subgroup.size != 1 else '' }}</span>
+              </a>
+              {{ batch_action_menu() }}
+            </span>
+          </div>
+            {# Closed batch summaries still need real successful-control values.
+               These hidden checkbox proxies are what the visible batch/all
+               selectors toggle and what the bulk POST submits. #}
+            {% if not subgroup.documents %}
+              <span hidden aria-hidden="true">
+                {% for document_id in subgroup.selection_ids %}
+                  <input type="checkbox" name="document_ids" value="{{ document_id }}" class="doc-check selection-proxy">
+                {% endfor %}
+              </span>
+            {% endif %}
+            {% for d in subgroup.documents %}
+            <div class="doc-row" data-doc-row>
+              <span class="doc-row-check">
+                <input type="checkbox" name="document_ids" value="{{ d.id }}" class="doc-check"
+                       aria-label="Select {{ d.file_name }}">
+              </span>
+              <span class="min-w-0">
+                <a href="/documents/{{ d.id }}" class="doc-name">{{ d.file_name }}</a>
+                <span class="doc-sub">
+                  <span class="doc-size">{{ file_size_summary(d.file_size) or 'Size unknown' }}</span>
+                  <span class="doc-sub-sep" aria-hidden="true">&middot;</span>
+                  <span>PDF {{ d.batch_index if d.batch_index else '—' }}</span>
+                  <span class="doc-sub-sep" aria-hidden="true">&middot;</span>
+                  <a href="/documents/{{ d.id }}/pdf" target="_blank" rel="noopener" class="doc-view-link">View PDF</a>
+                </span>
+              </span>
+              <span class="doc-cell-status">{{ state_badge(d.status) }}</span>
+              <span class="doc-cell-actions">{{ action_menu(d.id, d.status) }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endfor %}
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    {% if focus or filters.unassigned %}
+    <div class="actionbar">
+      <div class="flex items-center gap-4 flex-wrap">
+        <span style="font:600 .9375rem/1.4 var(--sans);color:var(--ink-900)">
+          <span id="selected-count">0</span> selected
+        </span>
+        <button type="button" id="select-all" class="btn btn-quiet">Select all {{ total }}</button>
+        <button type="button" id="clear-all" class="btn btn-quiet">Clear</button>
+      </div>
+      <div class="flex items-center gap-2">
+        <button type="submit" formaction="/uploads/delete" class="btn btn-danger"
+                onclick="return confirm('Delete the selected PDFs and everything extracted from them? This cannot be undone.')">
+          Delete
+        </button>
+        <button type="submit" formaction="/uploads/extract" class="btn btn-primary" data-extract-button>
+          Start unfinished PDFs
+        </button>
+        <button type="submit" formaction="/uploads/export-options" class="btn btn-quiet" data-export-button>
+          Export Excel
+        </button>
+      </div>
+    </div>
+    {% endif %}
+  </form>
   {% else %}
-    <span></span>
+    <div class="empty-documents"><div class="empty-title">No matching PDF documents</div><div class="empty-copy">Try a different status, file name, or date—or clear the current filters.</div></div>
   {% endif %}
-  {% if page * 50 < total %}
-    <a href="?page={{ page+1 }}&status={{ filters.status }}&filename={{ filters.filename }}&date_from={{ filters.date_from }}" class="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">Next →</a>
-  {% endif %}
+
+  {# No paging. Both scopes list every PDF that matches, so there is no page
+     two to navigate to and a Previous/Next pair here would be two buttons that
+     do nothing. The strips fold instead -- that is the affordance. #}
 </div>
 
+<script>
+(function () {
+  'use strict';
+
+  var form = document.getElementById('selection-form');
+  if (form) {
+    var rowChecks = function () { return Array.prototype.slice.call(form.querySelectorAll('.doc-check')); };
+    var countEl = document.getElementById('selected-count');
+    var extractBtn = form.querySelector('[data-extract-button]');
+
+    function refresh() {
+      var rows = rowChecks();
+      var chosen = rows.filter(function (c) { return c.checked; });
+      if (countEl) countEl.textContent = chosen.length;
+
+      form.querySelectorAll('.batch-check').forEach(function (box) {
+        var group = Array.prototype.slice.call(
+          box.closest('[data-batch-group]').querySelectorAll('.doc-check'));
+        var picked = group.filter(function (c) { return c.checked; });
+        box.checked = picked.length === group.length && group.length > 0;
+        box.indeterminate = picked.length > 0 && picked.length < group.length;
+      });
+
+      form.querySelectorAll('.upload-check-all').forEach(function (box) {
+        var frame = box.closest('.upload-frame');
+        if (!frame) return;
+        var group = Array.prototype.slice.call(frame.querySelectorAll('.doc-check'));
+        var picked = group.filter(function (c) { return c.checked; });
+        box.checked = picked.length === group.length && group.length > 0;
+        box.indeterminate = picked.length > 0 && picked.length < group.length;
+      });
+
+      form.querySelectorAll('.doc-check').forEach(function (box) {
+        var row = box.closest('[data-doc-row]');
+        if (row) row.classList.toggle('is-picked', box.checked);
+      });
+
+      if (extractBtn) extractBtn.disabled = chosen.length === 0;
+      var del = form.querySelector('button[formaction="/uploads/delete"]');
+      if (del) del.disabled = chosen.length === 0;
+      var exp = form.querySelector('[data-export-button]');
+      if (exp) exp.disabled = chosen.length === 0;
+    }
+
+    form.addEventListener('change', function (ev) {
+      if (ev.target.classList.contains('batch-check')) {
+        var group = ev.target.closest('[data-batch-group]').querySelectorAll('.doc-check');
+        Array.prototype.forEach.call(group, function (c) { c.checked = ev.target.checked; });
+      }
+      if (ev.target.classList.contains('upload-check-all')) {
+        var frame = ev.target.closest('.upload-frame');
+        if (frame) {
+          Array.prototype.forEach.call(frame.querySelectorAll('.doc-check'), function (c) {
+            c.checked = ev.target.checked;
+          });
+        }
+      }
+      refresh();
+    });
+
+    // The batch ⋮ menu sets its rows from outside the form and then dispatches
+    // a change on the form itself to reuse this handler, so the same
+    // refresh() above owns the state whether the change came from a real click
+    // or from the menu. Nothing to do here beyond letting it through.
+
+    var selectAll = document.getElementById('select-all');
+    if (selectAll) {
+      selectAll.addEventListener('click', function () {
+        rowChecks().forEach(function (c) { c.checked = true; });
+        refresh();
+      });
+    }
+
+    var clearAll = document.getElementById('clear-all');
+    if (clearAll) {
+      clearAll.addEventListener('click', function () {
+        rowChecks().forEach(function (c) { c.checked = false; });
+        refresh();
+      });
+    }
+
+    refresh();
+  }
+
+  /* ── Opening a batch ────────────────────────────────────────────────────
+
+     The rows are NOT in the DOM until you ask for them. The page hands back
+     the numbers for six batches and no filenames at all; opening one batch is
+     a GET that adds ?open_batch=<key>, so the server is the one that decides
+     which hundred rows to send.
+
+     That is the whole point of the change, and it is why this navigates rather
+     than toggling a hidden attribute: the earlier disclosure shipped all 582
+     rows and then hid them, which put exactly the cluster the complaint was
+     about into the DOM. Now the default page carries no PDF rows at all.
+
+     The "View" link on each strip navigates to a dedicated batch page at
+     /documents/batches/<key>, which shows only that batch's PDFs. The
+     server-side key is "<upload id>-<batch number>" -- unique across every
+     upload because batch numbering restarts at one per upload.
+
+     Every other query parameter is carried through untouched, because someone
+     who filtered down to a status and then opened a batch expects to still be
+     looking at that status when they close it again. */
+
+  /* ── Batch menus ─────────────────────────────────────────────────────────
+     The items in a strip's ⋮ are <button>s that operate on the batch's rows
+     and then press the selection bar's own buttons, rather than posting to a
+     batch endpoint of their own. That is deliberate: the batch's PDFs are
+     already ticked in the same form, so routing through it means one code path
+     for "extract these", not two that can drift -- and the delete confirm
+     dialog still fires, because it lives on the real button. */
+  document.addEventListener('click', function (ev) {
+    var item = ev.target.closest('[data-batch-action]');
+    if (!item) return;
+    var group = item.closest('[data-batch-group]');
+    if (!group) return;
+    var form = document.getElementById('selection-form');
+    if (!form) return;
+
+    var action = item.getAttribute('data-batch-action');
+    var boxes = group.querySelectorAll('.doc-check');
+    var on = action !== 'deselect';
+    Array.prototype.forEach.call(boxes, function (c) { c.checked = on; });
+    // Dispatching change on the form runs the handler that ends in refresh(),
+    // so the counts, the batch tick, the row tints and the disabled state all
+    // update through exactly the path a real click takes. No second copy of
+    // that logic here to fall out of step with it.
+    form.dispatchEvent(new Event('change', { bubbles: true }));
+    if (!on) return;
+
+    var bar = form.querySelector(action === 'extract'
+      ? '[data-extract-button]'
+      : 'button[formaction="/uploads/delete"]');
+    if (bar) bar.click();
+  });
+
+  document.addEventListener('click', function (ev) {
+    var confirmed = ev.target.closest('[data-confirm]');
+    if (confirmed && !window.confirm(confirmed.getAttribute('data-confirm'))) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
+    document.querySelectorAll('.action-menu[open]').forEach(function (menu) {
+      if (!menu.contains(ev.target)) menu.removeAttribute('open');
+    });
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Escape') return;
+    document.querySelectorAll('.action-menu[open]').forEach(function (m) { m.removeAttribute('open'); });
+  });
+})();
+</script>
 {% endblock %}

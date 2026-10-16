@@ -26,6 +26,74 @@ A mock adapter is also available for contract testing, set with `EXTRACTOR_MODE=
 4. The included blank demo PDF can be used immediately, or add your own PDF files to `sample-pdfs/`.
 5. Open [the local dashboard](http://localhost:8088), signing in as `admin` with your `ADMIN_TOKEN`. Use **Discover PDFs now** for an immediate scan. Celery Beat also scans hourly.
 
+## Browser uploads and UAT storage
+
+Authenticated users can open **Upload PDFs** in the dashboard and upload
+multiple PDFs, a complete nested folder, or a ZIP dropped in the MinIO inbox.
+Each submission becomes one **upload** with its own label, and directory uploads
+retain their internal folder hierarchy. Files are written atomically so
+discovery never sees a partial upload.
+
+**Nothing is processed until you press Extract.** An upload appears underneath
+its own heading as soon as it lands, numbered in batches of
+`UPLOAD_BATCH_SIZE`, and every PDF sits `pending`. This is deliberate: with a few
+hundred rolls in one folder there is otherwise no moment at which you can look at
+what arrived and say "that one is wrong" — and because a completed document can
+only be re-extracted from this page, this is also the only place that escape
+hatch exists. Tick individual PDFs, a whole batch, or every batch, then press
+**Extract**. The 15-second dispatch tick selects approved rows only, so an upload
+you have not ticked is never picked up in the background.
+
+Batch names are editable in place and stored in the database. Deleting a PDF
+removes the file, its row, and everything extracted from it.
+
+`PDF_SOURCE_PATH` is the host-side directory mounted at `/data/pdfs`. For UAT,
+set it to a persistent server volume before starting Compose, for example:
+
+```env
+PDF_SOURCE_PATH=/srv/electoral-roll/uploads
+MAX_UPLOAD_FILE_MB=100
+MAX_UPLOAD_BATCH_MB=2000
+UPLOAD_BATCH_SIZE=100
+```
+
+There is **no limit on the number of files** in one upload. An earlier
+`MAX_UPLOAD_FILES` capped a submission at 500 and rejected anything above it with
+no way to proceed, which is the exact case the page exists to make visible. The
+two byte limits above remain: they bound disk and memory, and they are checked
+per file and per submission, so an oversized upload fails with a message naming
+the offending file and states that nothing was saved.
+
+Create that directory and grant write access to the Docker service. The web and
+worker containers receive a writable mount for browser uploads and ZIP
+extraction; OCR and scheduler use the same directory read-only. Back up this
+directory together with PostgreSQL.
+
+## MinIO ZIP inbox
+
+The Compose stack also provides a local S3-compatible MinIO inbox. Open
+<http://localhost:9001>, sign in with `MINIO_ROOT_USER` and
+`MINIO_ROOT_PASSWORD`, open the `electoral-archives` bucket, and upload ZIP
+files. The bucket is created automatically. Every 30 seconds the worker:
+
+1. discovers new ZIP object versions;
+2. downloads each archive to temporary storage;
+3. rejects traversal paths, symlinks, encrypted entries, invalid PDFs, and
+   configured size/count limit violations;
+4. extracts PDF files only, retaining folders inside the ZIP;
+5. atomically publishes the extracted folder to `DOCUMENT_ROOT`; and
+6. invokes the existing discovery, page splitting, queue, OCR, and DB flow.
+
+MinIO object data lives at `MINIO_DATA_PATH`; extracted PDFs live at
+`PDF_SOURCE_PATH`. Set both to persistent UAT disk paths and back up both.
+`MINIO_DELETE_AFTER_INGEST=false` retains the original ZIP. Set it to `true`
+only when deleting a successfully ingested source object is acceptable.
+
+This stack builds the patched `RELEASE.2025-10-15T17-29-55Z` source tag because
+the MinIO community repository is archived and its community distribution is
+source-only. MinIO is AGPLv3 software; validate licensing and support
+requirements before using it in a commercial or production deployment.
+
 The dashboard listens on `127.0.0.1:8088` by default. Change `WEB_PORT` if occupied. Run `docker compose logs -f worker beat web` to follow processing. Run `docker compose down` to stop; the database and Redis data remain in Docker volumes. `docker compose down -v` also deletes those volumes.
 
 For a concise team handoff, see [TEAM_HANDBOOK.md](DOCS/TEAM_HANDBOOK.md). Run `python package_for_team.py` (`python3` on Linux) to create a ZIP that excludes the local `.env` password.

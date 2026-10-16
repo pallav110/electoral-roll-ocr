@@ -3,4 +3,5 @@
 **/__pycache__
 **/*.pyc
 sample-pdfs
+minio-data
 tests

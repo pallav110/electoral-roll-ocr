@@ -1,0 +1,138 @@
+# The text-layer reader. A sibling of Dockerfile.ocr, not a variant of it.
+#
+# What is shared and why:
+#   * Tesseract is built from source at the same pinned versions. This service
+#     OCRs the Devanagari crop of each card -- it cannot take the vector
+#     glyphs, because the WinAnsi-encoded text layer stores that Devanagari
+#     with its shaping already destroyed. So the accuracy baseline has to be
+#     the same engine that produced the ground truth, or the numbers mean
+#     nothing. The reasoning behind the pins is in Dockerfile.ocr and is not
+#     repeated here.
+#   * ocr_pdf_api.py is present, because ocr_text_pdf_api.py imports it for the
+#     shared record, confidence and review layer. Those functions must stay in
+#     one place or the two services drift and the records stop being
+#     interchangeable, which is the whole premise.
+#
+# What is deliberately absent:
+#   * PaddleOCR. It is ~16 MB of model weights plus a GPU-or-CPU inference path
+#     that this service never calls -- its fallback lives in
+#     ocr_pdf_api._extract_pdf_ocr_unlocked, which this service does not use.
+#     Installing it would make the image several hundred megabytes larger and
+#     the container slower to start for code that cannot execute here.
+#   * The build-toolchain half of the tesseract build is kept, because the
+#     accuracy requirement is not negotiable for a change this visible.
+
+FROM python:3.12-slim
+
+ARG LEPTONICA_VERSION=1.87.0
+ARG TESSERACT_VERSION=5.5.3
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    ca-certificates \
+    libtool \
+    pkg-config \
+    build-essential \
+    curl \
+    libarchive-dev \
+    libcurl4-openssl-dev \
+    libicu-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libwebp-dev \
+    libxml2-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp
+RUN curl -fsSL -o leptonica.tar.gz \
+      "https://github.com/DanBloomberg/leptonica/archive/refs/tags/${LEPTONICA_VERSION}.tar.gz" \
+    && tar xzf leptonica.tar.gz \
+    && cd "leptonica-${LEPTONICA_VERSION}" \
+    && ./autogen.sh \
+    && ./configure --prefix=/usr/local --disable-openmp \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && cd / && rm -rf leptonica.tar.gz "leptonica-${LEPTONICA_VERSION}"
+
+RUN curl -fsSL -o tesseract.tar.gz \
+      "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/${TESSERACT_VERSION}.tar.gz" \
+    && tar xzf tesseract.tar.gz \
+    && cd "tesseract-${TESSERACT_VERSION}" \
+    && ./autogen.sh \
+    && ./configure --prefix=/usr/local --disable-openmp --disable-debug \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && cd / && rm -rf tesseract.tar.gz "tesseract-${TESSERACT_VERSION}"
+
+# Same fail-the-build guard as the scanned reader. A silent tesseract downgrade
+# changes every Hindi read in the output while every endpoint still returns 200.
+RUN tesseract --version \
+    && tesseract --version | grep -q "5\.5\.3" \
+    && tesseract --version | grep -q "leptonica-1\.87\.0"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr-hin \
+    tesseract-ocr-eng \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# A source-built tesseract looks in /usr/local/share/tessdata; apt installs to
+# /usr/share/tesseract-ocr/5/tessdata. Without the copy, tesseract exits 0 on
+# every call and every Hindi read comes back empty -- no error, just a service
+# that works and returns nothing.
+RUN set -eux; \
+    src=/usr/share/tesseract-ocr/5/tessdata; \
+    dst=/usr/local/share/tessdata; \
+    mkdir -p "$dst"; \
+    for f in "$src"/*.traineddata; do \
+      [ -e "$f" ] || continue; \
+      cp "$f" "$dst/"; \
+    done; \
+    test -f "$dst/hin.traineddata"; \
+    test -f "$dst/eng.traineddata"; \
+    md5sum "$dst/hin.traineddata"
+
+# --list-lang is the load proof, not file existence: tesseract exits 0 when it
+# cannot open a language file, so the missing-model failure passes a test -f.
+RUN set -eux; \
+    echo "f7d08874dfd41e07744a42a541fd9e53  /usr/local/share/tessdata/hin.traineddata" \
+      | md5sum -c -; \
+    tesseract --list-langs 2>/dev/null | grep -qx 'hin'; \
+    tesseract --list-langs 2>/dev/null | grep -qx 'eng'
+
+WORKDIR /app
+
+COPY ocr_pdf_api.py .
+COPY ocr_text_pdf_api.py .
+COPY ocr_api_requirements.txt .
+
+# The full pinned requirement set is installed, not a hand-picked subset.
+# ocr_pdf_api.py is imported at module load and its own import list runs at that
+# moment, so a minimal requirements file here fails at startup on whatever it
+# left out -- and the service that does not start is the one the router
+# cannot fall back from.
+ENV PIP_DEFAULT_TIMEOUT=600
+# --retries/--timeout survive CDN stalls; the build caches the earlier layers, so
+# a retry resumes at this step rather than rebuilding tesseract each time.
+RUN pip install --no-cache-dir --retries 10 --timeout 180 -r ocr_api_requirements.txt
+
+# Prove the service can be imported, not merely that the files landed. This is
+# the same class of check as the tessdata one above: without it, a missing
+# transitive dependency shows up as a container that exits immediately, and
+# web sees a connection refused with nothing in its own logs to explain it.
+RUN python -c "import ocr_text_pdf_api; print(ocr_text_pdf_api.app.title)"
+
+EXPOSE 8083
+
+CMD ["sh", "-c", "uvicorn ocr_text_pdf_api:app --host 0.0.0.0 --port ${OCR_TEXT_API_PORT:-8083}"]

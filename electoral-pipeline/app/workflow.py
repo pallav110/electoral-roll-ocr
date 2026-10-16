@@ -11,13 +11,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from pypdf import PdfReader
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app import config
 from app.db import SessionLocal
+from app.durations import completed_unit_processing_time_ms
 from app.extractor import ExtractionError, extract, validate_response
-from app.models import Document, ElectoralDocumentMetadata, ElectoralRecord, ExtractionSession, ExtractionUnit, ProcessingEvent, RawResponse, ScanRoot, now
+from app.header_fill import fill_header_gaps
+from app.models import (Document, ElectoralDocumentMetadata, ElectoralRecord, ExtractionSession,
+                        ExtractionUnit, ProcessingEvent, RawResponse, ScanRoot, UploadBatch, now)
 from app.normalize import map_metadata, map_record
 
 
@@ -26,6 +29,32 @@ WORKER_ID = f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
 
 log.info(f"[WORKFLOW] Worker ID initialized: {WORKER_ID}")
 print(f"[WORKFLOW] Worker ID initialized: {WORKER_ID}")
+
+
+def local_source_id(root, path, digest: str, scope: str | None = None) -> str:
+    """Identify one path/version without collapsing copies in other folders.
+
+    `root` is the directory being walked, so the path alone is relative to
+    whichever folder the caller happened to start from. Two walks that start
+    in different folders produce different relative paths for the same
+    basename -- and, worse, the SAME relative path for different files.
+    Uploading "roll_001.pdf" a second time walks a fresh per-upload directory,
+    where its path relative to that directory is just "roll_001.pdf", exactly
+    as it was for the first upload. uq_documents_source then rejected the
+    second copy and `on_conflict_do_nothing` swallowed it, so four of six
+    files in a fresh upload never appeared in the table and the batch's
+    file_count silently disagreed with the rows.
+
+    `scope` is that missing discriminator: the per-upload directory name for
+    the uploads flow, the scan-root id when there is one, and None for a
+    one-off walk of an unregistered path (where the absolute path already
+    varies per caller, and nothing has changed for that path since before
+    this column existed).
+    """
+    relative_path = path.resolve().relative_to(root.resolve()).as_posix()
+    if scope:
+        return f"{scope}:{relative_path}#{digest}"
+    return f"{relative_path}#{digest}"
 
 
 def event(db, kind, document_id=None, session_id=None, unit_id=None, message=None, details=None):
@@ -205,13 +234,15 @@ def discover(roots: list[str] | None = None) -> int:
             if copied:
                 # The copied files are now under INGEST_ROOT; scan that instead.
                 ingest_root = config.INGEST_ROOT / _safe_name(raw)
-                found += _discover_under(ingest_root, raw, scan_root_id=scan_root_id)
+                found += _discover_under(ingest_root, raw, scan_root_id=scan_root_id,
+                                        source_scope=f"ingest:{_safe_name(raw)}")
                 _record_scan_result(raw, copied, None)
             else:
                 _record_scan_result(raw, 0, "no PDFs found to copy")
             continue
 
-        found += _discover_under(root, raw, scan_root_id=scan_root_id)
+        found += _discover_under(root, raw, scan_root_id=scan_root_id,
+                            source_scope=f"root:{scan_root_id}")
         # _discover_under already recorded this root's outcome, including any
         # unreadable files. Recording it AGAIN here with no error message
         # overwrote that warning with a clean result, which is why a folder of
@@ -289,7 +320,9 @@ def _record_scan_result(raw: str, count: int, error: str | None = None) -> None:
         log.exception("[DISCOVER] Could not record scan result for %s", raw)
 
 
-def _discover_under(root: Path, label: str, scan_root_id: int | None = None) -> int:
+def _discover_under(root: Path, label: str, scan_root_id: int | None = None,
+                    upload_batch_id=None, approved: bool = True,
+                    source_scope: str | None = None) -> int:
     """Walk one resolved root and register every PDF beneath it.
 
     Unreadable files are reported, not silently dropped. A file that cannot be
@@ -300,6 +333,21 @@ def _discover_under(root: Path, label: str, scan_root_id: int | None = None) -> 
     document so a folder view can group by it exactly rather than by guessing
     from source_path. It is None for a one-off scan of an unregistered path,
     which is why the column is nullable.
+
+    `upload_batch_id` is set only by the /uploads flow, and scopes the walk to
+    one submission's directory so an upload cannot sweep in unrelated files
+    sitting under the same root.
+
+    `approved` defaults True, which preserves the pre-existing behaviour for
+    every non-upload caller: a registered scan folder keeps starting on its own
+    when the hourly beat runs discover(). The uploads flow passes False so the
+    PDFs it just wrote sit untouched until the user ticks them. Defaulting this
+    the other way round would silently strand every scan-folder document the
+    moment the column was added -- they would be discovered and never run.
+
+    `source_scope` disambiguates the source_document_id of everything found.
+    See local_source_id: without it, two uploads of the same filename collide
+    on uq_documents_source and the second upload silently loses rows.
     """
     log.info("[DISCOVER] Walking %s (from %r)", root, label)
     print(f"[DISCOVER] Walking {root}")
@@ -309,6 +357,12 @@ def _discover_under(root: Path, label: str, scan_root_id: int | None = None) -> 
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() != ".pdf":
             continue
+        relative_parts = path.relative_to(root).parts
+        if any(part.startswith(".") for part in relative_parts[:-1]):
+            continue
+
+        log.debug(f"[DISCOVER] Processing file: {path.name}")
+        print(f"[DISCOVER] Processing file: {path.name}")
 
         try:
             digest = hashlib.sha256()
@@ -316,14 +370,33 @@ def _discover_under(root: Path, label: str, scan_root_id: int | None = None) -> 
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(chunk)
             stat = path.stat()
-            values = dict(source_type="local", source_document_id=None, source_path=str(path.resolve()), file_name=path.name,
-                          file_hash=digest.hexdigest(), file_size=stat.st_size, source_modified_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc), status="pending", scan_root_id=scan_root_id)
+            file_hash = digest.hexdigest()
+            values = dict(source_type="local",
+                          source_document_id=local_source_id(root, path, file_hash, source_scope),
+                          source_path=str(path.resolve()), file_name=path.name, file_hash=file_hash,
+                          file_size=stat.st_size, source_modified_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+                          status="pending", scan_root_id=scan_root_id,
+                          upload_batch_id=upload_batch_id, approved=approved)
 
-            log.debug(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={digest.hexdigest()[:16]}...")
+            log.info(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={file_hash[:16]}...")
             print(f"[DISCOVER] File {path.name}: size={stat.st_size} bytes, hash={digest.hexdigest()[:16]}...")
 
             with SessionLocal.begin() as db:
-                result = db.execute(insert(Document).values(**values).on_conflict_do_nothing(index_elements=[Document.source_type, Document.file_hash], index_where=(Document.source_document_id.is_(None) & Document.file_hash.is_not(None))).returning(Document.id))
+                # Compatibility with documents discovered before path-aware
+                # source IDs were introduced. Do not duplicate the same
+                # path/version during an upgrade.
+                existing_id = db.scalar(select(Document.id).where(
+                    Document.source_type == "local",
+                    Document.source_path == values["source_path"],
+                    Document.file_hash == file_hash,
+                ).limit(1))
+                if existing_id:
+                    log.info("[DISCOVER] Document already exists for file %s", path)
+                    continue
+                result = db.execute(insert(Document).values(**values).on_conflict_do_nothing(
+                    index_elements=[Document.source_type, Document.source_document_id],
+                    index_where=Document.source_document_id.is_not(None),
+                ).returning(Document.id))
                 document_id = result.scalar_one_or_none()
                 if document_id:
                     event(db, "DOCUMENT_DISCOVERED", document_id, message=path.name)
@@ -354,12 +427,36 @@ def _discover_under(root: Path, label: str, scan_root_id: int | None = None) -> 
 
 
 def dispatch_documents(limit=100):
+    """Queue approved documents, bounded by DOCUMENT_MAX_INFLIGHT.
+
+    Without the bound, one beat tick claimed up to 100 documents and each one
+    immediately created its session and unit rows. With 582 PDFs pending that
+    left the /documents page showing every single one as "processing" while none
+    of them had a unit anywhere near a worker.
+    """
     log.info(f"[DISPATCH_DOCS] Starting document dispatch, limit={limit}")
     print(f"[DISPATCH_DOCS] Starting document dispatch, limit={limit}")
-    
+
     ids = []
     with SessionLocal.begin() as db:
-        docs = db.scalars(select(Document).where(or_(Document.status == "pending", (Document.status == "retry") & (Document.next_retry_at <= now()))).order_by(Document.priority, Document.discovered_at).with_for_update(skip_locked=True).limit(limit)).all()
+        in_flight = _in_flight_documents(db)
+        room = max(0, min(limit, config.DOCUMENT_MAX_INFLIGHT - in_flight))
+        if not room:
+            log.info("[DISPATCH_DOCS] %d documents already in flight (max %d), nothing to dispatch",
+                     in_flight, config.DOCUMENT_MAX_INFLIGHT)
+            return 0
+        # `approved` is what makes /uploads a staging area. This task runs
+        # every 15 seconds off the beat schedule and would otherwise pick up
+        # every freshly-uploaded PDF within a tick of it landing on disk --
+        # the user would never get the chance to see a wrong file before OCR
+        # started on it. Only ticked rows are eligible. Everything downstream
+        # (session creation, retries, recovery) is untouched: a ticked
+        # document still enters the pipeline at exactly this point.
+        docs = db.scalars(select(Document).where(
+            Document.approved.is_(True),
+            Document.status.notin_(["paused", "cancelled"]),
+            or_(Document.status == "pending", (Document.status == "retry") & (Document.next_retry_at <= now())),
+        ).order_by(Document.priority, Document.discovered_at).with_for_update(skip_locked=True).limit(room)).all()
         
         log.info(f"[DISPATCH_DOCS] Found {len(docs)} documents to dispatch")
         print(f"[DISPATCH_DOCS] Found {len(docs)} documents to dispatch")
@@ -367,6 +464,55 @@ def dispatch_documents(limit=100):
         for doc in docs:
             log.info(f"[DISPATCH_DOCS] Processing document {doc.id}: status={doc.status}, attempts={doc.attempt_count}/{doc.max_attempts}")
             print(f"[DISPATCH_DOCS] Processing document {doc.id}: status={doc.status}, attempts={doc.attempt_count}/{doc.max_attempts}")
+
+            # The session history is authoritative for which attempt numbers
+            # have already existed. Recovery and older repair scripts can move
+            # a document back to retry while its denormalized attempt_count is
+            # stale (the live failure had attempt_count=0 with attempts 1..3
+            # already present). Incrementing that stale value tried to insert
+            # attempt 1 again, violated the unique constraint, and rolled back
+            # the whole dispatch batch every 15 seconds.
+            historical_attempt = db.scalar(
+                select(func.max(ExtractionSession.attempt_number)).where(
+                    ExtractionSession.document_id == doc.id
+                )
+            ) or 0
+            if historical_attempt > doc.attempt_count:
+                log.warning(
+                    "[DISPATCH_DOCS] Repairing stale attempt_count for %s: %d -> %d",
+                    doc.id, doc.attempt_count, historical_attempt,
+                )
+                doc.attempt_count = historical_attempt
+
+            # A content hash is global even when source_document_id is scoped to
+            # an upload. If identical bytes have already completed, starting a
+            # second OCR session only duplicates voter records under a new
+            # document id. Keep the upload row for audit/UI purposes, but mark it
+            # cancelled before any session or broker message is created.
+            completed_copy = None
+            if doc.file_hash:
+                completed_copy = db.scalar(
+                    select(Document.id).where(
+                        Document.file_hash == doc.file_hash,
+                        Document.status == "completed",
+                        Document.id != doc.id,
+                    ).order_by(Document.processing_completed_at).limit(1)
+                )
+            if completed_copy:
+                doc.status = "cancelled"
+                doc.processing_completed_at = now()
+                doc.last_error_code = "DUPLICATE_CONTENT"
+                doc.last_error = f"Identical PDF already completed as document {completed_copy}"
+                event(
+                    db,
+                    "DOCUMENT_DUPLICATE_SKIPPED",
+                    doc.id,
+                    message=doc.last_error,
+                    details={"completed_document_id": str(completed_copy), "file_hash": doc.file_hash},
+                )
+                log.info("[DISPATCH_DOCS] Skipped duplicate document %s; completed copy is %s",
+                         doc.id, completed_copy)
+                continue
             
             if doc.attempt_count >= doc.max_attempts:
                 doc.status = "failed"
@@ -496,39 +642,30 @@ def process_document_job(document_id, session_id):
         session.pages_total = pages - start_page + 1
         units = []
         for index, start in enumerate(range(start_page, pages + 1, config.PAGES_PER_UNIT), 1):
-            # Created already-"queued" so the unit is accepted by process_unit
-            # on first delivery. process_unit rejects any unit that is not
-            # "queued", and the model default is "pending", so the first
-            # delivery of a freshly-created unit is thrown away. The beat
-            # sweep (dispatch_pending_units, every 10s) then sets pending ->
-            # queued and republishes, so the unit is DELAYED by up to one
-            # sweep, not lost. Setting the status here removes that delay and
-            # the wasted first publish. Measured on a 7-unit roll: created ->
-            # queued was a uniform ~4.9s without this, ~0s with it.
+            # Created "pending", not "queued". This used to be "queued" so that
+            # process_unit would accept the first delivery, and the loop below
+            # published every unit of the document at once. For a 27-page roll
+            # that was 9 messages; for a 582-PDF batch it was thousands, all
+            # landing in one FIFO behind work already there.
+            #
+            # Publishing happens in dispatch_units() instead, which is the one
+            # place that knows how much work is already in flight. Calling it
+            # inline below keeps the benefit the old comment was measuring --
+            # units start in the same request rather than waiting up to 10
+            # seconds for the beat -- without bypassing the window.
             unit = ExtractionUnit(session_id=session.id, unit_number=index, page_from=start, page_to=min(start + config.PAGES_PER_UNIT - 1, pages),
-                status="queued",
-                queued_at=now(),
+                status="pending",
             )
             db.add(unit)
             units.append(unit)
-        
+
         event(db, "UNITS_CREATED", doc.id, session.id, message=f"{pages} pages split into {index} units")
         log.info(f"[PROCESS_DOC] Created {len(units)} extraction units for {pages} pages")
         print(f"   Split into {len(units)} work units for parallel processing")
-    
-    from app.tasks import process_unit
-    log.info(f"[PROCESS_DOC] Dispatching {len(units)} units to Celery")
-    print(f"   Sending {len(units)} work units to processing queue...")
-    
-    for unit in units:
-        try:
-            process_unit.delay(document_id, session_id, unit.id)
-            log.debug(f"[PROCESS_DOC] Unit {unit.id} dispatched")
-            print(f"[PROCESS_DOC] Unit {unit.id} dispatched")
-        except Exception:
-            log.exception("Queue publish failed; queued-job recovery will republish %s", unit.id)
-            print(f"[PROCESS_DOC] ERROR: Queue publish failed for unit {unit.id}")
-    
+
+    # Bounded publish. Most units stay pending and wait for the beat; only what
+    # the window allows goes to the broker now.
+    dispatch_units()
     finalize(session_id)
 
 
@@ -554,6 +691,8 @@ def fail_document_setup(document_id, session_id, code, message):
         session.status = "failed"
         session.completed_at = now()
         session.error_code, session.error_message = code, message
+        # Setup work has no extraction units. Its session span is the actual
+        # setup attempt, so the normal elapsed-time calculation is honest here.
         session.processing_time_ms = int((session.completed_at - (session.started_at or session.created_at)).total_seconds() * 1000)
         doc.status = "retry" if doc.attempt_count < doc.max_attempts else "failed"
         doc.next_retry_at = now() + timedelta(seconds=config.RETRY_BASE_SECONDS * 2 ** (doc.attempt_count - 1)) if doc.status == "retry" else None
@@ -565,49 +704,152 @@ def fail_document_setup(document_id, session_id, code, message):
         print(f"[FAIL_DOC_SETUP] Document {document_id} marked as {doc.status}, session {session_id} failed")
 
 
+def _in_flight_units(db) -> int:
+    """Units currently queued or processing, across every session.
+
+    The window is global rather than per-session on purpose: a per-session cap
+    would let twenty documents each hold one unit and put twenty messages in the
+    broker, which is the thing being bounded here.
+
+    Named rather than inlined so it can be stubbed in tests. The live table is
+    shared, and the beat dispatches against it every ten seconds, so a test that
+    measured the count itself and asserted against it would race the beat and
+    fail intermittently rather than honestly.
+    """
+    return db.scalar(
+        select(func.count()).select_from(ExtractionUnit)
+        .where(ExtractionUnit.status.in_(["queued", "processing"]))
+    ) or 0
+
+
+def _in_flight_documents(db) -> int:
+    """Documents currently queued or processing. See _in_flight_units."""
+    return db.scalar(
+        select(func.count()).select_from(Document)
+        .where(Document.status.in_(["queued", "processing"]))
+    ) or 0
+
+
 def dispatch_units(limit=100):
+    """Publish pending units to the OCR queue, never exceeding the in-flight window.
+
+    This is the only place that publishes a unit. It used to publish up to 100 per
+    call, every 10 seconds, into a queue that a single worker drained at one unit
+    at a time -- so the broker's message count grew far faster than the work could
+    be consumed, and each new dispatch tick pushed real OCR work further back. The
+    limit below is what makes the backlog a database backlog rather than a broker
+    backlog.
+    """
     log.info(f"[DISPATCH_UNITS] Starting unit dispatch, limit={limit}")
     print(f"[DISPATCH_UNITS] Starting unit dispatch, limit={limit}")
-    
+
     ids = []
+    reclaimed = 0
     with SessionLocal.begin() as db:
-        units = db.scalars(select(ExtractionUnit).where(or_(ExtractionUnit.status == "pending", (ExtractionUnit.status == "retry") & (ExtractionUnit.next_retry_at <= now()))).order_by(ExtractionUnit.created_at, ExtractionUnit.unit_number).with_for_update(skip_locked=True).limit(limit)).all()
-        
-        log.info(f"[DISPATCH_UNITS] Found {len(units)} units to dispatch")
-        print(f"[DISPATCH_UNITS] Found {len(units)} units to dispatch")
-        
+        # A unit whose publish never arrived is stuck in "queued" with no worker
+        # coming: the message is gone and the row is the only evidence it existed.
+        # Reclaim those back to "pending" so the next pass republishes them.
+        #
+        # The threshold is deliberately far larger than any legitimate wait. A unit
+        # inside the window is waiting behind the unit ahead of it and may sit for
+        # the full extractor timeout, so reclaiming sooner would republish live work
+        # and duplicate it. This used to live in recover() as a hardcoded 60 seconds
+        # applied to every queued unit regardless of the window -- under a real
+        # backlog that republished the entire queue on every 60-second beat.
+        stale_before = now() - timedelta(seconds=config.QUEUED_RECOVERY_SECONDS)
+        # Only ever look at as many as the window can actually take, and cap the
+        # scan. The stranded set can be the whole backlog -- after a bad deploy
+        # that is tens of thousands of rows -- and taking FOR UPDATE locks on all
+        # of them inside a transaction that runs every ten seconds turns the
+        # reclaim itself into the outage. Draining a large stranded set therefore
+        # takes several ticks, deliberately.
+        scan_limit = max(config.OCR_MAX_INFLIGHT_UNITS, config.RECLAIM_BATCH_SIZE)
+        stale = db.scalars(
+            select(ExtractionUnit)
+            .where(ExtractionUnit.status == "queued", ExtractionUnit.queued_at < stale_before)
+            .order_by(ExtractionUnit.queued_at)
+            .with_for_update(skip_locked=True)
+            .limit(scan_limit)
+        ).all()
+        for unit in stale:
+            unit.status = "pending"
+            unit.queued_at = None
+            unit.error_code, unit.error_message = "PUBLISH_LOST", "Message did not arrive within the recovery window"
+            reclaimed += 1
+        if reclaimed:
+            log.warning("[DISPATCH_UNITS] Reclaimed %d queued unit(s) whose message never arrived", reclaimed)
+
+        # The window itself. Counted inside this transaction so the select below
+        # and the count see the same snapshot.
+        in_flight = _in_flight_units(db)
+        room = max(0, min(limit, config.OCR_MAX_INFLIGHT_UNITS - in_flight))
+
+        units = db.scalars(
+            select(ExtractionUnit)
+            .join(ExtractionSession, ExtractionSession.id == ExtractionUnit.session_id)
+            .where(or_(
+                ExtractionUnit.status == "pending",
+                (ExtractionUnit.status == "retry") & (ExtractionUnit.next_retry_at <= now()),
+            ))
+            # Only units whose session is still eligible -- the ones under
+            # abandoned/failed sessions never run and would otherwise be
+            # re-picked every tick, starving dispatch.
+            .where(ExtractionSession.status == "processing")
+            .order_by(ExtractionUnit.created_at, ExtractionUnit.unit_number)
+            .with_for_update(skip_locked=True)
+            .limit(room)
+        ).all()
+
+        log.info(f"[DISPATCH_UNITS] {in_flight} in flight, room for {room}, found {len(units)} units to dispatch")
+        print(f"[DISPATCH_UNITS] {in_flight} in flight, room for {room}, found {len(units)} units to dispatch")
+
         for unit in units:
             session = db.get(ExtractionSession, unit.session_id)
             doc = db.get(Document, session.document_id)
-            
+
             if session.status != "processing" or doc.current_session_id != session.id:
                 log.debug(f"[DISPATCH_UNITS] Unit {unit.id} skipped - session not processing or document mismatch")
                 print(f"[DISPATCH_UNITS] Unit {unit.id} skipped - session not processing or document mismatch")
                 continue
-            
+
             unit.status = "queued"
             unit.queued_at = now()
             unit.next_retry_at = None
+            unit.error_code, unit.error_message = None, None
             ids.append((str(doc.id), str(session.id), str(unit.id)))
-            
+
             log.debug(f"[DISPATCH_UNITS] Unit {unit.id} queued for dispatch")
             print(f"[DISPATCH_UNITS] Unit {unit.id} queued for dispatch")
-    
+
     from app.tasks import process_unit
     log.info(f"[DISPATCH_UNITS] Dispatching {len(ids)} units to Celery")
     print(f"[DISPATCH_UNITS] Dispatching {len(ids)} units to Celery")
-    
+
     for document_id, session_id, unit_id in ids:
         try:
             process_unit.delay(document_id, session_id, unit_id)
             log.debug(f"[DISPATCH_UNITS] Unit {unit_id} dispatched")
             print(f"[DISPATCH_UNITS] Unit {unit_id} dispatched")
         except Exception:
-            log.exception("Queue publish failed; queued-job recovery will republish %s", unit_id)
+            # Put the row back rather than leaving it "queued" with no message.
+            # That state was invisible to every other path: dispatch_units only
+            # selects "pending" and "retry", and recover's age-based republish is
+            # gone, so a lost publish would strand the unit permanently.
+            log.exception("Queue publish failed; returning unit %s to pending", unit_id)
             print(f"[DISPATCH_UNITS] ERROR: Queue publish failed for unit {unit_id}")
-    
-    log.info(f"[DISPATCH_UNITS] Dispatch complete, {len(ids)} units dispatched")
-    print(f"[DISPATCH_UNITS] Dispatch complete, {len(ids)} units dispatched")
+            with SessionLocal.begin() as db:
+                stranded = db.get(ExtractionUnit, unit_id)
+                if stranded and stranded.status == "queued":
+                    stranded.status, stranded.queued_at = "pending", None
+                    stranded.error_code = "PUBLISH_FAILED"
+                    stranded.error_message = "Could not publish to the broker"
+                else:
+                    # A worker got there between the publish failing and this
+                    # write. It already holds the row, so leave it alone.
+                    log.info("[DISPATCH_UNITS] Unit %s was claimed before the publish failure was recorded", unit_id)
+
+    log.info(f"[DISPATCH_UNITS] Dispatch complete, {len(ids)} units dispatched, {reclaimed} reclaimed")
+    print(f"[DISPATCH_UNITS] Dispatch complete, {len(ids)} units dispatched, {reclaimed} reclaimed")
     return len(ids)
 
 
@@ -940,11 +1182,16 @@ def finalize(session_id):
             log.warning(f"[FINALIZE] Document current session changed, skipping finalization")
             print(f"[FINALIZE] Document current session changed, skipping finalization")
             return
-        
+
+        fill_header_gaps(db, session.id)
+
         failed = [u for u in units if u.status == "failed"]
         session.status = "completed" if not failed else ("partial" if len(failed) < len(units) else "failed")
         session.completed_at = now()
-        session.processing_time_ms = int((session.completed_at - (session.started_at or session.created_at)).total_seconds() * 1000)
+        # Store actual OCR execution time, not session wall time. This session
+        # may have existed for hours while its units waited for the bounded OCR
+        # queue, and that wait must never be reported as processing.
+        session.processing_time_ms = completed_unit_processing_time_ms(units)
         doc.status = "completed" if not failed else "failed"
         doc.processing_completed_at = now()
         
@@ -961,40 +1208,58 @@ def finalize(session_id):
 
 
 def recover():
-    """Beat repairs lost workers and broker delivery gaps without resetting good units."""
+    """Beat repairs lost workers. It does not manage the queue any more.
+
+    This used to hold a hardcoded 60-second cutoff and republish every unit that
+    had been "queued" longer than that. With any real backlog that condition is
+    true for everything -- a unit legitimately waiting behind the OCR window is
+    older than a minute -- so the 60-second beat republished the whole queue on
+    every tick, forever. That was most of the eight hours.
+
+    Recovery is now about worker death, which is what an expired heartbeat can
+    actually prove. A queued unit whose message never arrived is reclaimed by
+    dispatch_units(), which is the function that knows how full the window is;
+    judging it here meant a second, contradictory view of the same rows.
+    """
     cutoff_unit = now() - timedelta(seconds=config.UNIT_STALE_SECONDS)
     cutoff_doc = now() - timedelta(seconds=config.DOCUMENT_STALE_SECONDS)
-    queued_cutoff = now() - timedelta(seconds=60)
-    republish_docs, republish_units, finalize_ids = [], [], set()
+    # Documents use the same "how long before the publish counts as lost" rule as
+    # units. It used to be a bare 60 seconds here while UNIT_STALE_SECONDS and
+    # DOCUMENT_STALE_SECONDS sat either side of it as configurable values.
+    queued_cutoff = now() - timedelta(seconds=config.DOCUMENT_QUEUED_RECOVERY_SECONDS)
+    republish_docs, finalize_ids = [], set()
     with SessionLocal.begin() as db:
         docs = db.scalars(select(Document).where(Document.status.in_(["queued", "processing"])).with_for_update(skip_locked=True)).all()
+        # Room to republish into. Without this, recovery could push the in-flight
+        # count past the bound dispatch_documents() enforces, which is how a
+        # backlog turns back into an unbounded one.
+        room = max(0, config.DOCUMENT_MAX_INFLIGHT - len(docs))
         for doc in docs:
             session = db.get(ExtractionSession, doc.current_session_id) if doc.current_session_id else None
-            # A "queued" document whose session has done no work, published
-            # longer ago than queued_cutoff, is a publish the broker dropped --
-            # not one still in flight. Republish it.
+            # A "queued" document whose session has done no work, published longer
+            # ago than the cutoff, is a publish the broker dropped -- not one still
+            # in flight. Republish it.
             #
             # This branch required `doc.locked_at` to be non-NULL, and nothing in
             # the codebase ever wrote it, so the value was always NULL and the
             # condition was always False. A document whose message was lost
             # between publish and pickup stayed "queued" for good: no worker was
-            # coming, and dispatch_documents() only selects "pending" and
-            # "retry", so nothing would ever pick it up again.
+            # coming, and dispatch_documents() only selects "pending" and "retry".
             #
-            # dispatch_documents() now stamps locked_at when it publishes, which
-            # is what makes the comparison meaningful. The refresh below is what
-            # the original code intended and it is kept: it moves the deadline
-            # forward on each republish, so a document whose broker stays down
-            # is retried once per beat rather than once per document per second.
+            # dispatch_documents() stamps locked_at when it publishes, which is
+            # what makes the comparison meaningful. The refresh below moves the
+            # deadline forward on each republish, so a document whose broker stays
+            # down is retried once per cutoff rather than once per beat.
             #
             # Duplicate messages are harmless. process_document_job() re-checks
             # `doc.status == "queued" and session.status == "created"` under
-            # SELECT FOR UPDATE at :405 and returns if another worker got there
-            # first, so only the first delivery processes the document.
+            # SELECT FOR UPDATE and returns if another worker got there first, so
+            # only the first delivery processes the document.
             if (doc.status == "queued" and doc.locked_at and doc.locked_at < queued_cutoff
-                    and session and session.status == "created"):
+                    and session and session.status == "created" and room > 0):
                 doc.locked_at = now()
                 republish_docs.append((str(doc.id), str(session.id)))
+                room -= 1
             elif (doc.status == "processing" and session and session.pages_total is None
                     and (session.heartbeat_at or session.started_at)
                     and (session.heartbeat_at or session.started_at) < cutoff_doc):
@@ -1006,6 +1271,38 @@ def recover():
                 doc.next_retry_at = now() if doc.status == "retry" else None
                 doc.last_error_code, doc.last_error = "WORKER_LOST", "Document worker heartbeat expired"
                 event(db, "WORKER_LOST", doc.id, session.id)
+                # Drop the abandoned session's never-run units so they do
+                # not starve dispatch_units by being re-picked every tick.
+                db.execute(delete(ExtractionUnit).where(
+                    ExtractionUnit.session_id == session.id,
+                    ExtractionUnit.status.in_(["pending", "retry"]),
+                ))
+            elif (doc.status == "processing" and session and session.pages_total is not None
+                    and (session.heartbeat_at or session.started_at)
+                    and (session.heartbeat_at or session.started_at) < cutoff_doc
+                    and not db.scalar(
+                        select(func.count()).select_from(ExtractionUnit).where(
+                            ExtractionUnit.session_id == session.id,
+                        )
+                    )):
+                # Reap only the broken intermediate state where pages_total was
+                # stamped but no unit rows exist. Pending/queued units are valid
+                # evidence that the session is waiting for the bounded,
+                # sequential OCR lane. Such a wait can exceed DOCUMENT_STALE_SECONDS
+                # without any worker being lost; treating it as a dead session
+                # repeatedly abandoned healthy PDFs and exhausted their attempts.
+                session.status = "abandoned"
+                session.completed_at = now()
+                session.error_code = "WORKER_LOST"
+                session.error_message = "Session heartbeat expired before any unit made progress"
+                doc.status = "retry" if doc.attempt_count < doc.max_attempts else "failed"
+                doc.next_retry_at = now() if doc.status == "retry" else None
+                doc.last_error_code, doc.last_error = "WORKER_LOST", "Session heartbeat expired"
+                event(db, "WORKER_LOST", doc.id, session.id)
+                db.execute(delete(ExtractionUnit).where(
+                    ExtractionUnit.session_id == session.id,
+                    ExtractionUnit.status.in_(["pending", "retry"]),
+                ))
         units = db.scalars(select(ExtractionUnit).where(ExtractionUnit.status.in_(["queued", "processing"])).with_for_update(skip_locked=True)).all()
         # NOTE on the timestamp guards below. `(x or y) < cutoff` raises
         # TypeError when BOTH are NULL -- `None < datetime` has no ordering --
@@ -1028,24 +1325,19 @@ def recover():
             if session.status != "processing":
                 continue
             doc = db.get(Document, session.document_id)
-            if unit.status == "queued" and unit.queued_at and unit.queued_at < queued_cutoff:
-                unit.queued_at = now()
-                republish_units.append((str(doc.id), str(session.id), str(unit.id)))
-            elif (unit.status == "processing" and (unit.heartbeat_at or unit.started_at)
+            if (unit.status == "processing" and (unit.heartbeat_at or unit.started_at)
                     and (unit.heartbeat_at or unit.started_at) < cutoff_unit):
                 unit.status = "retry" if unit.attempt_count < config.MAX_UNIT_ATTEMPTS else "failed"
                 unit.next_retry_at = now() if unit.status == "retry" else None
                 unit.error_code, unit.error_message = "WORKER_LOST", "Unit worker heartbeat expired"
                 event(db, "WORKER_LOST", doc.id, session.id, unit.id)
                 finalize_ids.add(str(session.id))
-    from app.tasks import process_document, process_unit
+    from app.tasks import process_document
     for args in republish_docs:
         process_document.delay(*args)
-    for args in republish_units:
-        process_unit.delay(*args)
     for sid in finalize_ids:
         finalize(sid)
-    return len(republish_docs) + len(republish_units) + len(finalize_ids)
+    return len(republish_docs) + len(finalize_ids)
 
 
 def retry_document(document_id):
@@ -1084,3 +1376,191 @@ def retry_unit(unit_id):
         event(db, "MANUAL_UNIT_RETRY", doc.id, session.id, unit.id)
     dispatch_units()
     return True
+
+
+def select_documents_for_extraction(document_ids) -> tuple[int, int]:
+    """Approve documents for processing. Returns (accepted, skipped).
+
+    This is what pressing "Extract data" on /uploads calls. Setting `approved`
+    is what actually starts the work -- the beat's dispatch task polls every
+    15 seconds and takes only approved rows, so there is no publish to do here
+    and doing one would risk double-dispatch.
+
+    Each status is handled differently because they mean different things:
+
+      pending     First run. Nothing else to do.
+      failed      Needs the attempt ceiling lifted before dispatch will take it,
+                  or the `attempt_count >= max_attempts` guard re-fails it
+                  immediately. Same fix retry_document applies.
+      cancelled   Never restarted here. These are normally content duplicates,
+                  and re-approving them only makes the dispatcher cancel them
+                  again.
+      completed   Never restarted by this bulk action. Selecting every row on
+                  the Documents page must be safe: completed rows are records
+                  to export, not an invitation to silently OCR them again.
+      queued /
+      processing Already in flight. Refused rather than reset -- a worker is
+                  holding these rows and its session, and re-queuing them would
+                  publish a second job for a document already being read.
+
+    Documents that do not exist are counted as skipped rather than raising, so
+    a stale page (something deleted in another tab) cannot fail the whole
+    selection.
+    """
+    ids = [uuid.UUID(str(i)) for i in document_ids]
+    if not ids:
+        return 0, 0
+
+    accepted = 0
+    with SessionLocal.begin() as db:
+        docs = db.scalars(select(Document).where(Document.id.in_(ids)).with_for_update()).all()
+        for doc in docs:
+            if doc.status in ("queued", "processing", "completed", "cancelled"):
+                log.info("[SELECT] Skipping %s: status is %s", doc.id, doc.status)
+                continue
+            if doc.status == "failed":
+                doc.status = "pending"
+                doc.next_retry_at = None
+            # pending needs no status change.
+            doc.approved = True
+            doc.max_attempts = max(doc.max_attempts, doc.attempt_count + 1)
+            event(db, "MANUAL_EXTRACTION_REQUESTED", doc.id, message=doc.file_name)
+            accepted += 1
+
+    return accepted, len(ids) - accepted
+
+
+def delete_documents(document_ids) -> tuple[int, int]:
+    """Remove documents, everything extracted from them, and their files.
+
+    Returns (deleted, skipped). Nothing here existed before: no code in the
+    app had ever deleted a Document row, so this is written against the
+    schema as it actually is.
+
+    Two constraints shape it:
+
+    1. No foreign key in this schema cascades, so the children have to be
+       removed explicitly and in dependency order. Getting the order wrong
+       does not produce a partial delete -- Postgres rejects the statement and
+       the whole transaction rolls back.
+
+    2. A document that is queued or processing is refused. A worker holds
+       that row, its session, and an in-flight publish; deleting underneath it
+       would leave the job running against a row that no longer exists. The
+       user can retry or delete it once it settles.
+
+    Files are unlinked after the transaction commits, never inside it. If the
+    unlink fails the row is already gone, which is the recoverable direction --
+    the reverse would leave rows pointing at files that no longer exist.
+    """
+    ids = [uuid.UUID(str(i)) for i in document_ids]
+    if not ids:
+        return 0, 0
+
+    deleted = 0
+    paths: list[str] = []
+    with SessionLocal.begin() as db:
+        docs = db.scalars(select(Document).where(Document.id.in_(ids)).with_for_update()).all()
+        removable = [d for d in docs if d.status not in ("queued", "processing")]
+        for doc in docs:
+            if doc.status in ("queued", "processing"):
+                log.info("[DELETE] Skipping %s: %s", doc.id, doc.status)
+        if not removable:
+            return 0, len(ids)
+
+        removable_ids = [d.id for d in removable]
+        session_ids = list(db.scalars(select(ExtractionSession.id).where(
+            ExtractionSession.document_id.in_(removable_ids))))
+        unit_ids = list(db.scalars(select(ExtractionUnit.id).where(
+            ExtractionUnit.session_id.in_(session_ids))))
+
+        # Dependency order. processing_events and the extracted rows reference
+        # sessions and units, so they go first; the document goes last.
+        db.execute(delete(ProcessingEvent).where(ProcessingEvent.document_id.in_(removable_ids)))
+        db.execute(delete(ElectoralRecord).where(ElectoralRecord.document_id.in_(removable_ids)))
+        db.execute(delete(ElectoralDocumentMetadata).where(
+            ElectoralDocumentMetadata.document_id.in_(removable_ids)))
+        if session_ids:
+            db.execute(delete(RawResponse).where(RawResponse.session_id.in_(session_ids)))
+        if unit_ids:
+            db.execute(delete(RawResponse).where(RawResponse.extraction_unit_id.in_(unit_ids)))
+            db.execute(delete(ExtractionUnit).where(ExtractionUnit.id.in_(unit_ids)))
+        if session_ids:
+            db.execute(delete(ExtractionSession).where(ExtractionSession.id.in_(session_ids)))
+        db.execute(delete(Document).where(Document.id.in_(removable_ids)))
+
+        paths = [d.source_path for d in removable]
+        deleted = len(removable)
+
+    # Transaction committed. Now the files.
+    for raw in paths:
+        path = Path(raw)
+        try:
+            path.unlink(missing_ok=True)
+            # Prune the upload directory once its last PDF is gone, so an
+            # emptied batch does not linger as a row pointing at nothing.
+            parent = path.parent
+            if parent.is_dir() and parent != config.DOCUMENT_ROOT:
+                try:
+                    next(parent.iterdir())
+                except StopIteration:
+                    parent.rmdir()
+        except OSError as exc:
+            log.warning("[DELETE] Row removed but file %s could not be deleted: %s", path, exc)
+
+    return deleted, len(ids) - deleted
+
+
+def discover_upload_batch(batch_id) -> int:
+    """Register the PDFs of one upload and number them into batches.
+
+    Scoped to that upload's own directory rather than calling discover(),
+    which walks every registered root and would sweep in unrelated files.
+    Returns the number of new documents registered.
+
+    Numbering happens after the insert rather than during the walk because the
+    walk does not know what it will find until it has found it. Ordering by
+    source_path is what makes the numbering stable: the same file gets the same
+    position on a re-scan, so a re-upload does not shuffle the table under a
+    user who has already ticked rows.
+    """
+    if isinstance(batch_id, str):
+        batch_id = uuid.UUID(batch_id)
+
+    with SessionLocal.begin() as db:
+        batch = db.get(UploadBatch, batch_id)
+        if not batch or not batch.relative_directory:
+            log.warning("[UPLOAD] Batch %s has no directory to scan", batch_id)
+            return 0
+        directory = config.DOCUMENT_ROOT / batch.relative_directory
+        label = batch.label
+
+    if not directory.is_dir():
+        log.warning("[UPLOAD] Batch %s directory %s is missing", batch_id, directory)
+        return 0
+
+    # A batch from a folder drop or a MinIO archive is a bulk submission --
+    # "here are 800 rolls" -- and nobody can tick 800 checkboxes. Those start
+    # on their own the moment they are registered. The interactive file
+    # picker keeps the staging behavior (approved=False until Start
+    # extraction), because that flow exists to inspect a short list first.
+    approved = batch.source in ("folder", "minio")
+    found = _discover_under(directory, label, upload_batch_id=batch_id, approved=approved,
+                            source_scope=batch.relative_directory)
+
+    with SessionLocal.begin() as db:
+        db.execute(text(
+            "UPDATE documents SET batch_index = s.rn FROM ("
+            "  SELECT id, row_number() OVER (ORDER BY source_path) AS rn"
+            "  FROM documents WHERE upload_batch_id = :bid"
+            ") s WHERE documents.id = s.id"
+        ), {"bid": batch_id})
+        batch = db.get(UploadBatch, batch_id)
+        if batch:
+            actual = db.scalar(select(func.count()).select_from(Document).where(
+                Document.upload_batch_id == batch_id))
+            # file_count stays what the user actually uploaded; this is only
+            # reported when the two disagree, which is the interesting case.
+            log.info("[UPLOAD] Batch %s: %d uploaded, %d registered", batch_id, batch.file_count, actual)
+
+    return found

@@ -76,6 +76,12 @@ def test_merged_line_separates_voter_from_relative(lines, expected_name, field, 
     ('पतिका नाम: प्रेम चंद', "voter_husband_name", "प्रेम चंद"),
     ('पिताका नाम: धर्मेंद्र', "voter_father_name", "धर्मेंद्र"),
     ('अन्यः कुवरपाल', "voter_other_name", "कुवरपाल"),
+    # का / नाम misread. These are not extra spellings: any short क-token
+    # before नाम is the label, and the name is the text after the separator.
+    ('पिता करा नाम: कामता प्रसाद', "voter_father_name", "कामता प्रसाद"),
+    ('पति का नाथ: विनय गिरी', "voter_husband_name", "विनय गिरी"),
+    ('पित्ता का नाम: अरविंद कुमार', "voter_father_name", "अरविंद कुमार"),
+    ('पिता कषा नाम: भजन लाल', "voter_father_name", "भजन लाल"),
 ])
 def test_pure_relation_lines_are_unchanged(line, field, expected_relative):
     # These lines carry no age or gender, so the function's return gate
@@ -143,6 +149,54 @@ def test_age_and_gender_still_parse_together():
     record = parse_voter_box_from_ocr_lines(['आयु : 58 लिंग : पुरुष'])
     assert record["age"] == "58"
     assert record["gender"] == "पुरुष"
+
+
+def test_wrapped_house_address_keeps_the_second_line():
+    """The locality on the next line is part of the house, not a new field."""
+    record = parse_voter_box_from_ocr_lines([
+        "नाम : मुस्कान सिंह",
+        "पति का नामः गोविंदा",
+        "मकान संख्या : एच,नं-927 भोला कलोनी",
+        "इलाइचीपुर गजियाबाद",
+        "आयु: 32 लिंग : महिला",
+    ])
+    assert record["house_no"] == "एच,नं-927 भोला कलोनी इलाइचीपुर गजियाबाद"
+    assert record["age"] == "32"
+    assert record["gender"] == "महिला"
+    assert _parts(record) == "मुस्कान सिंह"
+
+
+def test_english_locality_on_the_second_line_is_not_joined_as_digits():
+    """'Ghaziabad' printed in Latin comes back as digit soup. Keep लोनी only."""
+    record = parse_voter_box_from_ocr_lines([
+        "नाम : रजनी देवी",
+        "पति का नाम: पुरुषोत्तम",
+        "मकान संख्या : ए-38 प्रधान एन्क्लेव इलायची",
+        "लोनी (9॥828/080",
+        "आयु : 29 लिंग : महिला",
+    ])
+    assert record["house_no"] == "ए-38 प्रधान एन्क्लेव इलायची लोनी"
+    assert record["age"] == "29"
+
+
+def test_photo_edge_word_after_the_locality_is_dropped():
+    record = parse_voter_box_from_ocr_lines([
+        "मकान संख्या : एच नं-ए-38 प्रधान एन्वलेव",
+        "इलाइचीपुर प्ध्टांत",
+        "आयु : 31 लिंग : पुरुष",
+    ])
+    assert record["house_no"] == "एच नं-ए-38 प्रधान एन्वलेव इलाइचीपुर"
+    assert record["age"] == "31"
+
+
+def test_garbled_relation_label_does_not_replace_the_voter():
+    """'पिता करा नाम:' is the father. It must not overwrite बजरंग."""
+    record = parse_voter_box_from_ocr_lines(
+        ['नाम; बजरंग', 'पिता करा नाम: कामता प्रसाद', 'आयु : 22 लिंग : पुरुष']
+    )
+    assert _parts(record) == "बजरंग"
+    assert record["voter_father_name"] == "कामता प्रसाद"
+    assert record["relation_name"] == "पिता"
 
 
 def test_unlabelled_name_line_still_produces_no_name():

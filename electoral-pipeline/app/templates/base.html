@@ -112,6 +112,122 @@
     .text-right { text-align: right; }
     .text-left { text-align: left; }
     .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    /* The uploads page. Without these the batch table and the selection bar
+       lose their shape entirely when the Tailwind CDN is unreachable, and
+       this page is the one people land on first. */
+    .hidden { display: none; }
+    .block { display: block; }
+    .inline-block { display: inline-block; }
+    .grid { display: grid; }
+    .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .md\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .flex-1 { flex: 1 1 0%; }
+    .gap-1 { gap: 0.25rem; }
+    .gap-2 { gap: 0.5rem; }
+    .shrink-0 { flex-shrink: 0; }
+    .flex-wrap { flex-wrap: wrap; }
+    .min-w-0 { min-width: 0; }
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .p-1 { padding: 0.25rem; }
+    .p-2 { padding: 0.5rem; }
+    .p-4 { padding: 1rem; }
+    .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+    .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+    .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+    .py-2\.5 { padding-top: 0.625rem; padding-bottom: 0.625rem; }
+    .py-3 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+    .py-4 { padding-top: 1rem; padding-bottom: 1rem; }
+    .py-8 { padding-top: 2rem; padding-bottom: 2rem; }
+    .py-12 { padding-top: 3rem; padding-bottom: 3rem; }
+    .px-1 { padding-left: 0.25rem; padding-right: 0.25rem; }
+    .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+    .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+    .px-4 { padding-left: 1rem; padding-right: 1rem; }
+    .px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+    .py-1\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
+    .px-3\.5 { padding-left: 0.875rem; padding-right: 0.875rem; }
+    .mb-0\.5 { margin-bottom: 0.125rem; }
+    .mb-1 { margin-bottom: 0.25rem; }
+    .mb-2 { margin-bottom: 0.5rem; }
+    .mb-3 { margin-bottom: 0.75rem; }
+    .mb-4 { margin-bottom: 1rem; }
+    .mb-5 { margin-bottom: 1.25rem; }
+    .mb-6 { margin-bottom: 1.5rem; }
+    .mt-0\.5 { margin-top: 0.125rem; }
+    .mt-1 { margin-top: 0.25rem; }
+    .mt-2 { margin-top: 0.5rem; }
+    .mt-6 { margin-top: 1.5rem; }
+    .p-0 { padding: 0; }
+    .w-4 { width: 1rem; }
+    .w-10 { width: 2.5rem; }
+    .w-16 { width: 4rem; }
+    .w-24 { width: 6rem; }
+    .w-32 { width: 8rem; }
+    .w-44 { width: 11rem; }
+    .w-full { width: 100%; }
+    .max-w-2xl { max-width: 42rem; }
+    .border { border: 1px solid #e5e7eb; }
+    .border-b { border-bottom: 1px solid #e5e7eb; }
+    .border-t { border-top: 1px solid #e5e7eb; }
+    .border-l-4 { border-left: 4px solid transparent; }
+    .border-red-200 { border-color: #fecaca; }
+    .border-red-200\/60 { border-color: #fecaca; }
+    .border-green-200 { border-color: #bbf7d0; }
+    .border-green-200\/60 { border-color: #bbf7d0; }
+    .border-blue-200 { border-color: #bfdbfe; }
+    .border-blue-200\/60 { border-color: #bfdbfe; }
+    .border-amber-200 { border-color: #fde68a; }
+    .border-gray-200 { border-color: #e5e7eb; }
+    .border-gray-300 { border-color: #d1d5db; }
+    .border-red-200\/60 { border-color: #fecaca; }
+    .bg-gray-100 { background-color: #f3f4f6; }
+    .bg-gray-200 { background-color: #e5e7eb; }
+    .bg-gray-50 { background-color: #f9fafb; }
+    .bg-blue-50 { background-color: #eff6ff; }
+    .bg-green-50 { background-color: #f0fdf4; }
+    .bg-amber-50 { background-color: #fffbeb; }
+    .bg-red-50 { background-color: #fef2f2; }
+    .bg-slate-700 { background-color: #334155; }
+    .bg-blue-600 { background-color: #2563eb; }
+    .text-blue-600 { color: #2563eb; }
+    .text-blue-700 { color: #1d4ed8; }
+    .text-blue-800 { color: #1e40af; }
+    .text-green-700 { color: #15803d; }
+    .text-green-800 { color: #166534; }
+    .text-amber-700 { color: #b45309; }
+    .text-red-700 { color: #b91c1c; }
+    .text-red-800 { color: #991b1b; }
+    .text-white { color: #fff; }
+    .font-medium { font-weight: 500; }
+    .font-normal { font-weight: 400; }
+    .leading-relaxed { line-height: 1.625; }
+    .underline { text-decoration: underline; }
+    .cursor-pointer { cursor: pointer; }
+    .select-none { user-select: none; }
+    .list-none { list-style: none; }
+    .appearance-none { -webkit-appearance: none; appearance: none; }
+    .focus\:outline-none:focus { outline: none; }
+    .focus\:border-blue-500:focus { border-color: #3b82f6; }
+    .hover\:bg-gray-100:hover { background-color: #f3f4f6; }
+    .hover\:bg-gray-200:hover { background-color: #e5e7eb; }
+    .hover\:bg-gray-50:hover { background-color: #f9fafb; }
+    .hover\:bg-red-50:hover { background-color: #fef2f2; }
+    .hover\:bg-slate-700:hover { background-color: #334155; }
+    .hover\:text-gray-900:hover { color: #111827; }
+    .hover\:text-blue-700:hover { color: #1d4ed8; }
+    .shadow-sm { box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05); }
+    .shadow-lg { box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+    .relative { position: relative; }
+    .absolute { position: absolute; }
+    .sticky { position: sticky; }
+    .bottom-0 { bottom: 0; }
+    .right-0 { right: 0; }
+    .z-10 { z-index: 10; }
+    .z-20 { z-index: 20; }
+    .overflow-hidden { overflow: hidden; }
+    .divide-y > * + * { border-top: 1px solid #e5e7eb; }
+    .divide-gray-200 > * + * { border-top-color: #e5e7eb; }
+    .sticky.bottom-0 { position: sticky; bottom: 0; z-index: 10; }
     @media (min-width: 640px) {
       .sm\:flex-row { flex-direction: row; }
       .sm\:items-start { align-items: flex-start; }
@@ -124,6 +240,923 @@
       .lg\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     }
+    /* ─────────────────────────────────────────────────────────────────────────
+       Design tokens.
+
+       Named rather than scattered hex values, because the same slate has to
+       mean the same thing in the header, the tables and the dropzones, and
+       three places spelling #64748b differently is how a page stops looking
+       like one page. The palette is the app's existing slate/blue, deepened
+       slightly so full-width tables do not glare on a wide monitor.
+       ───────────────────────────────────────────────────────────────────────── */
+    :root {
+      --ink-950: #020617;  --ink-900: #0f172a;  --ink-800: #1e293b;
+      --ink-700: #334155;  --ink-600: #475569;  --ink-500: #64748b;
+      --ink-400: #94a3b8;  --ink-300: #cbd5e1;  --ink-200: #e2e8f0;
+      --ink-100: #f1f5f9;  --ink-50:  #f8fafc;
+
+      --brand-800: #1e40af; --brand-700: #1d4ed8; --brand-600: #2563eb;
+      --brand-500: #3b82f6; --brand-100: #dbeafe; --brand-50: #eff6ff;
+
+      --ok-700: #15803d;   --ok-600: #16a34a;   --ok-100: #dcfce7;  --ok-50: #f0fdf4;
+      --warn-800:#a16207;  --warn-600: #d97706;  --warn-100:#fef3c7; --warn-50: #fffbeb;
+      --bad-700: #b91c1c;  --bad-600: #dc2626;   --bad-100: #fee2e2;  --bad-50: #fef2f2;
+      --live-700:#0369a1;  --live-100:#e0f2fe;  --live-50: #f0f9ff;
+
+      --line: var(--ink-200);
+      --line-strong: var(--ink-300);
+      --radius: 10px;
+      --shadow-panel: 0 1px 2px rgba(15, 23, 42, .05);
+      --shadow-pop: 0 10px 24px -6px rgba(15, 23, 42, .22), 0 2px 6px rgba(15, 23, 42, .08);
+      --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+              "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    }
+
+    /* ─────────────────────────────────────────────────────────────────────────
+       Buttons.
+
+       A button is a filled surface with a label on it, not a border and a
+       colour. `display:inline-flex` (rather than Tailwind's inline-block) is
+       what keeps two buttons on one row and centres their labels vertically;
+       the previous version rendered them stacked with the text sitting low.
+       ───────────────────────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: .5rem;
+      font: 600 .875rem/1 var(--sans);
+      padding: .625rem 1rem;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      white-space: nowrap;
+      text-decoration: none;
+      transition: background-color .15s ease, border-color .15s ease,
+                  color .15s ease, box-shadow .15s ease;
+    }
+    .btn:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 2px; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    .btn-primary { background: var(--brand-700); color: #fff; border-color: var(--brand-700); }
+    .btn-primary:hover:not(:disabled) { background: var(--brand-800); border-color: var(--brand-800); }
+
+    .btn-ghost { background: #fff; color: var(--ink-700); border-color: var(--line-strong); }
+    .btn-ghost:hover:not(:disabled) { background: var(--ink-50); color: var(--ink-900); }
+
+    .btn-danger { background: #fff; color: var(--bad-700); border-color: #fecaca; }
+    .btn-danger:hover:not(:disabled) { background: var(--bad-50); border-color: var(--bad-600); }
+
+    .btn-quiet { background: transparent; color: var(--ink-600); padding: .375rem .625rem; }
+    .btn-quiet:hover:not(:disabled) { background: var(--ink-100); color: var(--ink-900); }
+
+    /* Page-level back control. Same chrome on every template: white surface,
+       hairline border, brand label, and a left arrow. */
+    .page-back {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: fit-content;
+      margin: 0 0 .625rem;
+      padding: .375rem .75rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--brand-700);
+      font: 600 .8125rem/1.2 var(--sans);
+      letter-spacing: normal;
+      text-decoration: none;
+      white-space: nowrap;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+      transition: background-color .12s ease, border-color .12s ease,
+                  color .12s ease, box-shadow .12s ease;
+    }
+    .page-back:hover {
+      background: var(--ink-50);
+      border-color: var(--ink-300);
+      color: var(--brand-800);
+      text-decoration: none;
+      box-shadow: 0 2px 4px rgba(15, 23, 42, .08);
+    }
+    .page-back:focus-visible {
+      outline: 2px solid var(--brand-500);
+      outline-offset: 2px;
+    }
+
+    /* ─────────────────────────────────────────────────────────────────────────
+       Upload boxes.
+
+       The old page used a bare <input type="file">, which renders as a small
+       native control the width of its label and cannot show a hover or a
+       drag state at all.
+
+       The fix is the overlay pattern: the real input is stretched over the
+       whole box at opacity 0. That means clicking anywhere in the box opens
+       the picker and dropping files anywhere in the box fills the input, with
+       no JavaScript involved -- the script below only adds the visual
+       feedback, so a browser without it still uploads correctly.
+       ───────────────────────────────────────────────────────────────────────── */
+    .dropzone {
+      position: relative;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center;
+      gap: .375rem;
+      min-height: 9.5rem;
+      padding: 1.5rem;
+      text-align: center;
+      background: var(--ink-50);
+      border: 2px dashed var(--line-strong);
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: border-color .15s ease, background-color .15s ease;
+    }
+    .dropzone:hover { border-color: var(--brand-500); background: var(--brand-50); }
+    /* Set by the script on dragenter/dragover. */
+    .dropzone.is-dragging {
+      border-color: var(--brand-600);
+      background: var(--brand-50);
+      border-style: solid;
+    }
+    /* The control itself: invisible, but covering the box and clickable. */
+    .dropzone-input {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      opacity: 0; cursor: pointer;
+    }
+    .dropzone-input:disabled { cursor: not-allowed; }
+    .dropzone-input:focus-visible + .dropzone-body {
+      outline: 2px solid var(--brand-500); outline-offset: 4px; border-radius: 4px;
+    }
+    .dropzone-icon { color: var(--ink-400); line-height: 0; }
+    .dropzone:hover .dropzone-icon,
+    .dropzone.is-dragging .dropzone-icon { color: var(--brand-600); }
+    .dropzone-title { font: 600 .9375rem/1.35 var(--sans); color: var(--ink-800); }
+    .dropzone-hint { font: 400 .8125rem/1.4 var(--sans); color: var(--ink-500); }
+    .dropzone-count {
+      font: 600 .8125rem/1 var(--mono);
+      color: var(--brand-800);
+      background: var(--brand-100);
+      padding: .25rem .5rem;
+      border-radius: 999px;
+      margin-top: .25rem;
+    }
+
+    /* ─────────────────────────────────────────────────────────────────────────
+       Checkboxes.
+
+       There was no rule for these at all: the browser default rendered them
+       at 13px in the margin, which is why ticking rows felt like it was not
+       registering. Sized to a comfortable 18px target with a visible ring.
+       ───────────────────────────────────────────────────────────────────────── */
+    input[type="checkbox"] {
+      appearance: none; -webkit-appearance: none;
+      width: 18px; height: 18px;
+      margin: 0;
+      flex: 0 0 auto;
+      border: 1.5px solid var(--line-strong);
+      border-radius: 5px;
+      background: #fff;
+      cursor: pointer;
+      position: relative;
+      transition: background-color .12s ease, border-color .12s ease;
+    }
+    input[type="checkbox"]:hover { border-color: var(--brand-500); }
+    input[type="checkbox"]:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 2px; }
+    input[type="checkbox"]:checked,
+    input[type="checkbox"]:indeterminate {
+      background: var(--brand-700);
+      border-color: var(--brand-700);
+    }
+    /* The tick. Drawn with two borders rather than a glyph so it cannot
+       depend on a font being present. */
+    input[type="checkbox"]:checked::after {
+      content: ""; position: absolute;
+      left: 5.5px; top: 1.5px;
+      width: 5px; height: 10px;
+      border: solid #fff;
+      border-width: 0 2px 2px 0;
+      transform: rotate(43deg);
+    }
+    /* The dash for a half-ticked batch. */
+    input[type="checkbox"]:indeterminate::after {
+      content: ""; position: absolute;
+      left: 3px; top: 7px;
+      width: 10px; height: 2px;
+      background: #fff;
+      border-radius: 1px;
+    }
+
+    /* ─────────────────────────────────────────────────────────────────────────
+       Tables.
+
+       Full width by default: this page lists hundreds of files and the
+       filename column is the one people actually read. A max-width on the
+       table would throw away the only column worth widening.
+       ───────────────────────────────────────────────────────────────────────── */
+    .table { width: 100%; border-collapse: collapse; table-layout: auto; }
+    .table thead th {
+      position: sticky; top: 0; z-index: 5;
+      background: var(--ink-100);
+      text-align: left;
+      font: 600 .6875rem/1.2 var(--sans);
+      letter-spacing: .06em; text-transform: uppercase;
+      color: var(--ink-600);
+      padding: .625rem 1rem;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    .table tbody td {
+      padding: .625rem 1rem;
+      border-bottom: 1px solid var(--ink-100);
+      vertical-align: middle;
+      font: 400 .875rem/1.45 var(--sans);
+      color: var(--ink-700);
+    }
+    .table tbody tr:hover td { background: var(--ink-50); }
+    .table tbody tr:last-child td { border-bottom: 0; }
+    .cell-num { font-family: var(--mono); font-size: .8125rem; color: var(--ink-500); }
+
+    /* ── The ⋮ menu.
+
+       This is the bug that made the action buttons unusable: the panel
+       wrapping the table had overflow:hidden, which clips a dropdown at the
+       panel edge, and the menu had no z-index of its own, so it also lost
+       to every later sibling. `.surface` deliberately does NOT set
+       overflow:hidden -- the rounded corners come from the header's own
+       radius, not from clipping the whole panel. */
+    .action-menu { position: relative; display: inline-block; }
+    .action-menu > summary { list-style: none; }
+    .action-menu > summary::-webkit-details-marker { display: none; }
+    /* The trigger is a control, so it is sized and outlined like one: a real
+       40px hit target rather than a 32px glyph that has to be found. It reads
+       as a button on hover so it is not mistaken for an ellipsis in the text.
+       The dot count goes to 18px because at 2rem it was a barely-visible
+       smudge, and the menu is the only per-PDF control there is. */
+    .action-trigger {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 2.5rem; height: 2.5rem;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      color: var(--ink-500);
+      cursor: pointer;
+      font-size: 1.125rem; line-height: 1;
+      transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+    }
+    .action-trigger:hover {
+      background: #fff;
+      border-color: var(--line);
+      color: var(--ink-900);
+      box-shadow: var(--shadow-panel);
+    }
+    .action-menu[open] > .action-trigger {
+      background: var(--brand-50);
+      border-color: var(--brand-100);
+      color: var(--brand-700);
+    }
+    .action-trigger:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; }
+    .action-panel {
+      position: absolute; left: 0; top: calc(100% + 4px);
+      z-index: 60;                 /* above table headers (z 5) and sticky bars */
+      min-width: 13rem;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow-pop);
+      padding: .25rem;
+    }
+    .action-panel a,
+    .action-panel button {
+      display: block; width: 100%;
+      text-align: left;
+      padding: .5rem .75rem;
+      font: 500 .875rem/1.4 var(--sans);
+      color: var(--ink-700);
+      background: none; border: 0; border-radius: 5px;
+      cursor: pointer; text-decoration: none;
+    }
+    .action-panel a:hover,
+    .action-panel button:hover { background: var(--ink-100); color: var(--ink-900); }
+    .action-panel .is-danger { color: var(--bad-700); }
+    .action-panel .is-danger:hover { background: var(--bad-50); color: var(--bad-700); }
+    .action-sep { height: 1px; background: var(--ink-100); margin: .25rem .375rem; }
+
+    /* The batch-level menu. Same dropdown, but it belongs to the batch rather
+       than to a row, and it sits at the far end of the strip.
+
+       The panel opens UP, not down. This trigger is the last element on a row
+       that runs to the right-hand edge of the page, so a panel that dropped
+       below it would be as wide as itself with nothing to its right -- and at
+       the max-w-[1800px] breakpoint the overflow is wider than a scrollbar is
+       wide, so it produced a horizontal scrollbar on the whole page for the
+       duration of the menu. Opening upwards costs one `bottom: 100%` and makes
+       the menu fit inside the strip it belongs to. */
+    .batch-action > .action-trigger { color: var(--ink-600); }
+    .batch-action > .action-panel { left: auto; right: 0; top: auto; bottom: calc(100% + 4px); }
+
+    /* ── Layout primitives. */
+    .surface {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-panel);
+    }
+    .surface-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 1rem;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--line);
+      background: var(--ink-50);
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+    .pill {
+      display: inline-flex; align-items: center; gap: .3125rem;
+      padding: .1875rem .5rem;
+      border-radius: 999px;
+      font: 600 .6875rem/1.35 var(--sans);
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    /* Tones. The dot marks the two states that are genuinely in motion --
+       queued and processing -- so a long table can be scanned for rows that
+       are still doing something without reading every word. */
+    .pill-dot {
+      width: .375rem; height: .375rem;
+      border-radius: 999px;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+    .pill.is-good    { background: var(--ok-100);   color: var(--ok-700); }
+    .pill.is-bad     { background: var(--bad-100);  color: var(--bad-700); }
+    .pill.is-warn    { background: var(--warn-100); color: var(--warn-800); }
+    .pill.is-busy    { background: var(--live-100); color: var(--live-700); }
+    .pill.is-neutral { background: var(--ink-100);  color: var(--ink-600); }
+    .field {
+      width: 100%;
+      padding: .5rem .75rem;
+      font: 400 .875rem/1.4 var(--sans);
+      color: var(--ink-900);
+      background: #fff;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+    }
+    .field:focus { outline: none; border-color: var(--brand-500); box-shadow: 0 0 0 3px var(--brand-100); }
+    .field-label {
+      display: block;
+      font: 600 .6875rem/1.4 var(--sans);
+      letter-spacing: .06em; text-transform: uppercase;
+      color: var(--ink-500);
+      margin-bottom: .375rem;
+    }
+    .mono { font-family: var(--mono); }
+
+    /* Segmented control for the three upload modes. */
+    .segmented {
+      display: inline-flex;
+      padding: 3px;
+      gap: 2px;
+      background: var(--ink-100);
+      border-radius: 9px;
+    }
+    .segmented button {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: .4375rem;
+      padding: .5rem .875rem;
+      font: 600 .8125rem/1 var(--sans);
+      color: var(--ink-600);
+      background: transparent;
+      border: 0; border-radius: 7px;
+      cursor: pointer;
+      transition: background-color .15s ease, color .15s ease, box-shadow .15s ease;
+    }
+    .segmented button:hover { color: var(--ink-900); }
+    .segmented button[aria-selected="true"] {
+      background: #fff;
+      color: var(--ink-900);
+      box-shadow: 0 1px 2px rgba(15, 23, 42, .10);
+    }
+    .segmented button:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; }
+
+    /* Batch group header inside an upload. */
+    .batch-head {
+      display: flex; align-items: center; gap: .625rem;
+      padding: .5rem 1.25rem;
+      background: var(--ink-100);
+      border-bottom: 1px solid var(--line);
+      border-top: 1px solid var(--line);
+    }
+    .batch-group:first-child .batch-head { border-top: 0; }
+
+    /* The filename cell carries the most weight in the table, so it is the one
+       column allowed to take the space a full-width table gives back. The
+       `<a>` truncates rather than the cell, which keeps the ellipsis at the
+       end of the filename instead of breaking the column into two lines. */
+    .cell-file { max-width: 0; width: 100%; }
+    .file-link {
+      display: block;
+      font: 500 .875rem/1.4 var(--sans);
+      color: var(--brand-700);
+      text-decoration: none;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .file-link:hover { color: var(--brand-800); text-decoration: underline; }
+    .cell-sub {
+      display: block;
+      font: 400 .75rem/1.4 var(--sans);
+      color: var(--ink-500);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Wide tables get a horizontal scroll of their own rather than being
+       squeezed: the filename column would otherwise be unreadable on a
+       narrow window. */
+    .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+    .table-scroll .table { min-width: 44rem; }
+    .w-10 { width: 2.5rem; }
+
+    /* The action bar. Sits above the table (z 40) so it is never overlapped. */
+    .actionbar {
+      position: sticky; bottom: 0; z-index: 40;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 1rem; flex-wrap: wrap;
+      margin-top: 1.5rem;
+      padding: .875rem 1.25rem;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 -2px 12px rgba(15, 23, 42, .07), 0 1px 2px rgba(15, 23, 42, .05);
+    }
+    .alert {
+      padding: .75rem 1rem;
+      border-radius: 8px;
+      border: 1px solid;
+      font: 400 .875rem/1.5 var(--sans);
+      margin-bottom: 1.25rem;
+    }
+    .alert-error { background: var(--bad-50); border-color: #fecaca; color: var(--bad-700); }
+    .alert-ok    { background: var(--ok-50);  border-color: #bbf7d0; color: var(--ok-700); }
+    .alert-info  { background: var(--live-50);border-color: #bae6fd; color: var(--live-700); }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    }
+
+    /* Page frame. Named rather than left to the Tailwind utilities on <body>,
+       because the fallback has to produce the same page on its own. */
+    .page {
+      margin: 0;
+      background: #f1f5f9;
+      color: var(--ink-900);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Page title. Sized by the type scale rather than a utility, and kept out
+       of the CDN's way so the two agree. */
+    .page-title {
+      margin: 0;
+      font: 700 1.5rem/1.25 var(--sans);
+      letter-spacing: -0.015em;
+      color: var(--ink-900);
+    }
+    .page-sub {
+      margin: .375rem 0 0;
+      max-width: 68ch;
+      font: 400 .875rem/1.6 var(--sans);
+      color: var(--ink-600);
+    }
+    .page-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 1.5rem; flex-wrap: wrap;
+      margin-bottom: 1.5rem;
+    }
+    .section-label {
+      font: 600 .6875rem/1.4 var(--sans);
+      letter-spacing: .06em; text-transform: uppercase;
+      color: var(--ink-500);
+    }
+
+    /* A count that is worth noticing. Used for the totals on the upload
+       header, where the number itself is the information. */
+    .stat { display: flex; align-items: baseline; gap: .375rem; }
+    .stat-value {
+      font: 700 1.375rem/1 var(--sans);
+      letter-spacing: -0.02em;
+      color: var(--ink-900);
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-label {
+      font: 500 .75rem/1.4 var(--sans);
+      color: var(--ink-500);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       THE LANDING PAGE AND THE MODE CARDS.
+
+       The landing page and the three upload modes share one idea: a large
+       square target you can read at a glance. Both are built out of the
+       palette above -- slate ink, blue brand -- so nothing here introduces a
+       new colour, and neither depends on the Tailwind CDN: the grid is
+       .card-grid, not a utility, because the fallback shim has no grid
+       utilities of its own and a hero that collapses without the CDN would
+       be the first thing anyone sees when it fails.
+       ═════════════════════════════════════════════════════════════════════ */
+
+    /* ── Hero. A tinted band at the top of the landing page, capped at a
+       readable measure rather than running a headline across 1800px. */
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 3.5rem 2rem 3rem;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background:
+        radial-gradient(1100px 340px at 12% -30%, var(--brand-50), transparent 62%),
+        radial-gradient(900px 300px at 96% 8%, var(--ink-50), transparent 58%),
+        #fff;
+      box-shadow: var(--shadow-panel);
+    }
+    .hero-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      gap: 2.5rem 3rem;
+      align-items: center;
+    }
+    .hero-copy { min-width: 0; max-width: 36rem; }
+    .hero-copy .hero-title { max-width: none; }
+    .hero-visual {
+      position: relative;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .hero-visual-frame {
+      width: 100%;
+      max-width: 28rem;
+      aspect-ratio: 5 / 4;
+      padding: 1.25rem;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background:
+        linear-gradient(145deg, #fff 0%, var(--brand-50) 48%, var(--ink-50) 100%);
+      box-shadow:
+        0 1px 2px rgba(15, 23, 42, .06),
+        0 12px 40px rgba(37, 99, 235, .08);
+    }
+    .hero-visual-frame svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .hero-inner { max-width: 54rem; }
+    .hero-eyebrow {
+      display: inline-flex; align-items: center; gap: .5rem;
+      padding: .3125rem .6875rem;
+      border: 1px solid var(--brand-100);
+      border-radius: 999px;
+      background: #fff;
+      font: 600 .6875rem/1.35 var(--sans);
+      letter-spacing: .06em; text-transform: uppercase;
+      color: var(--brand-700);
+    }
+    .hero-title {
+      margin: 1.125rem 0 0;
+      font: 700 2.75rem/1.12 var(--sans);
+      letter-spacing: -0.032em;
+      color: var(--ink-900);
+      max-width: 22ch;
+    }
+    .hero-lede {
+      margin: 1rem 0 0;
+      max-width: 60ch;
+      font: 400 1.0625rem/1.65 var(--sans);
+      color: var(--ink-600);
+    }
+    .hero-actions { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-top: 1.75rem; }
+    .hero-actions .btn { padding: .8125rem 1.375rem; font-size: .9375rem; }
+    /* The facts strip along the bottom of the hero. Separated by hairlines
+       rather than cards, so it reads as one band of numbers. */
+    .hero-facts {
+      display: flex; flex-wrap: wrap; gap: 0;
+      margin-top: 2.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--line);
+    }
+    .hero-fact { padding: 0 2rem 0 0; margin: 0 2rem 0 0; border-right: 1px solid var(--line); }
+    .hero-fact:last-child { border-right: 0; margin-right: 0; padding-right: 0; }
+
+    @media (max-width: 56rem) {
+      .hero-layout { grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+      .hero-copy { max-width: none; }
+      .hero-visual { order: -1; }
+      .hero-visual-frame { max-width: 22rem; margin: 0 auto; }
+    }
+    @media (max-width: 48rem) {
+      .hero { padding: 2.25rem 1.25rem 2rem; }
+      .hero-title { font-size: 2rem; }
+      .hero-fact { border-right: 0; padding-right: 0; margin-right: 0; flex: 1 1 45%; }
+    }
+
+    /* ── A section on the landing page: a heading, a line of prose under it,
+       then whatever the section is made of. */
+    .landing-section { margin-top: 3.5rem; }
+    .landing-head { max-width: 62ch; margin-bottom: 1.5rem; }
+    .landing-title {
+      margin: 0;
+      font: 700 1.375rem/1.3 var(--sans);
+      letter-spacing: -0.018em;
+      color: var(--ink-900);
+    }
+    .landing-sub {
+      margin: .375rem 0 0;
+      font: 400 .9375rem/1.6 var(--sans);
+      color: var(--ink-600);
+    }
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1.25rem;
+    }
+    .card-grid.is-four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card-grid.is-two  { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @media (max-width: 64rem) {
+      .card-grid, .card-grid.is-four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 40rem) {
+      .card-grid, .card-grid.is-four, .card-grid.is-two { grid-template-columns: minmax(0, 1fr); }
+    }
+
+    /* ── The numbered "how it works" steps. The number is a rail, not a
+       decoration: it marks the order the pipeline actually runs in. */
+    .step-list { display: grid; gap: 0; }
+    .step {
+      display: grid;
+      grid-template-columns: 2.25rem minmax(0, 1fr);
+      gap: 1rem;
+      padding: 1.125rem 0;
+      border-top: 1px solid var(--line);
+    }
+    .step:first-child { border-top: 0; padding-top: 0; }
+    .step-num {
+      width: 2.25rem; height: 2.25rem;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 999px;
+      background: var(--ink-900);
+      color: #fff;
+      font: 600 .8125rem/1 var(--sans);
+      font-variant-numeric: tabular-nums;
+    }
+    .step-title { margin: 0; font: 600 .9375rem/1.4 var(--sans); color: var(--ink-900); }
+    .step-body  { margin: .25rem 0 0; font: 400 .875rem/1.6 var(--sans); color: var(--ink-600); max-width: 70ch; }
+
+    /* ── A feature. Kept to an icon, a name and one sentence. */
+    .feature { padding: 1.25rem; }
+    .feature-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 2.25rem; height: 2.25rem;
+      border-radius: 9px;
+      background: var(--brand-50);
+      color: var(--brand-700);
+      margin-bottom: .875rem;
+    }
+    .feature-title { margin: 0; font: 600 .9375rem/1.35 var(--sans); color: var(--ink-900); }
+    .feature-body {
+      margin: .375rem 0 0;
+      font: 400 .8125rem/1.55 var(--sans);
+      color: var(--ink-600);
+    }
+
+    /* ── The upload mode cards. Three squares, one per way in. The whole card
+       is the button: a <button> element with the card's own layout, so the
+       whole square is keyboard-reachable and screen readers announce one
+       target per mode rather than a label and a separate control.
+
+       .is-active marks the mode currently open. It is a blue border and a
+       tinted face -- the same brand-100/50 pair the fields use on focus --
+       so the highlight matches the rest of the app instead of inventing a
+       second selection style. */
+    .mode-card {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0;
+      width: 100%;
+      padding: 1.5rem;
+      text-align: left;
+      background:
+        linear-gradient(180deg, #fff 0%, var(--ink-50) 100%);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow-panel);
+      cursor: pointer;
+      font-family: var(--sans);
+      transition: border-color .15s ease, box-shadow .15s ease,
+                  background-color .15s ease, transform .15s ease;
+    }
+    .feature-title { margin: 0; font: 600 .9375rem/1.35 var(--sans); color: var(--ink-900); }
+    .feature-body {
+      margin: .375rem 0 0;
+      font: 400 .8125rem/1.55 var(--sans);
+      color: var(--ink-600);
+    }
+
+    /* ── Live stats on the landing page: a row of numbers over a caption. */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .stat-cell { background: #fff; padding: 1.25rem 1.25rem 1.125rem; }
+    .stat-card-value {
+      display: block;
+      font: 600 1.75rem/1 var(--sans);
+      letter-spacing: -.02em;
+      color: var(--ink-900);
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-card-label {
+      display: block;
+      margin-top: .375rem;
+      font: 500 .75rem/1.4 var(--sans);
+      color: var(--ink-500);
+    }
+    .stat-value.is-ok { color: var(--ok-700); }
+    .stat-value.is-live { color: var(--live-700); }
+    .stat-value.is-warn { color: var(--warn-800); }
+    @media (max-width: 48rem) {
+      .card-grid { grid-template-columns: 1fr; }
+      .mode-card { aspect-ratio: auto; }
+    }
+
+    /* ── The upload mode cards. Three cards, one per way in. The whole card
+       is the button: a <button> with the card's own layout, so the entire
+       surface is one keyboard-reachable target and a screen reader announces
+       one thing per mode rather than a label and a separate control.
+
+       Sized by content, not by aspect-ratio. They were 1:1 squares, which on
+       a 1800px page made each one ~570px tall and left roughly 400px of empty
+       white inside every card -- a wall of blank boxes with three lines of
+       text stuck at the top. A card only needs to be as tall as what is in
+       it, so the grid stretches them to match each other and nothing more.
+
+       .is-active marks the mode currently open: a blue border and a tinted
+       face, the same brand-100/50 pair the fields use on focus, so selection
+       matches the rest of the app rather than inventing a second style. */
+    .mode-card.is-active {
+      border-color: var(--brand-500);
+      background: linear-gradient(180deg, var(--brand-50) 0%, #fff 100%);
+      box-shadow: 0 0 0 3px var(--brand-100), var(--shadow-panel);
+    }
+    .mode-card-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 2.75rem; height: 2.75rem;
+      border-radius: 10px;
+      background: var(--brand-50);
+      color: var(--brand-700);
+      border: 1px solid var(--brand-100);
+      flex: 0 0 auto;
+    }
+    .mode-card.is-active .mode-card-icon {
+      background: var(--brand-600); color: #fff; border-color: var(--brand-600);
+    }
+    .mode-card-title {
+      margin: .875rem 0 0;
+      font: 700 1.0625rem/1.3 var(--sans);
+      letter-spacing: -.01em;
+      color: var(--ink-900);
+    }
+    .mode-card-body {
+      margin: .375rem 0 0;
+      font: 400 .8125rem/1.55 var(--sans);
+      color: var(--ink-600);
+    }
+
+    /* The bullets inside a mode card. Written for someone who has not used
+       object storage before: each line says what the mode does for them, not
+       what the technology is. */
+    .mode-card-list {
+      list-style: none;
+      margin: .875rem 0 0;
+      padding: 0;
+      display: flex; flex-direction: column; gap: .4375rem;
+    }
+    .mode-card-list li {
+      position: relative;
+      padding-left: 1.375rem;
+      font: 400 .8125rem/1.45 var(--sans);
+      color: var(--ink-600);
+    }
+    .mode-card-list li::before {
+      content: "";
+      position: absolute;
+      left: .1875rem; top: .4375rem;
+      width: .3125rem; height: .3125rem;
+      border-radius: 50%;
+      background: var(--brand-500);
+    }
+
+    /* The footer of a card: the action it offers, pinned to the bottom so
+       three cards of different heights still line their actions up. */
+    .mode-card-foot {
+      margin-top: auto;
+      padding-top: 1rem;
+      display: flex; align-items: center; gap: .625rem; flex-wrap: wrap;
+      width: 100%;
+    }
+    .mode-card-cta {
+      font: 600 .8125rem/1 var(--sans);
+      color: var(--brand-700);
+      display: inline-flex; align-items: center; gap: .375rem;
+    }
+    .mode-card:hover .mode-card-cta { gap: .625rem; }
+    .mode-card-cta { transition: gap .15s ease; }
+
+    /* The console link inside the ZIP card. A real <a>, not part of the card's
+       button -- clicking it opens MinIO instead of selecting the mode, which
+       is the one place a link and the card around it want different things.
+       stopPropagation in the page script keeps the card from also toggling. */
+    .mode-card-console {
+      display: inline-flex; align-items: center; gap: .375rem;
+      font: 600 .75rem/1 var(--sans);
+      padding: .4375rem .6875rem;
+      border-radius: 7px;
+      background: #fff;
+      color: var(--ink-700);
+      border: 1px solid var(--line-strong);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .mode-card-console:hover {
+      background: var(--ink-50); color: var(--brand-700); border-color: var(--brand-500);
+    }
+    .mode-card-console:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 2px; }
+
+    /* The bucket's login, shown so whoever has to drop the ZIP in does not have
+       to go and find the credentials. A <details> so the password is one click
+       away rather than sitting open on the screen. */
+    .mode-card-login {
+      width: 100%;
+      margin-top: .75rem;
+      border-top: 1px dashed var(--line);
+      padding-top: .75rem;
+      font: 400 .75rem/1.5 var(--sans);
+      color: var(--ink-600);
+    }
+    .mode-card-login summary {
+      cursor: pointer;
+      font: 600 .75rem/1.4 var(--sans);
+      color: var(--brand-700);
+      list-style: none;
+    }
+    .mode-card-login summary::-webkit-details-marker { display: none; }
+    .mode-card-login summary::before { content: "▸ "; color: var(--ink-400); }
+    .mode-card-login[open] summary::before { content: "▾ "; }
+    .mode-card-login-body {
+      margin-top: .5rem;
+      background: var(--ink-50);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: .625rem .6875rem;
+      cursor: text;
+    }
+    .mode-card-login-row {
+      display: grid;
+      grid-template-columns: 4.25rem minmax(0, 1fr);
+      gap: .375rem .5rem;
+      align-items: baseline;
+    }
+    .mode-card-login-row + .mode-card-login-row { margin-top: .25rem; }
+    .mode-card-login-key {
+      font: 600 .6875rem/1.5 var(--sans);
+      color: var(--ink-400);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    .mode-card-login-value {
+      font-family: var(--mono);
+      font-size: .6875rem;
+      color: var(--ink-800);
+      word-break: break-all;
+      text-decoration: none;
+    }
+    a.mode-card-login-value { color: var(--brand-700); }
+    .mode-card-login-note {
+      margin: .5rem 0 0;
+      padding-top: .5rem;
+      border-top: 1px solid var(--line);
+      font-size: .6875rem;
+      color: var(--ink-500);
+    }
+    .mode-card-login-note code {
+      font-family: var(--mono);
+      font-size: .6875rem;
+      color: var(--ink-800);
+      background: #fff;
+      padding: .0625rem .3125rem;
+      border-radius: 4px;
+    }
+
     /* Language switch for the voter table. */
     body[data-lang="hi"] .lang-hi{display:revert}
     body[data-lang="hi"] .lang-en{display:none}
@@ -138,28 +1171,1128 @@
     html[data-lang="en"] table .lang-en{display:revert}
     html[data-lang="hi"] table .lang-hi{display:revert}
     html[data-lang="hi"] table .lang-en{display:none}
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       THE UPLOAD LIST.
+
+       What changed and why. The page previously rendered one <table> per
+       batch of 100 -- thirteen of them on a 1,200-file upload, each with its
+       own .batch-head standing in for a <thead>. The tables were
+       never being used as tables: there was no column header to line up, and
+       the "Batch 2 of 13" strip above the rows already told the reader
+       everything a header row could have. What they bought was thirteen
+       separate boxes of hairlines drawing the eye away from the thing people
+       actually came to read, which is the state of their files.
+
+       So the batches stay -- you still need the group checkbox and the
+       numbering -- but they are now sticky divider rows inside ONE continuous
+       list. One box, one set of rules, one thing to scan.
+
+       New classes are appended rather than replacing the old ones. Every rule
+       above is shared by the other nine templates; the previous .table,
+       .surface and .pill definitions are still theirs.
+       ═════════════════════════════════════════════════════════════════════ */
+
+    /* ── The upload: a header band, then a list that runs to its edges.
+       .upload-frame is the only box around the rows; batch strips and rows are
+       separated by hairlines, not borders on nested rectangles. */
+    .upload-frame {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 2px;
+      margin-bottom: 1.75rem;
+      overflow: visible;          /* see .action-menu: never clips a dropdown */
+    }
+
+    .upload-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 1.25rem; flex-wrap: wrap;
+      padding: 1.125rem 1.25rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .upload-head-main { min-width: 0; flex: 1 1 22rem; }
+    .upload-name {
+      margin: 0;
+      font: 600 1.0625rem/1.3 var(--sans);
+      letter-spacing: -0.011em;
+      color: var(--ink-900);
+      overflow-wrap: anywhere;
+    }
+    .upload-meta {
+      margin: .25rem 0 0;
+      font: 400 .8125rem/1.45 var(--sans);
+      color: var(--ink-500);
+    }
+    .upload-meta-warn { color: var(--warn-800); font-weight: 500; }
+    .upload-tools { display: flex; align-items: center; gap: .5rem; flex-shrink: 0; }
+
+    /* ── The progress bar. THE reason this page exists.
+
+       Before this the only aggregate on screen was a total ("1,204 PDFs"),
+       which cannot answer the only question anyone opens this page with: did
+       my rolls go through, and what is still stuck? A segmented bar plus four
+       numbers answers it without scrolling past 1,200 rows.
+
+       Follows the Carbon progress-bar rules, which are the concrete ones
+       rather than taste: a label naming the process sits above it, the counts
+       sit below as helper text, and NOTHING goes inside the track -- text
+       painted on an 8px bar is unreadable and breaks at every zoom level.
+       Height is 8px ("big"), because this is a spacious context.
+
+       The segments are one stacked flex row rather than four separate bars, so
+       the whole thing reads as a single 0-100% quantity that happens to be
+       divided by status -- which is what it is. Widths come from entry.pct,
+       computed server-side from the same documents the rows below list, so the
+       bar and the count beside it can never disagree. */
+    .progress {
+      display: flex; flex-direction: column; gap: .4375rem;
+      min-width: 0; flex: 1 1 20rem;
+      margin-top: 1rem;
+    }
+    .progress-label {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: .75rem;
+      font: 600 .75rem/1.35 var(--sans);
+      color: var(--ink-700);
+    }
+    .progress-total {
+      font-weight: 700;
+      color: var(--ink-900);
+      font-variant-numeric: tabular-nums;
+    }
+    .progress-track {
+      display: flex;
+      height: 8px;                 /* Carbon: big = 8px, small = 4px */
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--ink-100);
+    }
+    /* A zero-width segment must not paint a 1px sliver of colour, so the
+       widths are inlined and a segment is only given a box when it has one. */
+    .progress-seg { height: 100%; }
+    .progress-seg.is-done    { background: var(--ok-600); }
+    .progress-seg.is-active  { background: var(--live-700); }
+    .progress-seg.is-skipped { background: var(--ink-400); }
+    .progress-seg.is-problem { background: var(--bad-600); }
+    .progress-seg.is-waiting { background: var(--ink-300); }
+
+    /* The legend. This is Carbon's helper text -- it carries the numbers, which
+       is why nothing is printed inside the track. Hidden in the common case of
+       "all pending", where one count beside the total says it better than
+       four zeroes. */
+    .progress-legend {
+      display: flex; align-items: center; gap: .875rem; flex-wrap: wrap;
+      font: 400 .8125rem/1.4 var(--sans);
+      color: var(--ink-600);
+    }
+    .legend-item { display: inline-flex; align-items: center; gap: .375rem; }
+    .legend-swatch {
+      width: .5rem; height: .5rem;
+      border-radius: 2px;
+      flex: 0 0 auto;
+    }
+    .legend-swatch.is-done    { background: var(--ok-600); }
+    .legend-swatch.is-active  { background: var(--live-700); }
+    .legend-swatch.is-skipped { background: var(--ink-400); }
+    .legend-swatch.is-problem { background: var(--bad-600); }
+    .legend-swatch.is-waiting { background: var(--ink-300); }
+    .legend-count { font-weight: 700; color: var(--ink-900); font-variant-numeric: tabular-nums; }
+
+    /* ── Progress, per batch.
+
+       There is no progress block on this page any more, only the batch strip's
+       own metrics (below). The frame is a title; the counts live one row down,
+       where the PDFs they describe are.
+
+       The five colours are unchanged, because they mean the same thing
+       everywhere on this page and a reader who learned them on one strip has
+       to find them again on the next. */
+
+    /* ── Batch strip.
+
+       Was the header of its own <table>; now it is a row in the same list.
+       Sticky so that scrolling 100 rows deep still shows which batch you are
+       in -- which is the entire reason the batch numbering exists. Sticky is
+       safe here precisely because .action-menu creates no stacking context, so
+       this z-index does not escape and swallow the ⋮ panel, which sits at 60. */
+    /* One line per batch: tick, name, sentence, five columns, rail, the button,
+       the ⋮.
+
+       The row runs edge to edge. "Batch 3" sits hard against the left margin and
+       the button sits hard against the right one, and the five columns spread
+       across everything in between.
+
+       Spreading the columns is what makes that work. There are three ways to
+       spend the leftover width on a row like this and only one of them is right:
+       centre the left cluster, which strands a hand's width of white before the
+       word "Batch" and looks like the page failed to load; push the left cluster
+       right with margin-left:auto, which puts the void between "Batch 1" and its
+       own sentence; or hand the slack to the columns and let them divide it five
+       ways. The third one has no void in it at all.
+
+       The columns were fixed at 7rem each before this, which meant ~900px of
+       white sat between the sentence and the first figure at 1800px. White
+       distributed evenly between ruled cells reads as a table. White pooled in
+       one place reads as a mistake. The five tracks are 1fr rather than a fixed
+       rem so they share whatever is left; because every strip is the same width
+       with the same fractions, Batch 6's "finished" still lands exactly under
+       Batch 2's, so the columns compare straight down the page. */
+    .batch-strip {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; gap: .75rem;
+      padding: .625rem 1.25rem;
+      background: var(--ink-50);
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .batch-strip:first-of-type { border-top: 0; }
+    /* The first batch strip of an upload has no top border (the head above it
+       already drew one). Each strip is wrapped in its own data-batch-group, so
+       :first-of-type alone would strip the border from every batch. It has to
+       key off the first wrapper instead. */
+    [data-batch-group]:first-of-type .batch-strip { border-top: 0; }
+    /* The batch name is the HEADING for its row, and it is set like one: larger
+       than everything else on the strip and darker than everything else, so
+       the eye finds "Batch 3" before it finds any of the numbers hanging off
+       it. It was the same size as the sentence beside it, which made six
+       rows of equal-weight text where there is really one heading and six
+       captions. Bold as well as large -- size alone is weak at this scale. */
+    .batch-name {
+      flex: none;
+      font: 700 1.0625rem/1.35 var(--sans);
+      color: var(--ink-950);
+      letter-spacing: -.02em;
+      white-space: nowrap;
+    }
+
+    /* The sentence. Sized to its own text and allowed to give ground: the
+       columns are the flexible part of this row now, so the sentence sits hard
+       against the batch name, where it reads as a caption, rather than floating
+       in the middle of the strip. Truncates rather than wraps -- the strip is
+       sticky, and a strip that grows a line drags the page under the reader at
+       exactly the moment they are watching it move. */
+    .batch-say {
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font: 500 .9375rem/1.4 var(--sans);
+      color: var(--ink-600);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -.01em;
+    }
+    /* The counts inside the sentence are the numbers, so they take the mono
+       stack like every other figure on the page. */
+    .batch-say b {
+      font: 600 .9375rem/1.4 var(--mono);
+      color: var(--ink-900);
+      letter-spacing: -.02em;
+    }
+    .batch-chip {
+      flex: none;
+      padding: .0625rem .4375rem;
+      border-radius: 999px;
+      font: 600 .75rem/1.4 var(--sans);
+      font-variant-numeric: tabular-nums;
+      color: var(--ink-700);
+      background: var(--ink-100);
+    }
+    .batch-chip.is-active  { color: var(--live-700); background: var(--live-100); }
+    .batch-chip.is-problem { color: var(--bad-700);  background: var(--bad-100); }
+    .batch-chip.is-skipped { color: var(--ink-600);   background: var(--ink-200); }
+
+    /* The five states, as columns rather than as chips.
+       Chips only for non-zero counts meant each strip had a different number of
+       things on it, so nothing lined up between strips and comparing Batch 2 to
+       Batch 5 meant reading two rows.
+
+       FIVE EQUAL FRACTIONS, and this is the load-bearing decision on the whole
+       strip. Every strip is the same width and the same five fractions, so
+       Batch 6's "finished" still lands exactly under Batch 2's and the eye can
+       run down one column instead of reading six rows. Alignment and
+       full-bleed are not in tension: the columns only need to be identical
+       relative to each other, not a fixed number of pixels wide.
+
+       1fr rather than a fixed rem, deliberately. At a fixed 7rem the leftover
+       width had nowhere to go and pooled into ~900px of white between the
+       sentence and the first figure, which read as a hole in the row. Spread
+       over five ruled cells it reads as the cell padding it looks like. There
+       is now no single gap on this row wider than the .batch-strip gap.
+
+       Each cell is a count over its label, and the label is what makes the
+       number mean anything: a bare "6" in a row of fives is a puzzle. Zeros
+       are dimmed rather than hidden, so a state you can ignore still occupies
+       its column instead of shifting the others sideways -- and "0 needing
+       attention" is the answer to the question people actually open this page
+       with, so it has to be on the page to be the answer. */
+    .batch-metrics {
+      flex: 1 1 0;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+    }
+    /* Ruled columns rather than coloured bars: the tone is carried by a 1px
+       hairline down the left of each cell, which is enough to tell five states
+       apart at a glance and leaves the count itself free to be ink. The hairline
+       is what makes equal tracks read as five separate columns -- without it,
+       five fixed-width cells just look like one wide grey box.
+
+       The hairlines are the soft end of each status scale (100/200), not the
+       full-strength 600/700 the bars used. These strips are set to match the PDF
+       rows below them, and those carry colour only where a name has to be
+       spelled out: a status badge gets its hue, everything else is ink and an
+       ink-100 rule. Five saturated bars across the top of the page put the same
+       five colours on screen twice, at two different strengths, fighting.
+
+       A stack, not a row. The percentage that used to sit beside the count took
+       a second grid track and forced the count left with a ragged right edge;
+       without it the count and the label both hang off the same left line --
+       the line the hairline is already drawing. */
+    .batch-metric {
+      display: grid;
+      grid-auto-rows: min-content;
+      align-content: center;
+      row-gap: .0625rem;
+      padding-left: .75rem;
+      border-left: 1px solid var(--ink-200);
+    }
+    .batch-metric.is-done    { border-left-color: var(--ok-100); }
+    .batch-metric.is-active  { border-left-color: var(--live-100); }
+    .batch-metric.is-problem { border-left-color: var(--bad-100); }
+    .batch-metric.is-skipped { border-left-color: var(--ink-300); }
+    .batch-metric.is-waiting { border-left-color: var(--ink-200); }
+    /* The count carries the strip, so it is set a step above the label beneath
+       it and at full ink -- the same weight as the sentence beside it. */
+    .batch-metric-n {
+      font: 700 1.0625rem/1.2 var(--mono);
+      color: var(--ink-950);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -.02em;
+    }
+    .batch-metric-l {
+      font: 600 .625rem/1.3 var(--sans);
+      color: var(--ink-500);
+      text-transform: uppercase;
+      letter-spacing: .055em;
+      white-space: nowrap;
+    }
+    /* A zero is not an emergency, so it is not inked like one. The label stays
+       at full strength -- the reader still needs to know which state it is. */
+    .batch-metric.is-zero .batch-metric-n { color: var(--ink-300); }
+
+    /* There is no spacer element on the strip. .batch-metrics above is the flexible
+       child, so it absorbs the row's slack itself and the columns never drift;
+       an empty flex:1 span here would take the same width and push the columns
+       into the middle of the strip, which is the one arrangement with a visible
+       void in it. */
+
+    /* The columns are the first thing to go, then the rail. Order matters: what
+       each step loses is the least load-bearing part of the row, and the count
+       with its label -- the part that says what the number means -- goes last.
+       Nothing here may wrap: the strip is sticky, and a strip that grows a line
+       when a count ticks over drags the page under the reader at exactly the
+       moment they are watching it move.
+
+       The columns need no width of their own here. They are already 1fr, so
+       narrowing the viewport narrows them by themselves and they stay aligned
+       with each other all the way down. */
+    @media (max-width: 72rem) {
+      .batch-rail { flex-basis: 6rem; }
+    }
+    @media (max-width: 56rem) {
+      .batch-metrics { display: none; }
+      .batch-rail { flex-basis: 5rem; }
+    }
+    /* The rail. Square-ended and full-height in its track: a pill reads as a
+       standalone object floating in space, which is the one thing a segment of
+       a whole should not look like. Thin, and on the soft end of the status
+       scales, so it matches the page's summary rail and the doc rows rather
+       than introducing a third treatment of the same five colours. */
+    .batch-rail {
+      flex: 0 0 7rem;
+      display: flex;
+      height: .375rem;
+      overflow: hidden;
+      background: var(--ink-100);
+    }
+    .batch-rail-seg { height: 100%; }
+
+    /* Tick-everything row between the upload head and its first batch. Sits
+       on the same hairline the first batch strip draws, so it reads as part
+       of the list header rather than a floating control. */
+    /* One toolbar above the list. It used to be two rows -- the select-all
+       label, then Expand/Collapse -- each with its own border-bottom, so
+       every list opened with four stacked bands of small text before the
+       first PDF. Same controls, one band, one hairline. */
+    .upload-toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 1rem; flex-wrap: wrap;
+      padding: .625rem 1.25rem;
+      border-bottom: 1px solid var(--line);
+      background: var(--ink-50);
+    }
+    .upload-select-all {
+      display: flex; align-items: center; gap: .5rem;
+      font: 500 .8125rem/1.4 var(--sans); color: var(--ink-700);
+      cursor: pointer; user-select: none;
+    }
+    .upload-select-all input { accent-color: var(--brand-600); }
+
+    .batch-tools {
+      display: flex; gap: .5rem;
+    }
+    .batch-tools .btn { padding: .25rem .625rem; font-size: .8125rem; }
+
+    /* ── "View the 100 PDFs" -- the last control on the strip.
+
+       It replaces both the per-strip caret and the page-wide Expand/Collapse
+       pair: one control per batch, named after what it will show, and pressing
+       it navigates to a dedicated batch page rather than unhiding rows that
+       were already in the HTML.
+
+       It is deliberately the plainest thing on the row -- grey ink, hairline
+       border, no fill -- because it is the control you use once in a while,
+       while the five columns beside it are what you read every time. */
+    .batch-open {
+      flex: 0 0 auto;
+      display: inline-flex; align-items: center; gap: .3125rem;
+      min-height: 1.875rem; padding: 0 .625rem;
+      border: 1px solid var(--line-strong); border-radius: 2px;
+      background: #fff; color: var(--ink-600);
+      font: 500 .75rem/1.35 var(--sans);
+      white-space: nowrap; text-decoration: none;
+      transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+    }
+    .batch-open:hover { background: var(--ink-100); border-color: var(--ink-400); color: var(--ink-950); }
+    .batch-open:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; }
+    .batch-open-label { font-weight: 600; }
+    /* The count of PDFs is a number, so it is set like every other number here:
+       mono, so it does not shift the words beside it. */
+    .batch-open b { font: 600 .75rem/1.35 var(--mono); font-variant-numeric: tabular-nums; }
+
+    /* The one note left in the upload toolbar. Where Expand/Collapse sat, and
+       where the select-all sits once a batch is open, this says what the page
+       is showing and how to get at the rows. */
+    .upload-toolbar-note {
+      font: 500 .8125rem/1.4 var(--sans); color: var(--ink-500);
+    }
+
+    [data-batch-rows][hidden] { display: none; }
+
+    /* ── One row. A CSS grid rather than a <td>, because the point of the
+       change was to stop pretending this is tabular data: filename, status
+       and actions are a relationship, not columns to align. Fixed track
+       widths keep status and the actions in the same place on every row.
+
+       The ⋮ is the row's LAST track, at the extreme right. Every menu on the
+       page then shares one column -- the batch strips above and all thousand
+       rows below -- so the control is found by moving the eye straight down
+       instead of by sweeping the row. The reclaimed width goes to the filename,
+       which is the thing anyone is actually scanning for. */
+    .doc-row {
+      display: grid;
+      grid-template-columns: 2rem minmax(0, 1fr) 9.5rem 2.75rem;
+      align-items: center;
+      gap: .625rem;
+      padding: .5rem 1.25rem;
+      border-bottom: 1px solid var(--ink-100);
+    }
+    .doc-row:last-child { border-bottom: 0; }
+    .doc-row:hover { background: var(--ink-50); }
+    .doc-row.is-picked { background: var(--brand-50); }
+    .doc-row.is-picked:hover { background: var(--brand-100); }
+    .doc-row-check { display: flex; align-items: center; }
+
+    /* The filename is the heaviest thing on the row and takes the space the
+       full-width layout gives back. Truncating here rather than in the cell
+       keeps the ellipsis at the end of the name, where the eye expects it. */
+    .doc-name {
+      display: block;
+      font: 500 .875rem/1.4 var(--sans);
+      color: var(--ink-900);
+      text-decoration: none;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .doc-name:hover { color: var(--brand-700); text-decoration: underline; }
+    .doc-sub {
+      display: flex; align-items: center; gap: .5rem;
+      font: 400 .75rem/1.4 var(--sans);
+      color: var(--ink-500);
+      font-variant-numeric: tabular-nums;
+    }
+    .doc-sub-sep { color: var(--ink-300); }
+    .doc-view-link { color: var(--brand-600); text-decoration: none; }
+    .doc-view-link:hover { text-decoration: underline; }
+
+    /* ── Status badge.
+
+       Carbon's status-indicator rule is that colour alone is never enough, and
+       that at least THREE of symbol / shape / colour / type must be present so
+       a reader who cannot see the hue still gets the state. The old .pill had
+       colour + type and nothing else. Each tone now carries a distinct glyph
+       as well, which is also faster to scan than reading the word.
+
+       Shapes are not reused across tones within a page, per the same guidance. */
+    .badge {
+      display: inline-flex; align-items: center; gap: .3125rem;
+      padding: .1875rem .5rem .1875rem .4375rem;
+      border-radius: 6px;
+      font: 600 .75rem/1.35 var(--sans);
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    .badge-mark {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: .8125rem; height: .8125rem;
+      border-radius: 3px;
+      flex: 0 0 auto;
+      font: 700 .625rem/1 var(--sans);
+    }
+    /* good: a filled tick box */
+    .badge.is-good    { background: var(--ok-100);   color: var(--ok-700); }
+    .badge.is-good .badge-mark    { background: var(--ok-700);   color: #fff; }
+    /* busy: a solid block, and the one tone that animates -- these rows are
+       genuinely in motion and the page should say so */
+    .badge.is-busy    { background: var(--live-100); color: var(--live-700); }
+    .badge.is-busy .badge-mark    { background: var(--live-700); color: #fff; animation: badge-pulse 1.6s ease-in-out infinite; }
+    /* warn: a half-height block, visibly not the same shape as the rest */
+    .badge.is-warn    { background: var(--warn-100); color: var(--warn-800); }
+    .badge.is-warn .badge-mark    { background: var(--warn-800); color: #fff; }
+    /* bad: a hard square carrying an explicit cross */
+    .badge.is-bad     { background: var(--bad-100);  color: var(--bad-700); }
+    .badge.is-bad .badge-mark     { background: var(--bad-700); color: #fff; }
+    /* neutral: an outline rather than a fill, so "waiting" reads as less than
+       "done" without anyone having to compare two fills */
+    .badge.is-neutral { background: var(--ink-100);  color: var(--ink-600); }
+    .badge.is-neutral .badge-mark { background: transparent; color: var(--ink-500); box-shadow: inset 0 0 0 1.5px var(--ink-400); }
+
+    @keyframes badge-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: .45; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .badge.is-busy .badge-mark { animation: none; }
+    }
+
+    /* ── Narrow screens. The 9.5rem status track is the first thing to go:
+       below 40rem the filename needs that width more than the status pill
+       does, so the status drops to the metadata line, where it is still
+       readable, just smaller. The action menu stays on row 1, in the same
+       last column it occupies at every width. */
+    @media (max-width: 40rem) {
+      .doc-row {
+        grid-template-columns: 1.75rem minmax(0, 1fr) 2.75rem;
+        row-gap: .125rem;
+      }
+      .doc-cell-status {
+        grid-column: 2 / 3;
+        grid-row: 2;
+        justify-self: start;
+      }
+      .doc-sub .doc-size, .doc-sub .doc-sub-sep { display: none; }
+      .upload-head { padding: 1rem; }
+      .batch-strip, .doc-row { padding-left: 1rem; padding-right: 1rem; }
+      /* A strip cannot wrap -- it is sticky, and a strip that grows when a count
+         ticks over moves the page under the reader. So below 34rem the rail is
+         dropped and the sentence drops its larger type size rather than taking
+         a line of its own. The open button keeps only its verb and its count,
+         which is still enough to say "these are the rows". */
+      .batch-strip { gap: .5rem; }
+      .batch-rail { display: none; }
+      .batch-say, .batch-say b { font-size: .875rem; }
+      .batch-name { font-size: .875rem; }
+      .batch-open { font-size: .6875rem; padding: 0 .5rem; }
+      .batch-open-tail { display: none; }
+    }
+
+    /* The empty state gets the same treatment as everything else: one box,
+       centred, with a next action in words rather than a decorative
+       illustration. */
+    .empty-state { padding: 3rem 1.5rem; text-align: center; }
+    .empty-state-title {
+      margin: 0;
+      font: 600 1rem/1.4 var(--sans);
+      color: var(--ink-800);
+    }
+    .empty-state-body {
+      margin: .375rem auto 0;
+      max-width: 46ch;
+      font: 400 .875rem/1.6 var(--sans);
+      color: var(--ink-600);
+    }
+
+    /* ══════════════════════════════════════════════════════════════════════
+       NAVBAR — redesigned.
+
+       Goals:
+         1. A recognisable brand mark (ballot-box icon + name) that tells a
+            first-time visitor what the tool is before they read anything.
+         2. Each nav link carries a one-line description so a non-technical
+            user can decide where to go without clicking and backing out.
+         3. A rich tooltip (pure CSS, no JS dependency) surfaces that
+            description on hover with zero latency.
+         4. The active page gets a bright underline accent rather than just a
+            colour change — colour alone is not enough for users who don't
+            read the URL bar.
+         5. A hamburger menu on narrow screens so phones stay usable.
+         6. A subtle brand-to-slate gradient on the bar so it reads as a
+            distinct surface, not just a dark rectangle.
+       ══════════════════════════════════════════════════════════════════════ */
+
+    /* ── Bar shell ─────────────────────────────────────────────────────── */
+    .snav {
+      /* Gradient: a whisper of brand blue bleeds in from the left, giving the
+         bar depth without making it look like a website from 2008. */
+      background: linear-gradient(to right, #1a2f5e 0%, #1e293b 38%);
+      border-bottom: 1px solid rgba(255,255,255,.07);
+      box-shadow: 0 2px 12px rgba(15,23,42,.35);
+      position: relative;
+      z-index: 100;
+    }
+    .snav-inner {
+      max-width: 1800px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 3.75rem;
+      gap: 1.5rem;
+    }
+
+    /* ── Brand (logo + name + sub-label) ────────────────────────────────── */
+    .snav-brand {
+      display: flex;
+      align-items: center;
+      gap: .625rem;
+      text-decoration: none;
+      flex-shrink: 0;
+    }
+    .snav-brand-icon {
+      display: flex; align-items: center; justify-content: center;
+      width: 2.125rem; height: 2.125rem;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+      box-shadow: 0 2px 6px rgba(59,130,246,.45);
+      flex-shrink: 0;
+      color: #fff;
+    }
+    .snav-brand-icon svg { width: 1.0625rem; height: 1.0625rem; }
+    .snav-brand-text { display: flex; flex-direction: column; gap: 0; }
+    .snav-brand-name {
+      font: 700 .9375rem/1.1 var(--sans);
+      letter-spacing: -.012em;
+      color: #fff;
+    }
+    .snav-brand-sub {
+      font: 400 .6875rem/1.1 var(--sans);
+      color: rgba(148,163,184,.85);
+      letter-spacing: .02em;
+    }
+
+    /* ── Nav links ──────────────────────────────────────────────────────── */
+    .snav-links {
+      display: flex;
+      align-items: center;
+      gap: .125rem;
+      list-style: none;
+      margin: 0; padding: 0;
+      min-width: 0;
+    }
+
+    .snav-item { position: relative; }
+
+    /* The link itself. */
+    .snav-link {
+      display: flex;
+      align-items: center;
+      gap: .4375rem;
+      padding: .5rem .75rem;
+      border-radius: 8px;
+      font: 500 .875rem/1 var(--sans);
+      color: rgba(203,213,225,.9);
+      text-decoration: none;
+      white-space: nowrap;
+      transition: color .15s ease, background-color .15s ease;
+      position: relative;
+    }
+    .snav-link:hover {
+      color: #fff;
+      background: rgba(255,255,255,.08);
+      text-decoration: none;
+    }
+    /* The icon sits left of the label; dims slightly so it does not fight the text. */
+    .snav-link-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1rem;
+      height: 1rem;
+      opacity: .75;
+      flex-shrink: 0;
+    }
+    .snav-link-icon svg { width: 1rem; height: 1rem; }
+    .snav-link:hover .snav-link-icon { opacity: 1; }
+    .snav-link.is-active .snav-link-icon { opacity: 1; }
+    .snav-link-label { flex-shrink: 0; }
+
+    /* Active page: a vivid blue underline bar pinned to the bottom of the link. */
+    .snav-link.is-active {
+      color: #fff;
+      background: rgba(59,130,246,.15);
+    }
+    .snav-link.is-active::after {
+      content: '';
+      position: absolute;
+      bottom: -2px; left: .75rem; right: .75rem;
+      height: 2.5px;
+      border-radius: 99px;
+      background: #60a5fa;
+    }
+
+    /* ── Rich tooltip ───────────────────────────────────────────────────── */
+    /* Each nav item has a hidden .snav-tip that appears on hover/focus-within.
+       Pure CSS: no JS, no library. Works with keyboard navigation too because
+       :focus-within fires when any child is focused. */
+    .snav-tip {
+      position: absolute;
+      top: calc(100% + .625rem);
+      left: 50%;
+      transform: translateX(-50%);
+      min-width: 13rem;
+      max-width: 17rem;
+      background: #0f172a;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 10px;
+      box-shadow: 0 12px 32px rgba(15,23,42,.55), 0 2px 6px rgba(15,23,42,.25);
+      padding: .75rem .875rem;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateX(-50%) translateY(-4px);
+      transition: opacity .15s ease, transform .15s ease, visibility .15s ease;
+      z-index: 200;
+    }
+    /* Arrow pointing up at the link. */
+    .snav-tip::before {
+      content: '';
+      position: absolute;
+      top: -5px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 9px; height: 5px;
+      background: #0f172a;
+      clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+    }
+    .snav-item:hover .snav-tip,
+    .snav-item:focus-within .snav-tip {
+      opacity: 1;
+      visibility: visible;
+      transform: translateX(-50%) translateY(0);
+    }
+    .snav-tip-title {
+      font: 600 .8125rem/1.35 var(--sans);
+      color: #f1f5f9;
+      margin: 0 0 .25rem;
+    }
+    .snav-tip-body {
+      font: 400 .75rem/1.5 var(--sans);
+      color: rgba(148,163,184,.9);
+      margin: 0;
+    }
+    .snav-tip-kbd {
+      display: inline-block;
+      margin-top: .4375rem;
+      padding: .1875rem .375rem;
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.15);
+      border-radius: 4px;
+      font: 600 .6875rem/1 var(--mono);
+      color: #94a3b8;
+    }
+
+    /* ── Right side: badge + hamburger ─────────────────────────────────── */
+    .snav-right {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      flex-shrink: 0;
+    }
+    /* Admin badge: pill with a green pulse dot. */
+    .snav-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: .4375rem;
+      padding: .3125rem .6875rem;
+      background: rgba(255,255,255,.07);
+      border: 1px solid rgba(255,255,255,.11);
+      border-radius: 999px;
+      font: 500 .75rem/1 var(--sans);
+      color: rgba(203,213,225,.85);
+      white-space: nowrap;
+    }
+    .snav-badge-dot {
+      width: .5rem; height: .5rem;
+      border-radius: 999px;
+      background: #4ade80;
+      flex-shrink: 0;
+      animation: badge-online 2.4s ease-in-out infinite;
+    }
+    @keyframes badge-online {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(74,222,128,.6); }
+      50%       { opacity: .8; box-shadow: 0 0 0 4px rgba(74,222,128,0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .snav-badge-dot { animation: none; }
+    }
+
+    /* ── Hamburger button (mobile only) ─────────────────────────────────── */
+    .snav-hamburger {
+      display: none;
+      align-items: center; justify-content: center;
+      width: 2.25rem; height: 2.25rem;
+      border-radius: 7px;
+      border: 1px solid rgba(255,255,255,.15);
+      background: transparent;
+      color: rgba(203,213,225,.9);
+      cursor: pointer;
+      padding: 0;
+      flex-shrink: 0;
+      transition: background-color .15s ease, color .15s ease;
+    }
+    .snav-hamburger:hover { background: rgba(255,255,255,.08); color: #fff; }
+    .snav-hamburger svg { width: 1.25rem; height: 1.25rem; }
+
+    /* ── Mobile drawer ──────────────────────────────────────────────────── */
+    .snav-drawer {
+      display: none; /* shown by JS when hamburger is clicked */
+      flex-direction: column;
+      background: #1a2640;
+      border-top: 1px solid rgba(255,255,255,.08);
+      padding: .75rem 1rem 1rem;
+      gap: .25rem;
+    }
+    .snav-drawer.is-open { display: flex; }
+    .snav-drawer-link {
+      display: flex;
+      align-items: flex-start;
+      gap: .625rem;
+      padding: .625rem .75rem;
+      border-radius: 8px;
+      text-decoration: none;
+      transition: background-color .15s ease;
+    }
+    .snav-drawer-link:hover { background: rgba(255,255,255,.07); }
+    .snav-drawer-link.is-active { background: rgba(59,130,246,.18); }
+    .snav-drawer-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.25rem;
+      height: 1.25rem;
+      flex-shrink: 0;
+      margin-top: .125rem;
+      opacity: .8;
+    }
+    .snav-drawer-icon svg { width: 1.125rem; height: 1.125rem; }
+    .snav-drawer-text {}
+    .snav-drawer-name {
+      display: block;
+      font: 600 .9375rem/1.3 var(--sans);
+      color: #f1f5f9;
+    }
+    .snav-drawer-desc {
+      display: block;
+      font: 400 .8125rem/1.4 var(--sans);
+      color: rgba(148,163,184,.85);
+      margin-top: .1875rem;
+    }
+
+    /* ── Responsive breakpoints ─────────────────────────────────────────── */
+    @media (max-width: 56rem) {
+      .snav-links   { display: none; }
+      .snav-badge   { display: none; }
+      .snav-hamburger { display: inline-flex; }
+    }
+    @media (max-width: 30rem) {
+      .snav-brand-sub { display: none; }
+    }
   </style>
 </head>
-<body data-lang="en" class="bg-gray-50 text-gray-900 font-sans antialiased">
-  <header class="bg-slate-800 text-white shadow-md">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div class="flex items-center justify-between h-16">
-        <div class="flex items-center gap-8">
-          <strong class="text-xl font-semibold tracking-tight">Electoral Pipeline</strong>
-          <nav class="flex gap-6">
-            <a href="/" class="text-slate-300 hover:text-white transition-colors px-3 py-2 text-sm font-medium">Dashboard</a>
-            <a href="/documents" class="text-slate-300 hover:text-white transition-colors px-3 py-2 text-sm font-medium">Documents</a>
-            <a href="/folders" class="text-slate-300 hover:text-white transition-colors px-3 py-2 text-sm font-medium">Scan folders</a>
-            <a href="/browse" class="text-slate-300 hover:text-white transition-colors px-3 py-2 text-sm font-medium">Database Browser</a>
-          </nav>
-        </div>
-        <span class="text-slate-400 text-sm">Admin Monitor</span>
+<body data-lang="en" class="page antialiased">
+
+  {# ══════════════════════════════════════════════════════════════════════════
+     NAVBAR
+     ══════════════════════════════════════════════════════════════════════════ #}
+  <header class="snav">
+    <div class="snav-inner">
+
+      {# Brand — SVG ballot-box mark instead of emoji #}
+      <a href="/" class="snav-brand" aria-label="Electoral Pipeline — go to home">
+        <span class="snav-brand-icon" aria-hidden="true">
+          {# Ballot-box / checklist icon #}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <path d="M9 12l2 2 4-4"/>
+            <line x1="9" y1="7" x2="15" y2="7"/>
+            <line x1="9" y1="17" x2="15" y2="17"/>
+          </svg>
+        </span>
+        <span class="snav-brand-text">
+          <span class="snav-brand-name">Electoral Pipeline</span>
+          <span class="snav-brand-sub">Roll Processing System</span>
+        </span>
+      </a>
+
+      {# Desktop nav links — inline SVG icons, no emoji #}
+      <nav aria-label="Main navigation">
+        <ul class="snav-links">
+
+          <li class="snav-item">
+            <a href="/" class="snav-link{% if request.url.path == '/' %} is-active{% endif %}">
+              <span class="snav-link-icon" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+                  <polyline points="9 22 9 12 15 12 15 22"/>
+                </svg>
+              </span>
+              <span class="snav-link-label">Home</span>
+            </a>
+            <div class="snav-tip" role="tooltip">
+              <p class="snav-tip-title">Home</p>
+              <p class="snav-tip-body">Start here — an overview of the whole system: what has been processed, what is running, and quick links to every section.</p>
+            </div>
+          </li>
+
+          <li class="snav-item">
+            <a href="/upload" class="snav-link{% if request.url.path.startswith('/upload') %} is-active{% endif %}">
+              <span class="snav-link-icon" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+              </span>
+              <span class="snav-link-label">Upload</span>
+            </a>
+            <div class="snav-tip" role="tooltip">
+              <p class="snav-tip-title">Upload PDF rolls</p>
+              <p class="snav-tip-body">Add new electoral roll PDFs to the system. The pipeline will read them automatically and extract every voter record.</p>
+              <span class="snav-tip-kbd">Drag &amp; drop supported</span>
+            </div>
+          </li>
+
+          <li class="snav-item">
+            <!-- <a href="/dashboard" class="snav-link{% if request.url.path == '/dashboard' %} is-active{% endif %}">
+              <span class="snav-link-icon" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="7" height="7" rx="1"/>
+                  <rect x="14" y="3" width="7" height="7" rx="1"/>
+                  <rect x="3" y="14" width="7" height="7" rx="1"/>
+                  <rect x="14" y="14" width="7" height="7" rx="1"/>
+                </svg>
+              </span>
+              <!-- <span class="snav-link-label">Dashboard</span> -->
+            <!-- </a> -->
+            <div class="snav-tip" role="tooltip">
+              <p class="snav-tip-title">Live dashboard</p>
+              <p class="snav-tip-body">See real-time progress: how many PDFs are done, how fast they're going, and whether any step needs attention.</p>
+              <span class="snav-tip-kbd">Live · updates every 30 s</span>
+            </div>
+          </li>
+
+          <li class="snav-item">
+            <a href="/documents" class="snav-link{% if request.url.path.startswith('/documents') %} is-active{% endif %}">
+              <span class="snav-link-icon" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                  <line x1="9" y1="13" x2="15" y2="13"/>
+                  <line x1="9" y1="17" x2="15" y2="17"/>
+                </svg>
+              </span>
+              <span class="snav-link-label">Documents</span>
+            </a>
+            <div class="snav-tip" role="tooltip">
+              <p class="snav-tip-title">All uploaded PDFs</p>
+              <p class="snav-tip-body">View every PDF the system knows about — its status (waiting, processing, done, failed), how many voters were found, and any errors.</p>
+            </div>
+          </li>
+
+          <li class="snav-item">
+            <a href="/browse" class="snav-link{% if request.url.path.startswith('/browse') %} is-active{% endif %}">
+              <span class="snav-link-icon" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="8"/>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+              </span>
+              <span class="snav-link-label">Voter data</span>
+            </a>
+            <div class="snav-tip" role="tooltip">
+              <p class="snav-tip-title">Browse voter data</p>
+              <p class="snav-tip-body">Search extracted voter records, review roll details, and export a spreadsheet. Read-only — no accidental edits possible.</p>
+              <span class="snav-tip-kbd">Read-only · search included</span>
+            </div>
+          </li>
+
+          {% if signoz_available_locally(request) %}
+          <li class="snav-item">
+            <a href="/signoz" class="snav-link">
+              <span class="snav-link-icon" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/>
+                </svg>
+              </span>
+              <span class="snav-link-label">SigNoz</span>
+            </a>
+            <div class="snav-tip" role="tooltip">
+              <p class="snav-tip-title">Logs and traces</p>
+              <p class="snav-tip-body">Opens SigNoz already signed in. That is where you see errors, request traces, and container logs.</p>
+            </div>
+          </li>
+          {% endif %}
+
+        </ul>
+      </nav>
+
+      {# Right side #}
+      <div class="snav-right">
+        <!-- <span class="snav-badge" title="You are logged in as an administrator">
+          <span class="snav-badge-dot" aria-hidden="true"></span>
+          Admin
+        </span> -->
+        {# Hamburger (visible on mobile only) #}
+        <button class="snav-hamburger" id="snav-toggle" aria-label="Open navigation menu" aria-expanded="false" aria-controls="snav-drawer">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+            <line x1="3" y1="5"  x2="17" y2="5"/>
+            <line x1="3" y1="10" x2="17" y2="10"/>
+            <line x1="3" y1="15" x2="17" y2="15"/>
+          </svg>
+        </button>
       </div>
-    </div>
+
+    </div>{# /snav-inner #}
+
+    {# Mobile drawer — SVG icons, no emoji #}
+    <nav id="snav-drawer" class="snav-drawer" aria-label="Mobile navigation">
+
+      <a href="/" class="snav-drawer-link{% if request.url.path == '/' %} is-active{% endif %}">
+        <span class="snav-drawer-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+          </svg>
+        </span>
+        <span class="snav-drawer-text">
+          <span class="snav-drawer-name">Home</span>
+          <span class="snav-drawer-desc">Overview of the whole system</span>
+        </span>
+      </a>
+
+      <a href="/upload" class="snav-drawer-link{% if request.url.path.startswith('/upload') %} is-active{% endif %}">
+        <span class="snav-drawer-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </span>
+        <span class="snav-drawer-text">
+          <span class="snav-drawer-name">Upload</span>
+          <span class="snav-drawer-desc">Add new electoral roll PDFs</span>
+        </span>
+      </a>
+
+      <a href="/dashboard" class="snav-drawer-link{% if request.url.path == '/dashboard' %} is-active{% endif %}">
+        <span class="snav-drawer-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+        </span>
+        <span class="snav-drawer-text">
+          <span class="snav-drawer-name">Dashboard</span>
+          <span class="snav-drawer-desc">Live processing progress &amp; health</span>
+        </span>
+      </a>
+
+      <a href="/documents" class="snav-drawer-link{% if request.url.path.startswith('/documents') %} is-active{% endif %}">
+        <span class="snav-drawer-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="9" y1="13" x2="15" y2="13"/>
+            <line x1="9" y1="17" x2="15" y2="17"/>
+          </svg>
+        </span>
+        <span class="snav-drawer-text">
+          <span class="snav-drawer-name">Documents</span>
+          <span class="snav-drawer-desc">All uploaded PDFs and their status</span>
+        </span>
+      </a>
+
+      <a href="/browse" class="snav-drawer-link{% if request.url.path.startswith('/browse') %} is-active{% endif %}">
+        <span class="snav-drawer-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </span>
+        <span class="snav-drawer-text">
+          <span class="snav-drawer-name">Voter data</span>
+          <span class="snav-drawer-desc">Search &amp; read extracted voter records</span>
+        </span>
+      </a>
+
+      {% if signoz_available_locally(request) %}
+      <a href="/signoz" class="snav-drawer-link">
+        <span class="snav-drawer-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/>
+          </svg>
+        </span>
+        <span class="snav-drawer-text">
+          <span class="snav-drawer-name">SigNoz</span>
+          <span class="snav-drawer-desc">Logs, traces, and errors — opens already signed in</span>
+        </span>
+      </a>
+      {% endif %}
+
+    </nav>
   </header>
-  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  {# The page runs the full width of the window. This is a list of hundreds of
+     filenames and a max-width cap was leaving roughly half a 1440px screen
+     empty while the table itself stopped well short of the right edge. The
+     only constraint now is a maximum, so the layout stops stretching on very
+     wide monitors instead of running a single line of text across 3000px. #}
+  <main class="mx-auto w-full max-w-[1800px] px-4 sm:px-6 lg:px-8 py-8">
     {% block content %}{% endblock %}
   </main>
+  <script>
+    // ── Hamburger / mobile drawer toggle ──────────────────────────────────
+    (function () {
+      var btn    = document.getElementById('snav-toggle');
+      var drawer = document.getElementById('snav-drawer');
+      if (!btn || !drawer) return;
+      btn.addEventListener('click', function () {
+        var open = drawer.classList.toggle('is-open');
+        btn.setAttribute('aria-expanded', String(open));
+        btn.setAttribute('aria-label', open ? 'Close navigation menu' : 'Open navigation menu');
+      });
+      // Close drawer when user navigates (taps a link inside it).
+      drawer.addEventListener('click', function (e) {
+        if (e.target.closest('a')) {
+          drawer.classList.remove('is-open');
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
+    })();
+  </script>
+
   <script>
     // Language switch for the voter table. Kept in the browser so flipping
     // between Hindi and English is instant and does not re-run the extraction.
@@ -189,6 +2322,88 @@
       try { saved = localStorage.getItem(KEY) || 'en'; } catch (e) {}
       set(saved === 'hi' ? 'hi' : 'en');
     })();
+  </script>
+
+  <script>
+    // The public proxy historically cached an unauthenticated `/upload`
+    // redirect.  Keep the visible navigation URL simple, but give every click
+    // a fresh request key so users always reach the live, signed-in upload
+    // screen instead of an old browser-cache entry.  This covers desktop nav,
+    // the mobile drawer and any Upload link rendered inside a page.
+    (function () {
+      document.addEventListener('click', function (event) {
+        var link = event.target.closest('a[href]');
+        if (!link || event.defaultPrevented || event.button !== 0 ||
+            event.metaKey || event.ctrlKey || event.shiftKey || event.altKey ||
+            link.target || link.hasAttribute('download')) return;
+        var target;
+        try { target = new URL(link.href, window.location.href); } catch (e) { return; }
+        if (target.origin !== window.location.origin || target.pathname !== '/upload' ||
+            target.searchParams.has('_nav')) return;
+        event.preventDefault();
+        target.searchParams.set('_nav', Date.now().toString(36));
+        window.location.assign(target.pathname + '?' + target.searchParams.toString());
+      });
+    })();
+  </script>
+
+  {# ── Client-side table sorting ─────────────────────────────────────────────
+     Every rendered table gets clickable headers with a double-arrow indicator.
+     The arrow flips ▼/▲ between ascending and descending; tables without an
+     explicit tbody of rows are skipped (empty shells, layout grids). Sorting
+     a column sorts the rendered cells using the same numeric/text rules the
+     column's class already implies: font-mono columns are numeric, everything
+     else is text. Colour of the arrow comes from the header's own colour. #}
+  <style>
+    th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    th.sortable:hover { text-decoration: underline; text-underline-offset: 3px; }
+    .sort-arrows { display: inline-block; margin-left: .25rem; opacity: .55; font-size: .6rem; vertical-align: middle; line-height: 1; }
+    th.sortable.sorted-asc .sort-arrows,
+    th.sortable.sorted-desc .sort-arrows { opacity: 1; }
+  </style>
+  <script>
+  (function () {
+    var SRC_ASC_DESC = '▲▼';
+    function cellText(tr, idx) {
+      var td = tr.children[idx];
+      return td ? (td.textContent || td.innerText || '').trim() : '';
+    }
+    function isNum(s) { return s !== '' && !isNaN(Number(s.replace(/,/g, ''))); }
+    document.querySelectorAll('table').forEach(function (table) {
+      var tbody = table.tBodies[0];
+      if (!tbody || tbody.rows.length === 0) return;
+      var ths = table.querySelectorAll('thead th');
+      ths.forEach(function (th, idx) {
+        if (th.querySelector('input[type="checkbox"]')) return; // selection column
+        th.classList.add('sortable');
+        var arrows = document.createElement('span');
+        arrows.className = 'sort-arrows';
+        arrows.textContent = '▲▼';
+        th.appendChild(arrows);
+        th.setAttribute('tabindex', '0');
+        th.setAttribute('role', 'button');
+        th.setAttribute('aria-label', 'Sort by ' + (th.textContent || '').trim());
+        function sort() {
+          var dir = th.classList.contains('sorted-asc') ? 'desc' : 'asc';
+          ths.forEach(function (h) { h.classList.remove('sorted-asc', 'sorted-desc'); });
+          th.classList.add(dir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+          var rows = Array.prototype.slice.call(tbody.rows);
+          rows.sort(function (a, b) {
+            var x = cellText(a, idx), y = cellText(b, idx);
+            var cmp;
+            if (isNum(x) && isNum(y)) cmp = parseFloat(x.replace(/,/g, '')) - parseFloat(y.replace(/,/g, ''));
+            else cmp = x.localeCompare(y, undefined, {numeric: true, sensitivity: 'base'});
+            return dir === 'asc' ? cmp : -cmp;
+          });
+          rows.forEach(function (r) { tbody.appendChild(r); });
+        }
+        th.addEventListener('click', sort);
+        th.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sort(); }
+        });
+      });
+    });
+  })();
   </script>
 </body>
 </html>
