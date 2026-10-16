@@ -6156,6 +6156,58 @@ def _select_anubhag_name(*reads: str) -> tuple[str, str]:
         "", "anubhag_name_conflicting_header_reads")
 
 
+def _adaptive_window_for(gray: np.ndarray) -> int:
+    """An adaptive-threshold window sized to the text in `gray`, not fixed.
+
+    `adaptiveThreshold`'s blockSize is a neighbourhood radius in pixels, so a
+    constant only means "a little bigger than a line of text" on the crop it
+    was fitted to.  Measured line heights on the two measured rolls differ by
+    more than 3x (Lansdown's header band is 86px at 200 DPI, S24's is 21px), and a
+    window that is one line tall on one is several on the other -- which is what
+    shatters Devanagari's shirorekha, since the shirorekha is shared across
+    words and a window narrower than a word cuts it into strokes.
+
+    The window is therefore derived from the ink: the modal run of rows that
+    carry ink, which is the height of one text row, expanded to cover a word and
+    kept odd, which OpenCV requires.  Crops with no ink fall back to a window
+    proportional to the crop, so the function always returns a usable value.
+    """
+    height = gray.shape[0]
+    if height < 3:
+        return 3
+    dark = (gray < 140).sum(axis=1)
+    runs: list[int] = []
+    current = 0
+    for filled in dark > 2:
+        if filled:
+            current += 1
+        elif current:
+            runs.append(current)
+            current = 0
+    if current:
+        runs.append(current)
+    # Ignore specks only.  The filter is absolute rather than a fraction of the
+    # crop: a fraction silently discards genuinely small text in a tall crop,
+    # which is the same class of error as an absolute threshold in the other
+    # direction -- a bound that means different things at different scales.
+    rows = [run for run in runs if run >= 3]
+    if rows:
+        # The modal run is the text line. Doubling it covers a word, since a
+        # window narrower than a word cuts the shared shirorekha into strokes.
+        modal = max(set(rows), key=rows.count)
+        window = modal * 2 | 1
+        return max(3, min(window, _odd_at_most(height)))
+    # No measurable ink. The window must still be valid for this image:
+    # adaptiveThreshold rejects an even blockSize, and one larger than the
+    # image, so it is clamped rather than scaled off the end.
+    return _odd_at_most(height)
+
+
+def _odd_at_most(limit: int) -> int:
+    """The largest odd integer not exceeding `limit`, and at least 3."""
+    return max(3, (limit if limit % 2 else limit - 1))
+
+
 def _render_region(page: fitz.Page, rect: fitz.Rect, dpi: int) -> Any:
     """Render an arbitrary page rectangle to a BGR array at `dpi`.
 
@@ -6305,7 +6357,8 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
             anubhag_name_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         adaptive = cv2.adaptiveThreshold(
             anubhag_name_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 31, 9)
+            cv2.THRESH_BINARY,
+            _adaptive_window_for(anubhag_name_gray), 9)
         name_reads = [
             anubhag_line(gray, psm)
             for gray in (anubhag_name_gray, otsu, adaptive)
@@ -6562,9 +6615,22 @@ def _page_prints_section_header(page: fitz.Page) -> bool:
     blank, but only one of them is a reading failure worth reviewing.
     """
     try:
-        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y0 + min(52.0, page.rect.height))
-        image = cv2.imdecode(np.frombuffer(page.get_pixmap(dpi=150, clip=clip, alpha=False).tobytes("png"), np.uint8), cv2.IMREAD_COLOR)
-        if image is None: return False
+        # The located band answers this exactly, and does so without knowing
+        # where the line sits.  The strip below is the fallback for a page whose
+        # label did not survive OCR band-by-band but is still legible in a
+        # whole-strip read.  It is proportional because the old absolute 52pt
+        # was 1.85% of the 2806pt S28-40 page -- ending above a section line
+        # that starts at 1.96% -- while covering 6.18% of the 842pt S24-53 one,
+        # so the probe answered False on a page that plainly prints the label.
+        if _find_anubhag_header_band(page) is not None:
+            return True
+        clip = fitz.Rect(
+            page.rect.x0, page.rect.y0, page.rect.x1,
+            page.rect.y0 + max(52.0, page.rect.height * 0.06),
+        )
+        image = _render_region(page, clip, 150)
+        if image is None:
+            return False
         text = pytesseract.image_to_string(
             Image.fromarray(image), lang="hin", config="--oem 3 --psm 6",
         )
@@ -6581,9 +6647,13 @@ def _supplement_list_title(page: fitz.Page) -> str:
     2, 3, …). That title is the value to show, rather than a blank section.
     """
     try:
+        # Proportional for the same reason as `_page_prints_section_header`:
+        # the old absolute 70pt was 2.5% of the 2806pt S28-40 page but 8.3% of
+        # the 842pt S24-53 one, so one value cannot cover a title printed at the
+        # same real-world position on both.
         clip = fitz.Rect(
             page.rect.x0, page.rect.y0, page.rect.x1,
-            page.rect.y0 + min(70.0, page.rect.height),
+            page.rect.y0 + max(70.0, page.rect.height * 0.09),
         )
         image = cv2.imdecode(
             np.frombuffer(
@@ -6624,8 +6694,16 @@ def _anubhag_digit_runs_via_paddle(page: fitz.Page) -> list[str]:
     if PaddleOCR is None:
         return runs
     try:
-        clip = fitz.Rect(page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y0 + min(52.0, page.rect.height))
-        image = cv2.imdecode(np.frombuffer(page.get_pixmap(dpi=1200, clip=clip, alpha=False).tobytes("png"), np.uint8), cv2.IMREAD_COLOR)
+        # Proportional: the old absolute 52pt ended above the section line on the
+        # 2806pt S28-40 page (1.85% of height, against a line starting at
+        # 1.96%), so this reader saw the part-number strip instead.  1200 DPI is
+        # kept -- the leading section digit is a fraction of the line and needs
+        # the resolution -- but the strip now scales with the page.
+        clip = fitz.Rect(
+            page.rect.x0, page.rect.y0, page.rect.x1,
+            page.rect.y0 + max(52.0, page.rect.height * 0.05),
+        )
+        image = _render_region(page, clip, 1200)
         if image is None: return runs
         h = image.shape[0]
         for y0, y1 in ((.28, .52), (.00, 1.00)):

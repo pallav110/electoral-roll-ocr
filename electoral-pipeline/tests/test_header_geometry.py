@@ -280,3 +280,47 @@ def test_locator_returns_none_when_no_band_is_labelled(monkeypatch, tmp_path):
 def test_default_query_is_the_printed_devanagari_label():
     """Guard the constant the stubbed tests bypass."""
     assert A._ANUBHAG_BAND_LABEL == "अनुभाग"
+
+
+# ---------------------------------------------------------------- threshold
+
+def _text_rows(height: int, row_px: int, rows: int = 1) -> np.ndarray:
+    """A blank image carrying `rows` text rows of `row_px` each."""
+    gray = np.full((height, 200), 255, dtype=np.uint8)
+    for i in range(rows):
+        top = 10 + i * (row_px * 3)
+        gray[top:top + row_px, 20:180] = 30
+    return gray
+
+
+@pytest.mark.parametrize("row_px", [6, 12, 24, 48])
+def test_adaptive_window_tracks_the_text_height(row_px):
+    """The window must follow the measured line height, at any scale.
+
+    A fixed blockSize means "a little wider than one line" on exactly one crop.
+    Measured line heights on the two real rolls differ by more than 3x, so a
+    constant that suits one shatters the other -- and a window narrower than a
+    word cuts Devanagari's shared shirorekha into separate strokes.
+    """
+    window = A._adaptive_window_for(_text_rows(400, row_px))
+    assert window == pytest.approx(row_px * 2, abs=1), window
+    # OpenCV requires an odd, positive window no larger than the image.
+    assert window % 2 == 1 and 3 <= window <= 400
+
+
+def test_adaptive_window_grows_with_scale():
+    """The same printed line, rendered twice as large, must double the window."""
+    small = A._adaptive_window_for(_text_rows(400, 10))
+    large = A._adaptive_window_for(_text_rows(800, 20))
+    assert large == pytest.approx(small * 2, rel=0.1)
+
+
+def test_adaptive_window_on_blank_crop():
+    """No ink must still yield a usable odd window, never 0 or 1."""
+    blank = np.full((300, 200), 255, dtype=np.uint8)
+    window = A._adaptive_window_for(blank)
+    assert window >= 3 and window % 2 == 1
+
+
+def test_adaptive_window_on_tiny_crop():
+    assert A._adaptive_window_for(np.zeros((2, 2), dtype=np.uint8)) == 3
