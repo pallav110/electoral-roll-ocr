@@ -924,8 +924,19 @@ RELATION_REGION = (0.03, 0.22, 0.73, 0.47)
 # suffixes such as `इ-`. The label is a long Devanagari run, so this stops
 # short of where the row visually ends.
 HOUSE_REGION = (0.03, 0.45, 0.62, 0.59)
-# Age row.
-AGE_REGION = (0.03, 0.59, 0.55, 0.78)
+# Age row.  The top is 0.51 rather than 0.59 because the row sits higher on the
+# S28-40 Lansdown template: measured against the printed `आयु :` line, the old
+# 0.59 landed in blank white BELOW the digits on that roll, so the crop held no
+# age at all and Paddle read two digits out of the noise (card 0 printed 41 and
+# returned 88).
+#
+# Both templates are covered by the new top: the printed row occupies roughly
+# 0.51-0.66 of card height on Lansdown and 0.59-0.76 on S24-53, so one window
+# contains either.  Widening a window is the safe direction -- it can include the
+# neighbouring house row, which the existing Devanagari house classifier already
+# filters out, whereas a window that starts too low simply misses the value.
+# The bottom stays at 0.78 so the house row above is not the main content.
+AGE_REGION = (0.03, 0.51, 0.55, 0.78)
 # The age line continues to the right with ``लिंग : <value>``.  This wider
 # read is only used when the main card parse did not find a gender.
 # Bottom extended to 0.82 to catch cards where the age row sits slightly lower.
@@ -3479,6 +3490,39 @@ def _read_age_block_digits(crop: Any) -> list[str]:
     return [digits for digits in re.findall(r"\d{2,3}", text) if AGE_MIN <= int(digits) <= AGE_MAX]
 
 
+def _age_paddle_crop(image: Any) -> Any:
+    """Narrow an age crop to the age value itself, dropping neighbouring rows.
+
+    AGE_REGION is wide enough to hold the age row on every template measured so
+    far, and that width is necessary -- a window that starts too low simply misses
+    the value, as it did on S28-40.  But a wide window also holds the house row
+    above it, and Paddle reads the window as one block of text:
+
+        card 1, printed 37 -> Paddle reads '337'   (house 7 welded onto 37)
+        card 3, printed 68 -> Paddle reads '368'   (house 6 welded onto 68)
+        card 4, printed 88 -> Paddle reads '33'    (88 not present at all)
+
+    Every one of those is out of the 18..120 range, so the age was dropped rather
+    than published -- a safe failure, but a lost value on every card.
+
+    `_age_value_span` already isolates the digits sitting between the आयु and लिंग
+    labels, which is exactly the age value and nothing else.  Reusing it here means
+    the Paddle path and the Hindi path agree on which pixels are the age, instead
+    of each cropping its own guess.
+
+    Returns the original crop unchanged when the labels cannot be located, so the
+    label guard still applies and a card with an unreadable label is not silently
+    reduced to nothing.
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return image
+    gray = image if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    span = _age_value_span(gray)
+    if span is None or getattr(span, "size", 0) == 0:
+        return image
+    return span if len(image.shape) == 2 else cv2.cvtColor(span, cv2.COLOR_GRAY2BGR)
+
+
 def _age_value_span(gray: Any) -> Any:
     """Crop the digits sitting between the age label and the gender label.
 
@@ -5340,6 +5384,88 @@ def _compute_confidence(
 # human more than any other value does, not less.
 
 AGE_MIN, AGE_MAX = 18, 120
+
+# A Paddle age read may only be trusted when the crop it came from actually
+# contains a printed age row.
+#
+# The age is the one field the arbitration above cannot check: `18 <= n <= 120`
+# is the whole test, and 88 passes it.  That is safe only while AGE_REGION
+# really covers the printed `आयु :` row -- which it does on the S24-53 template
+# it was calibrated on, and does not on the S28-40 Lansdown roll, where the row
+# sits higher and the crop lands in blank white below it.  Paddle then reads
+# noise out of empty pixels, the noise happens to be two digits, the digits are
+# in range, and the value overwrites whatever the Hindi reader found:
+#
+#   card 0, printed 'आयु : 41', returned '88'
+#     _extract_age_from_clean_card  -> ''   (correctly refused; the row is
+#                                           outside the region it reads)
+#     after the Paddle pass         -> '88' (fabricated from blank pixels)
+#
+# Measured on the two rolls, the age crop's ink coverage is ~2% of its area
+# when it holds the printed row, and 0.0% when it lands in blank space.  So the
+# crop is checked for ink before its digits are believed: a blank crop has
+# nothing to say about age, whatever a recogniser makes of it.
+#
+# The check is relative, not an absolute pixel count, so it means the same thing
+# on a 2806pt page and an 842pt one.
+AGE_CROP_MIN_INK_FRACTION = 0.004
+
+
+def _crop_has_ink(image: Any, min_fraction: float = AGE_CROP_MIN_INK_FRACTION) -> bool:
+    """True when a crop holds enough dark pixels to contain printed text.
+
+    Uses the crop's own area, so the same fraction means the same thing at any
+    render scale.  Ink that runs along all four edges is ignored first: a card
+    rule is ink but not content, and a 1px frame is ~0.7% of a 400x120 crop --
+    enough to clear the bar on its own and let a crop containing only a box
+    through.  A printed digit is never on the boundary, and the age crop does
+    legitimately abut the card's left border, so only a frame on all four sides
+    is discounted.
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return False
+    gray = image if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    dark = gray < 140
+    if dark.shape[0] > 4 and dark.shape[1] > 4:
+        edges = np.concatenate([dark[0, :], dark[-1, :],
+                                dark[:, 0], dark[:, -1]])
+        interior = dark[1:-1, 1:-1]
+        if edges.all() and not interior.any():
+            return False
+    return float(dark.mean()) >= min_fraction
+
+
+def _crop_shows_age_row(image: Any) -> bool:
+    """True when the crop actually contains a printed age row.
+
+    Ink alone is not enough, which measurement showed: after AGE_REGION was
+    widened to cover the S28-40 age row it also began covering the house row
+    above, and the crop's ink fraction rose to 7.8% -- passing the ink test --
+    while still containing no age.  Paddle then read the house row's digits and
+    one of them happened to be in 18..120, so the card took 88 for an age it
+    never printed.  Card 0 of that roll prints `आयु : 41` and returned 88.
+
+    So the crop has to carry the LABEL, not merely marks.  The label is what
+    distinguishes the age row from every other row of the card, and it is
+    printed on every roll, so this is the one test that survives a template whose
+    rows sit at different heights.
+    """
+    if not _crop_has_ink(image):
+        return False
+    gray = image if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Scale to a readable height rather than reading the raw crop, so this works
+    # on a card that is already small and one that is not.
+    scale = max(1, -(-TESSERACT_MIN_HEIGHT_PX // max(1, gray.shape[0])))
+    if scale > 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale,
+                          interpolation=cv2.INTER_CUBIC)
+    try:
+        text = pytesseract.image_to_string(
+            Image.fromarray(gray), lang="hin", config="--oem 3 --psm 6")
+    except Exception as exc:
+        log.debug("Age-label probe failed: %s", exc)
+        return False
+    return bool(AGE_LABEL_RE.search(" ".join(text.split())))
 
 # House values that are Devanagari by design rather than by OCR failure.
 #
@@ -7515,6 +7641,16 @@ def _extract_pdf_ocr_unlocked(
                 field_confidences = {}
                 try:
                     crops_info = []  # (field, scaled_img)
+                    # The age crop as rendered, kept so its ink can be checked
+                    # before any digit read from it is believed.  See
+                    # AGE_CROP_MIN_INK_FRACTION.
+                    age_img = None
+                    # The age crop as read, narrowed to the age value, and the
+                    # WIDE crop it came from.  The label check runs against the
+                    # wide crop: the narrowed one has by definition had its
+                    # label cropped away, so asking it for the label would fail
+                    # on every card.
+                    age_img_wide = None
 
                     if ser_png:
                         nparr = np.frombuffer(ser_png, np.uint8)
@@ -7534,8 +7670,15 @@ def _extract_pdf_ocr_unlocked(
                         nparr = np.frombuffer(age_png_deferred, np.uint8)
                         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                         if img is not None:
-                            s = min(6, max(2, 80 // max(1, img.shape[0])))
-                            crops_info.append(("age", cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)))
+                            # Narrow to the age value before Paddle sees it, so a
+                            # house digit in the same window cannot be welded onto
+                            # the age ('337' for a printed 37).
+                            age_img_wide = img
+                            age_img = _age_paddle_crop(img)
+                            s = min(6, max(2, 80 // max(1, age_img.shape[0])))
+                            age_img = cv2.resize(age_img, None, fx=s, fy=s,
+                                                 interpolation=cv2.INTER_CUBIC)
+                            crops_info.append(("age", age_img))
 
                     rec["is_deleted"] = False
                     if crops_info:
@@ -7642,13 +7785,29 @@ def _extract_pdf_ocr_unlocked(
                                                 rec["_house_leading_1_prepended"] = True
 
                             elif field == "age" and field_texts and not _age_recovery_locked(rec):
-                                paddle_ages = []
-                                for pt in field_texts:
-                                    for digits in re.findall(r"\d{1,3}", pt):
-                                        if 18 <= int(digits) <= 120:
-                                            paddle_ages.append(digits)
-                                if paddle_ages:
-                                    rec["age"] = max(paddle_ages, key=lambda x: (len(x), int(x)))
+                                # Only believe digits from a crop that actually
+                                # contains printed text.  See
+                                # AGE_CROP_MIN_INK_FRACTION: on a template
+                                # whose age row sits higher than AGE_REGION,
+                                # the crop is blank, and a recogniser will
+                                # still return two plausible digits from the
+                                # noise -- which then overwrote a correct or
+                                # correctly-empty age (S28-40 card 0: printed
+                                # 41, returned 88).
+                                if not _crop_shows_age_row(age_img_wide):
+                                    log.debug(
+                                        "Paddle age ignored: crop shows no "
+                                        "printed age row (page=%s index=%s)",
+                                        page_number, index,
+                                    )
+                                else:
+                                    paddle_ages = []
+                                    for pt in field_texts:
+                                        for digits in re.findall(r"\d{1,3}", pt):
+                                            if 18 <= int(digits) <= 120:
+                                                paddle_ages.append(digits)
+                                    if paddle_ages:
+                                        rec["age"] = max(paddle_ages, key=lambda x: (len(x), int(x)))
                     else:
                         rec["is_deleted"] = False
 
