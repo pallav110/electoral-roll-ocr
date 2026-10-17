@@ -133,6 +133,9 @@ services:
       # The remote made this configurable and read-only. Read-only is right for
       # the OCR service: it only ever reads the scanned roll, never writes.
       - ${PDF_SOURCE_PATH:-./sample-pdfs}:/data/pdfs:ro
+      # Restored 2026-10-17: the 161-roll Lansdown corpus. Lives in a named
+      # volume (not the container layer) so recreating ocr cannot wipe it.
+      - lansdown-corpus:/corpus:ro
       - ocr-results:/home/spxlpt133/Desktop/OCR/results
     # No GPU request here, on purpose. Both ways of asking Compose for an
     # NVIDIA device -- `gpus: all` and a deploy.resources reservation -- are
@@ -468,6 +471,8 @@ services:
 volumes:
   pgdata:
   redisdata:
+  lansdown-corpus:
+    external: true
   ocr-results:
   ocr-paddle-cache:
   ocr-text-results:
