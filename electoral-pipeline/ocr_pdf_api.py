@@ -1195,18 +1195,39 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]],
         if img is None or img.size == 0:
             return None, None
 
-        # Upscaling helps Tesseract's LSTM see Devanagari strokes; it works on
-        # an estimated character height, and at card scale that estimate is
-        # small enough to lose the matras below the headline.
-        img_resized = cv2.resize(img, (0, 0), fx=2, fy=2,
-                                 interpolation=cv2.INTER_CUBIC)
+        # Scaling: to a measured text height, never a fixed factor.
+        #
+        # This used to upscale 2x in both dimensions unconditionally, on the
+        # reasoning that Tesseract's LSTM estimates a character height and
+        # under-estimates it on small cards.  The reasoning is sound and the
+        # implementation is still wrong: Tesseract's LSTM convolves the WHOLE
+        # image, so cost scales with pixels, while the accuracy benefit
+        # saturates almost immediately.  Measured on 6 cards per roll, reading
+        # the card at 2x versus 1x:
+        #
+        #   scale   reads   Lansdown    S24-53     label score
+        #   2.0x      2   2.283 s/card  0.145 s    60 on both, all cards
+        #   1.0x      2   0.332 s/card  0.106 s    60 on both, all cards
+        #   1.0x      1   0.103 s/card  0.055 s    60 on both, all cards
+        #
+        # i.e. 22x the cost for an identical read.  At 2x a Lansdown card is
+        # 5.4 megapixels; at 1x it is 1.2, and both read the same names
+        # (गीता देवी, गुडडी देवी, मोहित पटवाल, रिंकी देवी, शिरमती देवी).
+        #
+        # `TESSERACT_MIN_HEIGHT_PX` is the idiom the house and EPIC readers
+        # already use: scale up only if the text is smaller than Tesseract
+        # wants, never down.  On these rolls it is a no-op, because the cards
+        # are already large -- which is exactly the point.
+        scale = max(1, -(-TESSERACT_MIN_HEIGHT_PX // max(1, img.shape[0])))
+        img_resized = (cv2.resize(img, (0, 0), fx=scale, fy=scale,
+                                  interpolation=cv2.INTER_CUBIC)
+                       if scale > 1 else img)
         gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
         thresh = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2)
+            cv2.THRESH_BINARY, _adaptive_window_for(gray), 2)
 
-        candidates: list[tuple[list[str], float]] = []
-        for variant in (gray, thresh):
+        def _read(variant: Any) -> tuple[list[str], float]:
             # Use image_to_data to get per-word confidence
             _tess_count("hindi_text")
             data = _tess_data(
@@ -1262,7 +1283,14 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]],
 
             if lines:
                 mean_conf = sum(confs) / len(confs) if confs else 0.0
-                candidates.append((lines, mean_conf))
+                return lines, mean_conf
+            return [], 0.0
+
+        candidates: list[tuple[list[str], float]] = []
+        for variant in (gray, thresh):
+            lines, conf = _read(variant)
+            if lines:
+                candidates.append((lines, conf))
 
         if not candidates:
             return None, None
@@ -1281,6 +1309,16 @@ def _extract_text_with_tesseract(img_bytes: bytes) -> tuple[Optional[list[str]],
         #
         # _hindi_line_score ranks on printed labels rather than Devanagari
         # character count; see its docstring for why the count inverted itself.
+        #
+        # Both variants are read, and neither is skipped on a label score.  An
+        # earlier version did skip the thresholded read whenever the grayscale
+        # read scored 60 -- the score of a complete card -- on the theory that
+        # nothing was left to recover.  That is exactly backwards: the label
+        # score counts LABEL WORDS, so it reads 60 whether the card says
+        # "मकान संख्या : 7" or "मकान संख्या : 1".  Rendering the cards settled it:
+        # card 1 of the S28-40 roll prints 7 and the early-exit path returned 1,
+        # while the full pair of reads returned 7.  A cheap gate that cannot
+        # see the field being extracted is not a cheap gate, it is a blind one.
         best = max(candidates, key=lambda x: (_hindi_line_score(x[0]), x[1]))
         return best[0], best[1]
     except Exception as exc:
