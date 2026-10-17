@@ -959,17 +959,28 @@ THIRD_GENDER_RE = re.compile(r"त(?:[ृु]|्र)्?[ँं]*[ीिे]?[�
 # down by this factor to index into the original crop.
 AGE_SPAN_UPSCALE = 3
 # Padding around the label box, and the narrowest span still worth reading.
-AGE_SPAN_PAD_PX = 2
+AGE_SPAN_PAD_PX = 6
 AGE_MIN_SPAN_PX = 4
 # The value crop is tiny, so upscale it hard and give Tesseract a margin.
 AGE_DIGIT_UPSCALE = 4
 AGE_DIGIT_BORDER_PX = 20
-# psm 7 (single line) is the only reliable pass for the tight digit span.
-# psm 8 and psm 13 produce hallucinated values (notably a spike at 21) when
-# the crop is ambiguous, so they are excluded.  If psm 7 on the span fails,
-# the caller falls back to the full age/gender band, also with psm 7.
+# psm 7 (single line) is the first pass for the tight digit span. When it
+# returns nothing, psm 8 (single word) and psm 13 (raw line) are tried on the
+# SPAN ONLY -- never on a wider crop. Measured on Lansdown roll 107 card 0
+# (prints 41): psm 7 reads '', psm 8 and 13 both read '41', and all three read
+# '' on an all-white crop, so there is no blank-crop hallucination. The ban on
+# 8/13 stands for every crop that can contain neighbouring rows; the span is
+# label-bounded on both sides, so it cannot.
+# If psm 7 on the span fails, the caller falls back to the full age/gender
+# band, also with psm 7.
 AGE_DIGIT_CONFIGS = (
     "--oem 3 --psm 7 -l eng -c tessedit_char_whitelist=0123456789",
+)
+# Span-only second chances: single-word and raw-line modes. Gated to the
+# label-bounded span by allow_single_word_mode, for the reason above.
+AGE_DIGIT_SINGLE_WORD_CONFIGS = (
+    "--oem 3 --psm 8 -l eng -c tessedit_char_whitelist=0123456789",
+    "--oem 3 --psm 13 -l eng -c tessedit_char_whitelist=0123456789",
 )
 # Re-reads of the age/gender band, in the order they earn their place. The
 # order is measured, not guessed: adaptive thresholding recovers gender values
@@ -2179,13 +2190,22 @@ def _same_number_two_reads(paddle_run: str, text_run: str) -> bool:
     equal length instead get one differing position, a digit misread as its
     neighbour, and no differences at all — identical is aligned, because one
     run can be a recovery while the next was read correctly, and a strict
-    test there would veto the recovery.
+    test there would veto the recovery. A run of one digit is held to exact
+    equality: with no other position to carry the error, a differing digit
+    is simply a different number.
     """
     if not paddle_run or not text_run:
         return False
     short, long_ = sorted((paddle_run, text_run), key=len)
     gap = len(long_) - len(short)
     if gap == 0:
+        # A single-digit run has no positions to spare: '1' and '7' are two
+        # different house numbers, not one digit misread as its neighbour.
+        # The one-misread tolerance below is for multi-digit runs only,
+        # where one wrong position still leaves the number identifiable
+        # (107 card 1: junk '1' against printed '7').
+        if len(paddle_run) == 1:
+            return paddle_run == text_run
         return sum(1 for a, b in zip(paddle_run, text_run) if a != b) <= 1
     if gap > _MAX_DIGITS_DROPPED:
         return False
@@ -3342,6 +3362,15 @@ def parse_voter_box_from_ocr_lines(
         # House number. The following unlabelled line is the rest of the
         # address when it wraps, not a new field.
         if re.search(r"मकान\s*संख्या", line):
+            # A printed number is one script, and the digit glyphs on these
+            # rolls are Latin. A Devanagari digit sitting directly after a
+            # Latin digit is the Hindi model bleeding a neighbouring digit
+            # box ('9०' from printed '9', 107 card 5 — the serial box is
+            # full of '००४००'-style Devanagari digits), and clean_value
+            # would silently translate the glue to a wrong '90'. Only that
+            # shape is touched: a fully Devanagari run may be a legitimate
+            # transliterated print, and a fully Latin run is already clean.
+            line = re.sub(r"(?<=[0-9])[०-९]+", "", line)
             parts = [after_colon(line)]
             while index < len(expanded):
                 extra = _house_continuation(expanded[index].strip())
@@ -3410,7 +3439,10 @@ def _extract_age_from_clean_card(card_img: Any) -> str:
                 continue
             # PSM 6 recovers thin trailing digits only in the label-bounded
             # age span; using it on the whole band could select an address.
-            value = _read_age_digits(crop, allow_block_mode=(attempt == 0))
+            # PSM 8/13 likewise only on the span (attempt 0); the full band
+            # (attempt 1) keeps PSM 7 alone.
+            value = _read_age_digits(crop, allow_block_mode=(attempt == 0),
+                                     allow_single_word_mode=(attempt == 0))
             if value:
                 log.debug("Focused age read (attempt %d): %s", attempt + 1, value)
                 return value
@@ -3554,15 +3586,26 @@ def _age_value_span(gray: Any) -> Any:
     if label is None:
         return None
     scale = AGE_SPAN_UPSCALE
-    left, top = label[2] // scale, max(0, label[1] // scale - AGE_SPAN_PAD_PX)
+    # Span sits between the two LABELS, but vertically it must cover the DIGITS:
+    # the label boxes hug the word baseline while digits extend above/below, so
+    # the span is the union of both label boxes plus padding, never the label
+    # box alone (a 2px pad clipped 41's ascenders and the read came back empty).
+    top = label[1] // scale
+    bottom = label[3] // scale
+    if gender is not None:
+        top = min(top, gender[1] // scale)
+        bottom = max(bottom, gender[3] // scale)
+    top = max(0, top - AGE_SPAN_PAD_PX)
+    bottom = min(gray.shape[0], bottom + AGE_SPAN_PAD_PX)
+    left = label[2] // scale
     right = (gender[0] // scale if gender else gray.shape[1])
-    bottom = min(gray.shape[0], label[3] // scale + AGE_SPAN_PAD_PX)
     if right - left < AGE_MIN_SPAN_PX:
         return None
     return gray[top:bottom, left:right]
 
 
-def _read_age_digits(crop: Any, *, allow_block_mode: bool = False) -> str:
+def _read_age_digits(crop: Any, *, allow_block_mode: bool = False,
+                     allow_single_word_mode: bool = False) -> str:
     """Read one cropped age value. Returns "" unless 18..120 is read."""
     if crop is None or getattr(crop, "size", 0) == 0:
         return ""
@@ -3589,6 +3632,28 @@ def _read_age_digits(crop: Any, *, allow_block_mode: bool = False) -> str:
         for digits in re.findall(r"\d{1,3}", text):
             if AGE_MIN <= int(digits) <= AGE_MAX:
                 return digits
+    if allow_single_word_mode:
+        # Span only (see AGE_DIGIT_SINGLE_WORD_CONFIGS): the crop is bounded
+        # by the printed आयु/लिंग labels, so no neighbouring row can leak in.
+        # PSM 8 and PSM 13 must AGREE: either mode alone force-fits fragments
+        # (card 4's span ends mid-glyph and PSM 8 reads '433'), while a blank
+        # crop reads '' in both (measured) and a true value reads identically
+        # (card 0: both read '41'). Agreement is the gate the range check is
+        # not: '433' is already rejected as out of range, but a truncated span
+        # could complete to an in-range wrong value.
+        seen: list[str | None] = []
+        for config in AGE_DIGIT_SINGLE_WORD_CONFIGS:
+            try:
+                text = pytesseract.image_to_string(enlarged, config=config)
+            except Exception as exc:
+                log.debug("Age digit pass failed (%s): %s", config, exc)
+                seen.append(None)
+                continue
+            runs = [d for d in re.findall(r"\d{1,3}", text)
+                    if AGE_MIN <= int(d) <= AGE_MAX]
+            seen.append(runs[0] if runs else None)
+        if len(seen) == 2 and seen[0] is not None and seen[0] == seen[1]:
+            return seen[0]
     return ""
 
 
@@ -3597,16 +3662,55 @@ def _read_age_from_lower_band(band: Any) -> str:
 
     Some cards have an address continuation in the top of GENDER_AGE_REGION.
     Reading the whole band in PSM 6 can therefore select an address digit.
-    Restrict the block-mode fallback to its lower half, where the printed
+    Restrict the block-mode fallback to its lower portion, where the printed
     ``आयु : NN  लिंग : ...`` row sits, and retain the normal voter-age bounds.
+
+    The crop must never slice THROUGH the row. A cut inside the glyph band
+    keeps the shirorekha stubs while dropping the digit bodies, and PSM 6
+    block mode welds those stubs into phantom digits (Lansdown roll 107
+    card 0: a 45% cut read '88' from a band printing 'आयु : 41', while a
+    55% cut starting below the row honestly read ''). So the cut is placed
+    from the band's own ink: the longest ink run is the age text row; a
+    candidate cut landing inside it is pushed down past the row bottom,
+    where the crop holds no row ink and reads '' honestly.
     """
     if band is None or getattr(band, "size", 0) == 0:
         return ""
-    # Some cards place the age baseline slightly above the literal midpoint;
-    # 45% retains that baseline while still excluding the address continuation
-    # occupying the top of the band.
-    start = int(band.shape[0] * 0.45)
-    return _read_age_digits(band[start:, :], allow_block_mode=True)
+    h = band.shape[0]
+    start = int(h * 0.45)
+    gray = band if band.ndim == 2 else cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+    dark = (gray < 150).sum(axis=1)
+    ink = [i for i, v in enumerate(dark) if v > gray.shape[1] * 0.01]
+    if ink:
+        runs, cur = [], [ink[0]]
+        for i in ink[1:]:
+            if i - cur[-1] > 3:
+                runs.append(cur)
+                cur = [i]
+            else:
+                cur.append(i)
+        runs.append(cur)
+        longest = max(runs, key=len)
+        # Candidate cut inside the glyph band: skip past the row bottom so
+        # the crop never holds row fragments.
+        if longest[0] < start < longest[-1]:
+            start = longest[-1] + 1
+    crop = band[start:, :]
+    if crop.size == 0:
+        return ""
+    # The crop must hold a real glyph row before block mode may read it.
+    # PSM 6 reads digits out of pure noise (card 4's below-row crop: zero
+    # connected components, yet '64'), so require at least two tall
+    # connected components -- the two digits of an age -- or return ''.
+    gray_crop = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray_crop, 150, 255, cv2.THRESH_BINARY_INV)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    tall = sum(1 for st in stats[1:]
+               if int(st[cv2.CC_STAT_HEIGHT]) >= max(4, gray_crop.shape[0] * 0.30)
+               and int(st[cv2.CC_STAT_AREA]) >= 8)
+    if tall < 2:
+        return ""
+    return _read_age_digits(crop, allow_block_mode=True)
 
 
 def _GENDER_BAND_VARIANTS(gray: Any):
@@ -4615,7 +4719,8 @@ def _tight_age_consensus(card_img: Any) -> str:
         span, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8,
     )
     reads = [
-        _read_age_digits(candidate, allow_block_mode=False)
+        _read_age_digits(candidate, allow_block_mode=False,
+                         allow_single_word_mode=True)
         for candidate in (span, otsu, adaptive)
     ]
     valid = [value for value in reads if _valid_stored_age(value)]
@@ -4637,7 +4742,8 @@ def _collect_age_reads(card_img: Any) -> list[str]:
     reads: list[str] = []
     span = _age_value_span(gray)
     if span is not None and getattr(span, "size", 0):
-        spanned = _read_age_digits(span, allow_block_mode=False)
+        spanned = _read_age_digits(span, allow_block_mode=False,
+                                   allow_single_word_mode=True)
         if spanned:
             reads.append(spanned)
     lower = _read_age_from_lower_band(band)
@@ -5064,6 +5170,18 @@ def _extract_card(
                 # Strip leading Devanagari label that leaked in
                 cleaned = re.sub(r"^[^A-Za-z0-9]+", "", combined).strip()
                 has_devanagari = bool(re.search(r"[ऀ-ॿ]", parser_house))
+                # A focused digit reader that disagrees with the value the
+                # Hindi parser already read is untrusted: on Lansdown roll
+                # 107 card 1 the parser read '7' (correct, matches the pixels)
+                # while the HOUSE_VAL digit pass read '1' from junk
+                # ('रा ड जि बन शक 3 लक्ष्य 5' read as digits). A lone digit
+                # with no corroborating read never overrides an existing
+                # value; only a longer run, or one seen twice, may.
+                cur_digits = re.sub(r"\D", "", parser_house or "")
+                if (e_digit and cur_digits and e_digit != cur_digits
+                        and not _same_number_two_reads(e_digit, cur_digits)
+                        and len(e_digit) <= len(cur_digits)):
+                    e_digit = None
                 # paddle_house or e_digit (from raw pass) is primary for pure digits
                 best_numeric = paddle_house or (e_digit if e_digit and not has_devanagari else None)
                 if best_numeric and not has_devanagari:
@@ -7761,7 +7879,28 @@ def _extract_pdf_ocr_unlocked(
                                     cur = rec.get("house_no", "")
                                     has_deva = re.search(r"[ऀ-ॿ]", cur)
                                     if not has_deva:
-                                        rec["house_no"] = paddle_house
+                                        # The stacked band crop drags in
+                                        # neighbouring junk, so a bare digit
+                                        # run from it is weak evidence: it
+                                        # read '1' from the photo-box text on
+                                        # 107 card 1 (printed '7') and '5' on
+                                        # card 5 (printed '9'). Keep the value
+                                        # already decided unless the stacked
+                                        # read matches it, is longer, or is
+                                        # plausibly the same number.
+                                        cur_digits = re.sub(r"\D", "", cur)
+                                        if (not cur_digits
+                                                or paddle_house == cur_digits
+                                                or len(paddle_house) > len(cur_digits)
+                                                or _same_number_two_reads(
+                                                    paddle_house, cur_digits)):
+                                            rec["house_no"] = paddle_house
+                                        else:
+                                            log.debug(
+                                                "stacked house read %r rejected: "
+                                                "contradicts decided %r",
+                                                paddle_house, cur,
+                                            )
                                     elif has_deva:
                                         # Digit runs stashed by the card thread
                                         # from Tesseract's wider house-band read.
