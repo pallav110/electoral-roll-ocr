@@ -19,10 +19,14 @@ CASES = (
     ("S28-40 Lansdown", "/data/roll107.pdf",
      {"ac_code": "40", "booth_code": "107", "anubhag_code": "1",
       "anubhag_name": "कोचियार"}),
-    # S24-53's own printed section number is 4, read verbatim from its header
-    # band: 'अनुभाग संख्या और नाम : 4-उत्तरांचल कालोनी गली न0 8 से 9'.
+    # S24-53's section number is 1, confirmed by the user.  Its header READS as
+    # 'अनुभाग संख्या और नाम : 4-उत्तरांचल कालोनी गली न0 8 से 9' because
+    # Tesseract's Hindi model renders a printed 1 as 4 on this roll -- the
+    # confusion this module documents.  The English-only reader of the same band
+    # returns 1 at all 12 resolution/psm variants tried, and Paddle returns ['1',
+    # '53', '1'] on the same pixels.
     ("S24-53 works", "/data/roll_s24_300.pdf",
-     {"ac_code": "53", "booth_code": "300", "anubhag_code": "4",
+     {"ac_code": "53", "booth_code": "300", "anubhag_code": "1",
       "anubhag_name": "उत्तरांचल कालोनी गली न0 8 से 9"}),
 )
 
