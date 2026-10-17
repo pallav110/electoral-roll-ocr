@@ -282,6 +282,66 @@ def test_default_query_is_the_printed_devanagari_label():
     assert A._ANUBHAG_BAND_LABEL == "अनुभाग"
 
 
+# ------------------------------------------------- digits are not read by Hindi
+
+def test_section_code_is_never_taken_from_a_hindi_read():
+    """The Hindi model misreads a printed `1` as `4`, so digits need English.
+
+    An earlier version of the locator parsed the code out of the same Hindi read
+    it used to find the band, and that reintroduced S24-53's section `1` as `4` --
+    a regression, because the field had read `1` before.  The module documents
+    the confusion twice: "Tesseract's Hindi model reads the printed numeral 1 as
+    4 on this roll", and "Numeric metadata therefore comes exclusively from the
+    isolated, English-only high-resolution glyph reader".
+
+    The Hindi read is the correct tool for finding the band and the wrong tool
+    for a number in it, and nothing here may put the number back on that path.
+    """
+    import inspect
+
+    source = inspect.getsource(A._extract_roll_header_metadata)
+    # The located band must reach the code parser only through the English
+    # reader.  A direct Hindi parse of the band's text is the regression.
+    assert "_anubhag_code_from_header_text(_split_anubhag_label(band_text))" \
+        not in source, "section code parsed from a Hindi read again"
+    assert "_anubhag_code_from_english_band(page, band_rect)" in source
+
+    fallback = inspect.getsource(A._extract_anubhag_code_from_header_fallback)
+    assert "_split_anubhag_label(band_text)" not in fallback, \
+        "anubhag fallback parses a code from a Hindi read again"
+
+
+def test_english_band_reader_is_english_only():
+    """Guard the reader that owns digits: no Hindi model in its call."""
+    import inspect
+
+    source = inspect.getsource(A._anubhag_code_from_english_band)
+    assert 'lang="eng"' in source
+    assert "lang=\"hin\"" not in source
+    # It must whitelist digits, or the Devanagari label becomes a candidate.
+    assert "tessedit_char_whitelist=0123456789" in source
+
+
+def test_english_band_reader_returns_blank_on_an_empty_page():
+    """A failed read must be blank, never a guessed digit.
+
+    A blank code is recoverable by the repeated-header and cover-arbitration
+    paths.  A wrong one is copied into every record in the roll.
+    """
+    blank = np.full((80, 400), 255, dtype=np.uint8)
+
+    class _FakePage:
+        rect = type("R", (), {"x0": 0.0, "y0": 0.0, "x1": 400.0,
+                              "y1": 80.0, "height": 80.0, "width": 400.0})()
+
+        def get_pixmap(self, dpi=None, clip=None, alpha=False):
+            raise RuntimeError("no render")
+
+    import fitz
+    assert A._anubhag_code_from_english_band(
+        _FakePage(), fitz.Rect(0, 0, 400, 80)) == ""
+
+
 # ---------------------------------------------------------------- threshold
 
 def _text_rows(height: int, row_px: int, rows: int = 1) -> np.ndarray:

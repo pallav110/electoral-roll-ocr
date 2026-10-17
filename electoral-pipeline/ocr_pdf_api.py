@@ -5879,6 +5879,11 @@ _ANUBHAG_SCAN_TOP_FRACTION = 0.08
 # locator asks of each candidate band.
 _ANUBHAG_BAND_LABEL = "अनुभाग"
 
+# Resolutions at which the located band is read for its section digit, English
+# model only.  Any one of them returns the correct digit on both measured rolls;
+# the list is a fallback chain for a scan that defeats one resolution.
+_ANUBHAG_CODE_READ_DPI = (300, 600, 1200)
+
 
 def _header_ink_bands(gray: np.ndarray) -> list[tuple[int, int]]:
     """Group the rows of a rendered strip that carry ink into text bands.
@@ -6156,6 +6161,55 @@ def _select_anubhag_name(*reads: str) -> tuple[str, str]:
         "", "anubhag_name_conflicting_header_reads")
 
 
+def _anubhag_code_from_english_band(
+    page: fitz.Page, rect: fitz.Rect,
+) -> str:
+    """Read the section number from a located band with the ENGLISH model only.
+
+    The Hindi model is what finds the band -- it recognises the printed
+    ``अनुभाग ... नाम`` label -- and it must not be trusted with the digit that
+    follows.  It reads a printed ``1`` as ``4`` on S24-53, which is why every
+    other numeric header field in this module routes through an English-only
+    reader, and why `_split_anubhag_label`'s output is only ever handed to
+    `_anubhag_code_from_header_text` after an English read.
+
+    The whole band is read, not a crop of the digit: the digit's position inside
+    the band differs between templates (it follows an abbreviated label on one
+    roll and a colon on another), and two earlier attempts to locate it by
+    geometry -- a fixed left fraction, then a dash found by shape -- both
+    captured glyph parts of the Devanagari label instead.  Measured on the
+    located band, the leading digit reads correctly at every resolution and
+    page-segmentation mode tried, so there is nothing to gain from cropping.
+
+    Returns "" when no read is convincing.  A blank code is recoverable by the
+    repeated-header and cover-arbitration paths; a wrong one is copied into
+    every record in the roll.
+    """
+    try:
+        for dpi in _ANUBHAG_CODE_READ_DPI:
+            image = _render_region(page, rect, dpi)
+            if image is None or image.size == 0:
+                continue
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            otsu = cv2.threshold(gray, 0, 255,
+                                 cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            for variant in (gray, otsu):
+                for psm in (6, 7):
+                    text = pytesseract.image_to_string(
+                        Image.fromarray(variant), lang="eng",
+                        config=(f"--oem 3 --psm {psm} "
+                                "-c tessedit_char_whitelist=0123456789-[]|!"),
+                    )
+                    code = _anubhag_code_from_header_text(
+                        " ".join(text.split()))
+                    if code:
+                        return code
+        return ""
+    except Exception as exc:
+        log.warning("English anubhag band read failed: %s", exc)
+        return ""
+
+
 def _adaptive_window_for(gray: np.ndarray) -> int:
     """An adaptive-threshold window sized to the text in `gray`, not fixed.
 
@@ -6305,8 +6359,22 @@ def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
         located = _find_anubhag_header_band(page)
         if located is not None:
             band_rect, band_text = located
-            anubhag_code = _anubhag_code_from_header_text(
-                _split_anubhag_label(band_text))
+            # The LABEL is read with Hindi, and only the LABEL.  The digit must
+            # come from a different reader: this module already documents that
+            # "Tesseract's Hindi model reads the printed numeral 1 as 4 on this
+            # roll", and the header reader is required to be
+            # English-only for exactly that reason.
+            #
+            # Parsing the code out of the Hindi read introduced by an earlier
+            # version of this locator put S24-53's section 1 back as 4.  It was
+            # not a pre-existing bug -- the field read 1 before, and the
+            # regression was introduced by routing a digit through the model
+            # that is known to misread it.  Measured, the English-only read of
+            # the located band returns the leading digit correctly on both
+            # rolls at all 12 variants tried (2 x {300, 600, 1200}dpi x
+            # {gray, Otsu} x {psm 6, psm 7}) while the Hindi read returns 4 on
+            # S24-53 at every one of them.
+            anubhag_code = _anubhag_code_from_english_band(page, band_rect)
             anubhag_region = _render_region(page, band_rect, 300)
             anubhag_name_region = _render_region(page, band_rect, 300)
         else:
@@ -6765,14 +6833,13 @@ def _extract_anubhag_code_from_header_fallback(
     # cannot prove a code, return blank rather than borrowing an unlabelled
     # number from the rest of the header.
     try:
-        # Prefer the located band, at a moderate render.  1200 DPI is retained
-        # only for the narrow glyph crop below, where the leading digit is a
-        # fraction of the line and needs the resolution.
+        # Prefer the located band, read for its digit by the ENGLISH model.
+        # The Hindi read is used to FIND the band, never to source a number from
+        # it: see `_anubhag_code_from_english_band`.  Taking the code from the
+        # Hindi read here returned S24-53's section 1 as 4.
         located = _find_anubhag_header_band(page)
         if located is not None:
-            _rect, band_text = located
-            code = _anubhag_code_from_header_text(
-                _split_anubhag_label(band_text))
+            code = _anubhag_code_from_english_band(page, located[0])
             if code:
                 return code
 
