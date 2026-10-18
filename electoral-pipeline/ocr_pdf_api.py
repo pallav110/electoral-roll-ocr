@@ -6798,6 +6798,31 @@ def _render_region(page: fitz.Page, rect: fitz.Rect, dpi: int) -> Any:
     return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
 
 
+def _apply_cover_section_authority(
+    metadata: dict[str, Any], entries: dict[str, str]
+) -> dict[str, Any]:
+    """Apply the cover's section list without trusting a page-code hallucination.
+
+    A cover list is authoritative for the codes/names it prints. When it has
+    multiple entries, the repeated page header is resolved per page against that
+    list; copying the page's raw code into roll-wide metadata is unsafe because
+    HIN-100 prints cover section 1 while the page English reader returned 41.
+    """
+    result = dict(metadata)
+    result["anubhag_entries"] = dict(entries)
+    if len(entries) == 1:
+        code, name = next(iter(entries.items()))
+        result["anubhag_code"] = code
+        result["anubhag_name"] = name
+        result["anubhag_review_reason"] = ""
+        return result
+    result["anubhag_code"] = ""
+    result["anubhag_name"] = ""
+    result["anubhag_status"] = "per_page"
+    result["anubhag_review_reason"] = ""
+    return result
+
+
 def _extract_roll_header_metadata(page: fitz.Page) -> dict[str, str]:
     """Extract roll-wide codes (ac, anubhag, booth) and Hindi section name from page 3 header. Returns empty dict on failure."""
     empty = {
@@ -7764,16 +7789,9 @@ def _extract_pdf_ocr_unlocked(
             cover_anubhag_entries = _extract_anubhag_entries_from_cover(document[0])
             if cover_anubhag_entries:
                 roll_metadata["anubhag_entries"] = dict(cover_anubhag_entries)
-                if len(cover_anubhag_entries) == 1:
-                    cover_code, cover_name = next(iter(cover_anubhag_entries.items()))
-                    roll_metadata["anubhag_code"] = cover_code
-                    roll_metadata["anubhag_name"] = cover_name
-                    roll_metadata["anubhag_review_reason"] = ""
-                else:
-                    roll_metadata["anubhag_code"] = ""
-                    roll_metadata["anubhag_name"] = ""
-                    roll_metadata["anubhag_status"] = "per_page"
-                    roll_metadata["anubhag_review_reason"] = ""
+                roll_metadata = _apply_cover_section_authority(
+                    roll_metadata, cover_anubhag_entries
+                )
             # A header read is document metadata, not a defect in every voter
             # card below it.  Make that distinction explicit for consumers of
             # the API/UI: a blank name with a known section code means the

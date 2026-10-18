@@ -35,7 +35,8 @@
 - [ ] Human review before authority switch
 
 - [ ] Task 7: Add field evidence records
-- [ ] Task 8: Harden age and house arbitration
+- [x] Task 8 targeted: Cover-authoritative anubhag arbitration (HIN-100)
+- [ ] Task 8: Harden remaining age and house arbitration
 - [ ] Task 9: Enable dynamic occupancy only for proven classes
 - [x] Task 10 foundation: Add measured render-scale diagnostic (no rollout)
 - [ ] Task 10: Normalize large card renders after A/B validation
