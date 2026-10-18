@@ -37,7 +37,7 @@ for future runs.
 
 ### Phase 1: Duplicate and occupancy foundations
 
-- [ ] **Task 1: Land exact duplicate discovery guard**
+- [x] **Task 1: Land exact duplicate discovery guard**
   - Acceptance: same bytes under different filenames create one canonical
     `Document`; the second path creates no session or extraction units and is
     logged as a duplicate.
@@ -48,7 +48,7 @@ for future runs.
   - Dependencies: None
   - Scope: Small
 
-- [ ] **Task 2: Add pure occupancy classifier**
+- [x] **Task 2: Add pure occupancy classifier**
   - Acceptance: classify synthetic full, sparse, blank, border-only, photo-only,
     noisy, and partial-tail card crops as `occupied`, `blank`, or `uncertain`;
     classification is scale-relative and never calls full OCR.
@@ -57,7 +57,7 @@ for future runs.
   - Dependencies: None
   - Scope: Medium
 
-- [ ] **Task 3: Add page occupancy shadow instrumentation**
+- [x] **Task 3: Add page occupancy shadow instrumentation**
   - Acceptance: every processed page logs page classification, predicted
     occupied-slot count, fixed-grid slot count, and disagreement count; current
     records and page skipping behavior remain unchanged.
@@ -76,7 +76,7 @@ for future runs.
 
 ### Phase 2: Dynamic geometry and sparse-page coverage
 
-- [ ] **Task 4: Implement shadow lattice inference**
+- [x] **Task 4: Implement shadow lattice inference**
   - Acceptance: infer row pitch and phase candidates from page ink/periodicity;
     compare against the fixed 3x10 lattice; never use inferred rectangles for
     production extraction yet.
@@ -86,7 +86,12 @@ for future runs.
   - Dependencies: Task 2
   - Scope: Medium
 
-- [ ] **Task 5: Add per-card shadow occupancy comparison**
+- [x] **Task 5: Add per-card shadow occupancy comparison**
+  - Verified on a real Lansdown sparse page: 14 predicted occupied slots,
+    16 confident blanks, 14 fixed-extractor records, zero record-presence
+    disagreements.
+  - Production blank-slot skipping remains conservative; unknown layouts still
+    use the fixed fallback.
   - Acceptance: compare dynamic occupied slots against records produced by the
     fixed extractor; report false blanks, false occupied slots, and page-level
     disagreements without changing output.
