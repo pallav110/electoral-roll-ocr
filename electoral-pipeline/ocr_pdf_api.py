@@ -5971,6 +5971,27 @@ def _review_record(record: dict[str, Any]) -> None:
         _mark_review(record, "house_leading_1_prepended: %r" % house_text)
 
 
+def _completeness_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize missing/evidence-backed fields without rewriting records."""
+    fields = (
+        "id_card_no", "voter_first_name", "relation_name", "house_no",
+        "age", "gender",
+    )
+    missing = {field: 0 for field in fields}
+    reviewed = 0
+    for record in records:
+        reviewed += int(bool(record.get("needs_review")))
+        for field in fields:
+            value = record.get(field)
+            if value is None or not str(value).strip():
+                missing[field] += 1
+    return {
+        "records": len(records),
+        "records_needing_review": reviewed,
+        "missing_fields": missing,
+    }
+
+
 def _public_record(
     record: dict[str, Any], counter: int, pdf_name: str,
     roll_metadata: dict[str, str],
@@ -8312,6 +8333,7 @@ def _extract_pdf_ocr_unlocked(
         "records_count": len(public_records),
         "records_needing_review": sum(record["needs_review"] for record in public_records),
         "review_reason_counts": dict(sorted(review_reason_counts.items())),
+        "completeness": _completeness_summary(public_records),
         "elapsed_seconds": round(elapsed, 2),
         "records": public_records,
         # Instrumentation only. Counts of Tesseract subprocess launches, which
