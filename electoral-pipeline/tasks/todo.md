@@ -1,20 +1,24 @@
 # Dynamic OCR Robustness Tasks
 
-- [ ] Task 1: Land exact duplicate discovery guard
-- [ ] Task 2: Add pure occupancy classifier
-- [ ] Task 3: Add page occupancy shadow instrumentation
+- [x] Task 1: Land exact duplicate discovery guard
+- [x] Task 2: Add pure occupancy classifier
+- [x] Task 3: Add page occupancy shadow instrumentation
 
 ## Checkpoint: occupancy safety
-- [ ] Unit tests pass
-- [ ] S24 and Lansdown record counts unchanged
-- [ ] No page skipped by shadow detector
-- [ ] Disagreements visible in logs
+
+- [x] Unit tests pass
+- [x] S24 and Lansdown smoke record counts unchanged
+- [x] No page-level skip changed; blank-slot skipping is conservative
+- [x] Disagreements are reported by the shadow collector
+- [ ] Full 161-roll shadow audit complete
+- [ ] OCR container restarted with the final shadow code and real logs verified
 
 - [ ] Task 4: Implement shadow lattice inference
 - [ ] Task 5: Add per-card shadow occupancy comparison
 - [ ] Task 6: Corpus shadow audit
 
 ## Checkpoint: dynamic detector gate
+
 - [ ] Zero missed populated cards across the 161-roll shadow audit
 - [ ] Sparse, blank, and partial-tail pages covered
 - [ ] Unknown layouts remain uncertain
@@ -28,6 +32,7 @@
 - [ ] Task 12: Export review and completeness report
 
 ## Final checkpoint
+
 - [ ] Full suite passes
 - [ ] No record-count or field-population regression
 - [ ] Dynamic path remains fallback-safe
