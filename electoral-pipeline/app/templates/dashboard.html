@@ -150,23 +150,25 @@
     </div>
     <div class="state-grid" aria-label="Document states">
       <div class="state-item"><div class="state-label">Finished</div><div class="state-value green">{{ completed }}</div><div class="state-detail">completed PDFs</div></div>
-      <div class="state-item"><div class="state-label">Processing</div><div class="state-value blue">{{ processing }}</div><div class="state-detail">active now</div></div>
+      <div class="state-item"><div class="state-label">Processing</div><div class="state-value blue">{{ processing }}</div><div class="state-detail">documents with live sessions</div></div>
       <div class="state-item"><div class="state-label">Waiting</div><div class="state-value">{{ waiting }}</div><div class="state-detail">queued work</div></div>
       <div class="state-item"><div class="state-label">Duplicates</div><div class="state-value amber">{{ duplicates }}</div><div class="state-detail">safely skipped</div></div>
       <div class="state-item"><div class="state-label">Failed</div><div class="state-value {% if failed %}red{% endif %}">{{ failed }}</div><div class="state-detail">needs attention</div></div>
     </div>
     <div class="forecast">
-      <div class="forecast-item"><div class="forecast-label">Measured processing speed</div><span class="forecast-value">{{ '%.1f'|format(throughput) }} PDFs/hour</span><span class="forecast-detail">{{ throughput_window_label }}</span></div>
-      <div class="forecast-item"><div class="forecast-label">Estimated time remaining</div><span class="forecast-value">{% if eta_hours is none %}Calculating{% elif eta_hours < 1 %}Under 1 hour{% elif eta_hours < 48 %}{{ eta_hours|round|int }} hours{% else %}{{ (eta_hours / 24)|round(1) }} days{% endif %}</span><span class="forecast-detail">{{ remaining }} PDFs left at current speed</span></div>
+      <div class="forecast-item"><div class="forecast-label">Observed document throughput</div><span class="forecast-value">{{ '%.1f'|format(throughput) }} PDFs/hour</span><span class="forecast-detail">{{ throughput_window_label }} · informational</span></div>
+      <div class="forecast-item"><div class="forecast-label">Estimated time remaining</div><span class="forecast-value">{% if eta_hours is none %}Calculating{% elif eta_hours < 1 %}Under 1 hour{% elif eta_hours < 48 %}{{ eta_hours|round|int }} hours{% else %}{{ (eta_hours / 24)|round(1) }} days{% endif %}</span><span class="forecast-detail">{{ pages_remaining }} pages left · based on unit seconds/page</span></div>
     </div>
   </section>
 
   <section class="metric-grid" aria-label="Processing metrics">
     <div class="dashboard-panel metric-card"><div class="metric-label">PDFs completed today</div><div class="metric-value">{{ processed }}</div><div class="metric-detail">Since midnight IST</div></div>
-    <div class="dashboard-panel metric-card"><div class="metric-label">Pages processed</div><div class="metric-value">{{ '{:,}'.format(pages_processed) }}</div><div class="metric-detail">Current document attempts</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Pages settled</div><div class="metric-value">{{ '{:,}'.format(pages_processed) }}</div><div class="metric-detail">Committed across current sessions</div></div>
     <div class="dashboard-panel metric-card"><div class="metric-label">Voter records saved</div><div class="metric-value">{{ '{:,}'.format(records_saved) }}</div><div class="metric-detail">Database total</div></div>
-    <div class="dashboard-panel metric-card"><div class="metric-label">Average PDF duration</div><div class="metric-value">{% if avg_pdf_seconds %}{{ duration_summary((avg_pdf_seconds * 1000)|int) }}{% else %}—{% endif %}</div><div class="metric-detail">Completed PDFs</div></div>
-    <div class="dashboard-panel metric-card"><div class="metric-label">Average seconds per page</div><div class="metric-value">{% if avg_seconds_per_page %}{{ '%.1f'|format(avg_seconds_per_page) }}s{% else %}—{% endif %}</div><div class="metric-detail">Measured completed units</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Avg document wall time</div><div class="metric-value">{% if avg_pdf_seconds %}{{ duration_summary((avg_pdf_seconds * 1000)|int) }}{% else %}—{% endif %}</div><div class="metric-detail">Start-to-finish completed PDFs</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Unit elapsed / page</div><div class="metric-value">{% if avg_seconds_per_page %}{{ '%.1f'|format(avg_seconds_per_page) }}s{% else %}—{% endif %}</div><div class="metric-detail">OCR unit time, not document wall time</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Pages left</div><div class="metric-value">{{ '{:,}'.format(pages_remaining) }}</div><div class="metric-detail">Pending, queued, processing, retry</div></div>
+    <div class="dashboard-panel metric-card"><div class="metric-label">Unit pages measured</div><div class="metric-value">{{ '{:,}'.format(unit_pages_measured) }}</div><div class="metric-detail">Completed units with timing</div></div>
     <div class="dashboard-panel metric-card"><div class="metric-label">Active sessions</div><div class="metric-value">{{ active }}</div><div class="metric-detail">Documents with live sessions</div></div>
     <div class="dashboard-panel metric-card"><div class="metric-label">Queue backlog</div><div class="metric-value">{{ waiting }}</div><div class="metric-detail">Waiting to start</div></div>
     <div class="dashboard-panel metric-card"><div class="metric-label">Retrying</div><div class="metric-value">{{ retrying }}</div><div class="metric-detail">Automatic recovery</div></div>

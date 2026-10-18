@@ -62,6 +62,54 @@ from app.presentation import (
 from app.workflow import (_resolve_scan_path, delete_documents, discover, discover_upload_batch,
                          dispatch_documents, retry_document, retry_unit,
                          select_documents_for_extraction)
+
+
+def _dashboard_timing_metrics(documents, units, *, total_pages, completed_pages,
+                              completed_documents, remaining_pages):
+    """Return dashboard timing from document wall time and unit elapsed time.
+
+    These are deliberately separate metrics. Unit spans can overlap across OCR
+    readers, so summing units is useful for capacity analysis but is not a PDF's
+    wall-clock duration. ETA is page-based because PDFs have very different page
+    counts; documents-based ETA turns a short roll and a 41-page roll into the
+    same unit of work.
+    """
+    completed_docs = [
+        d for d in documents
+        if getattr(d, "status", None) == "completed"
+        and getattr(d, "processing_started_at", None)
+        and getattr(d, "processing_completed_at", None)
+    ]
+    wall_seconds = [
+        max(0.0, (d.processing_completed_at - d.processing_started_at).total_seconds())
+        for d in completed_docs
+    ]
+    settled = [u for u in units if getattr(u, "status", None) == "completed"]
+    unit_seconds = 0.0
+    unit_pages = 0
+    for u in settled:
+        if not u.started_at or not u.completed_at:
+            continue
+        pages = max(0, int(u.page_to) - int(u.page_from) + 1)
+        if pages:
+            unit_pages += pages
+            unit_seconds += max(0.0, (u.completed_at - u.started_at).total_seconds())
+    seconds_per_page = unit_seconds / unit_pages if unit_pages else None
+    pages_remaining = max(0, int(remaining_pages or 0))
+    return {
+        "avg_document_wall_seconds": (
+            sum(wall_seconds) / len(wall_seconds) if wall_seconds else None
+        ),
+        "unit_seconds_per_page": seconds_per_page,
+        "unit_elapsed_seconds": unit_seconds,
+        "unit_pages_measured": unit_pages,
+        "pages_remaining": pages_remaining,
+        "eta_seconds": int(pages_remaining * seconds_per_page)
+        if seconds_per_page is not None else None,
+        "completed_pages": int(completed_pages or 0),
+        "total_pages": int(total_pages or 0),
+        "completed_documents": int(completed_documents or 0),
+    }
 from app.transliterate import gender_en
 from app.api_auth import issue_api_token, user_from_bearer
 from app.signoz_sso import SignozError, boot_url, login_tokens
@@ -587,40 +635,36 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     ).one()
     records_saved = db.scalar(select(func.count()).select_from(ElectoralRecord)) or 0
 
-    completed_units = db.execute(
-        select(
-            Document.id,
-            Document.status,
-            ExtractionUnit.page_from,
-            ExtractionUnit.page_to,
-            ExtractionUnit.started_at,
-            ExtractionUnit.completed_at,
-        )
-        .select_from(Document)
-        .join(ExtractionSession, ExtractionSession.id == Document.current_session_id)
-        .join(ExtractionUnit, ExtractionUnit.session_id == ExtractionSession.id)
-        .where(
-            ExtractionUnit.status == "completed",
-            ExtractionUnit.started_at.is_not(None),
-            ExtractionUnit.completed_at.is_not(None),
-        )
+    # Timing uses the current session for each document, but keeps two clocks
+    # separate: document wall time and unit elapsed time. Unit spans overlap
+    # across OCR readers, so summing them is not a PDF duration.
+    timing_documents = db.scalars(select(Document)).all()
+    timing_units = db.scalars(
+        select(ExtractionUnit)
+        .join(ExtractionSession, ExtractionSession.id == ExtractionUnit.session_id)
+        .join(Document, Document.current_session_id == ExtractionSession.id)
     ).all()
-    measured_pages = 0
-    measured_seconds = 0.0
-    completed_document_seconds = {}
-    for document_id, document_status, page_from, page_to, started_at, completed_at in completed_units:
-        pages = max(0, int(page_to) - int(page_from) + 1)
-        seconds = max(0.0, (completed_at - started_at).total_seconds())
-        if pages and seconds:
-            measured_pages += pages
-            measured_seconds += seconds
-            if document_status == "completed":
-                completed_document_seconds[document_id] = completed_document_seconds.get(document_id, 0.0) + seconds
-    avg_pdf_seconds = (
-        sum(completed_document_seconds.values()) / len(completed_document_seconds)
-        if completed_document_seconds else None
+    total_pages = sum(
+        max(0, int(u.page_to) - int(u.page_from) + 1) for u in timing_units
     )
-    avg_seconds_per_page = measured_seconds / measured_pages if measured_pages else None
+    settled_pages = sum(
+        max(0, int(u.page_to) - int(u.page_from) + 1)
+        for u in timing_units if u.status == "completed"
+    )
+    remaining_pages = sum(
+        max(0, int(u.page_to) - int(u.page_from) + 1)
+        for u in timing_units if u.status in ("pending", "queued", "processing", "retry")
+    )
+    timing_metrics = _dashboard_timing_metrics(
+        timing_documents,
+        timing_units,
+        total_pages=total_pages,
+        completed_pages=settled_pages,
+        completed_documents=completed,
+        remaining_pages=remaining_pages,
+    )
+    avg_pdf_seconds = timing_metrics["avg_document_wall_seconds"]
+    avg_seconds_per_page = timing_metrics["unit_seconds_per_page"]
 
     # Twelve completed-hour buckets keep the chart lightweight and keep its
     # labels aligned with the operator's IST day rather than UTC.
@@ -672,7 +716,10 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     else:
         throughput_window_label = "rolling 12-hour window"
     remaining = processing + waiting + retrying
-    eta_hours = remaining / throughput if throughput > 0 else None
+    page_seconds = timing_metrics["unit_seconds_per_page"]
+    pages_remaining = timing_metrics["pages_remaining"]
+    pages_per_hour = 3600 / page_seconds if page_seconds else 0.0
+    eta_hours = pages_remaining / pages_per_hour if pages_per_hour else None
     completion_percent = round(completed / total * 100, 1) if total else 0
 
     stale_before = now_utc - timedelta(seconds=config.DOCUMENT_STALE_SECONDS)
@@ -786,6 +833,10 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         records_saved=int(records_saved),
         avg_pdf_seconds=avg_pdf_seconds,
         avg_seconds_per_page=avg_seconds_per_page,
+        unit_elapsed_seconds=timing_metrics["unit_elapsed_seconds"],
+        unit_pages_measured=timing_metrics["unit_pages_measured"],
+        pages_remaining=pages_remaining,
+        pages_per_hour=pages_per_hour,
         throughput=throughput,
         throughput_window_label=throughput_window_label,
         eta_hours=eta_hours,
