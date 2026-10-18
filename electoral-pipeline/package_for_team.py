@@ -98,12 +98,23 @@ INCLUDE_SUFFIXES = (
 # being protected is the real one: an allowlist must name the exact files that
 # are source rather than shipping a whole directory of voter data. Deleting the
 # entries without deleting the test would have left a test that can never pass.
-INCLUDE_EXACT: tuple[str, ...] = ()
+# OCR/ held 23 copies of the roll, 35 files of verified ground-truth
+# records, and three genuine source documents, so the directory was excluded
+# with those three allowlisted by exact path.
+INCLUDE_EXACT: tuple[str, ...] = (
+    "OCR/CLAUDE.md",
+    "OCR/README.md",
+    "OCR/ocr_api_requirements.txt",
+)
 
 # Never ship these regardless of anything above. .env is handled correctly on
 # the other two distribution paths (untracked in git, excluded by
 # .dockerignore); this is the third path and it needs its own exclusion.
 NEVER_SHIP_NAMES = {".env", ".DS_Store", "Thumbs.db"}
+# Top-level scan directories carrying roll-derived census data (the OCR
+# service writes these during the Lansdown run); they belong in the DB and
+# must never ship in the source archive.
+EXCLUDE_DIRS = {"census"}
 NEVER_SHIP_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
 # A ZIP of source should be well under a megabyte of text. Anything approaching
@@ -118,6 +129,10 @@ def _excluded(path: Path, root: Path) -> str | None:
         return "secret"
     if any(part in NEVER_SHIP_PARTS for part in rel.parts):
         return "cache"
+    # Census roll scans (161 PDFs) are derived from the Lansdown corpus and
+    # belong in the DB, not in a shareable source archive.
+    if rel.parts[0] in EXCLUDE_DIRS:
+        return "census roll scans"
     # Compare on forward slashes so the allowlist is written the same way on
     # Windows and Linux; Path.parts differs between them.
     posix = rel.as_posix()
