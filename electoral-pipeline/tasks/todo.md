@@ -3,6 +3,8 @@
 - [x] Task 1: Land exact duplicate discovery guard
 - [x] Task 2: Add pure occupancy classifier
 - [x] Task 3: Add page occupancy shadow instrumentation
+- [x] Task 4: Implement shadow lattice inference
+- [x] Task 5: Add per-card shadow occupancy comparison
 
 ## Checkpoint: occupancy safety
 
@@ -35,8 +37,9 @@
 - [ ] Task 7: Add field evidence records
 - [ ] Task 8: Harden age and house arbitration
 - [ ] Task 9: Enable dynamic occupancy only for proven classes
-- [ ] Task 10: Normalize large card renders
-- [ ] Task 11: Reduce redundant Paddle calls
+- [x] Task 10 foundation: Add measured render-scale diagnostic (no rollout)
+- [ ] Task 10: Normalize large card renders after A/B validation
+- [ ] Task 11: Reduce redundant Paddle calls after field-level validation
 - [x] Task 12 foundation: Add completeness/review summary helpers and tests
 - [x] Task 12: Wire completeness/review summary into the Excel export route
 

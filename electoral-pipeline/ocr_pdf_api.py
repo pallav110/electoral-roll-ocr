@@ -1135,6 +1135,41 @@ CARD_OCCUPANCY_BLANK = "blank"
 CARD_OCCUPANCY_UNCERTAIN = "uncertain"
 
 
+def _card_render_scale_diagnostic(gray: Any, *, target_text_height: int = 45) -> dict[str, Any]:
+    """Measure card text height and report a safe render-scale recommendation.
+
+    Diagnostic only for now: it never changes a crop or OCR result. The scale
+    is never below 1, so a future rollout cannot silently throw away pixels
+    before field-level A/B validation proves that lower resolution is safe.
+    """
+    if gray is None or getattr(gray, "size", 0) == 0:
+        return {"status": "uncertain"}
+    if len(gray.shape) == 3:
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    dark = (gray < 170).sum(axis=1)
+    rows = np.where(dark > 2)[0]
+    if not len(rows):
+        return {"status": "uncertain"}
+    runs = []
+    start = previous = int(rows[0])
+    for row in rows[1:]:
+        row = int(row)
+        if row - previous > max(3, gray.shape[0] // 100):
+            runs.append(previous - start + 1)
+            start = row
+        previous = row
+    runs.append(previous - start + 1)
+    meaningful = [run for run in runs if run >= 3]
+    if not meaningful:
+        return {"status": "uncertain"}
+    text_height = int(np.median(meaningful))
+    return {
+        "status": "ok",
+        "text_height_px": text_height,
+        "recommended_scale": max(1, int(np.ceil(target_text_height / text_height))),
+    }
+
+
 def _infer_lattice_shadow(gray: Any) -> dict[str, Any]:
     """Infer periodic row spacing for shadow comparison only.
 
