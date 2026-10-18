@@ -88,6 +88,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ocr
+    image: electoral-pipeline-ocr:latest
     restart: unless-stopped
     ports: ["127.0.0.1:8082:8082"]
     environment:
@@ -133,9 +134,6 @@ services:
       # The remote made this configurable and read-only. Read-only is right for
       # the OCR service: it only ever reads the scanned roll, never writes.
       - ${PDF_SOURCE_PATH:-./sample-pdfs}:/data/pdfs:ro
-      # Restored 2026-10-17: the 161-roll Lansdown corpus. Lives in a named
-      # volume (not the container layer) so recreating ocr cannot wipe it.
-      - lansdown-corpus:/corpus:ro
       - ocr-results:/home/spxlpt133/Desktop/OCR/results
     # No GPU request here, on purpose. Both ways of asking Compose for an
     # NVIDIA device -- `gpus: all` and a deploy.resources reservation -- are
@@ -155,6 +153,54 @@ services:
     # override file:
     #
     #     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 10s
+      retries: 20
+
+  # Additional OCR reader instances for parallel extraction.
+  # Each runs one unit at a time (concurrency 1 on the worker side), so N
+  # instances = N× throughput without overwhelming any single reader
+  # (concurrency 2 on a single OCR caused extraction calls to hang).
+  ocr-2:
+    image: electoral-pipeline-ocr:latest
+    restart: unless-stopped
+    ports: ["127.0.0.1:8084:8082"]
+    environment:
+      - OCR_CARD_WORKERS=4
+      - OCR_TESS_BACKEND=tesserocr
+      - PADDLE_USE_GPU=0
+      - OMP_THREAD_LIMIT=1
+    volumes:
+      - ./ocr_pdf_api.py:/app/ocr_pdf_api.py:ro
+      - ./ocr_cover.py:/app/ocr_cover.py:ro
+      - ./ocr_text_pdf_api.py:/app/ocr_text_pdf_api.py:ro
+      - ocr-paddle-cache-2:/root/.paddleocr
+      - ocr-results-2:/results
+      - ${PDF_SOURCE_PATH:-./sample-pdfs}:/data/pdfs:ro
+      - ocr-results-2:/home/spxlpt133/Desktop/OCR/results
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 10s
+      retries: 20
+
+  ocr-3:
+    image: electoral-pipeline-ocr:latest
+    restart: unless-stopped
+    ports: ["127.0.0.1:8085:8082"]
+    environment:
+      - OCR_CARD_WORKERS=4
+      - OCR_TESS_BACKEND=tesserocr
+      - PADDLE_USE_GPU=0
+      - OMP_THREAD_LIMIT=1
+    volumes:
+      - ./ocr_pdf_api.py:/app/ocr_pdf_api.py:ro
+      - ./ocr_cover.py:/app/ocr_cover.py:ro
+      - ./ocr_text_pdf_api.py:/app/ocr_text_pdf_api.py:ro
+      - ocr-paddle-cache-3:/root/.paddleocr
+      - ocr-results-3:/results
+      - ${PDF_SOURCE_PATH:-./sample-pdfs}:/data/pdfs:ro
+      - ocr-results-3:/home/spxlpt133/Desktop/OCR/results
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 10s
@@ -256,6 +302,7 @@ services:
 
   init:
     build: .
+    image: electoral-pipeline-app:latest
     # Exec form, not the string "python -m app.init_db && python -m app.migrate".
     # Compose resolves the string form to ["python", "-m", "app.init_db"] and
     # silently discards everything from "&&" onward, so the migration never ran
@@ -267,7 +314,7 @@ services:
       db: {condition: service_healthy}
 
   web:
-    build: .
+    image: electoral-pipeline-app:latest
     restart: unless-stopped
     env_file: .env
     environment:
@@ -301,7 +348,7 @@ services:
   # about 5 minutes of work. Splitting the queues means a slow unit can no longer
   # delay the dispatch tick that refills the window.
   worker-control:
-    build: .
+    image: electoral-pipeline-app:latest
     restart: unless-stopped
     # Serves discovery, dispatch, recovery, MinIO ingest and process_document.
     # All of these are database bookkeeping and finish in milliseconds; none of
@@ -350,7 +397,7 @@ services:
   # control queue, and on the ocr queue it would wait behind hour-long card
   # extractions when its whole point is to have the printed totals early.
   worker-cover:
-    build: .
+    image: electoral-pipeline-app:latest
     restart: unless-stopped
     command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q cover
     env_file: .env
@@ -368,16 +415,17 @@ services:
       ocr: {condition: service_healthy}
 
   worker-ocr:
-    build: .
+    image: electoral-pipeline-app:latest
     restart: unless-stopped
     # Serves process_unit only. Concurrency 1 on purpose. Each unit is a 3-page
     # OCR request, and the OCR service already runs its cards in parallel. Two
-    # units at once overwhelm the OCR service (http://ocr:8082) — extraction
-    # calls hang and no records are produced (observed 2026-10-18: concurrency=2
-    # gave 0 records in 10+ min vs ~37-39/min at concurrency=1). Reverted to 1.
+    # units at once overwhelm a single OCR reader — extraction calls hang and no
+    # records are produced (observed 2026-10-18: concurrency=2 gave 0 records in
+    # 10+ min vs ~37-39/min at concurrency=1). Reverted to 1. Three reader
+    # instances (ocr, ocr-2, ocr-3) each get their own worker at concurrency 1.
     #
-    # Keep this at or above OCR_MAX_INFLIGHT_UNITS (default 2) or the worker
-    # idles waiting for a window that can never fill.
+    # Keep this at or above OCR_MAX_INFLIGHT_UNITS or the worker idles waiting
+    # for the window to fill.
     command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q ocr
     env_file: .env
     environment:
@@ -388,6 +436,7 @@ services:
       # routing env has to be here as well as on web -- web only reads the
       # progress counters.
       - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - SCANNED_EXTRACTOR_URL=http://ocr:8082/ocr/extract
       - OCR_ROUTER=on
       - HOST_MOUNT_ROOT=/host
     volumes: *host-mounts
@@ -395,6 +444,50 @@ services:
       init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       ocr: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  # Second OCR worker, reads units from the same ``ocr`` queue but calls the
+  # ocr-2 reader instance. Same concurrency rules apply.
+  worker-ocr-2:
+    image: electoral-pipeline-app:latest
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q ocr
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
+      - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - SCANNED_EXTRACTOR_URL=http://ocr-2:8082/ocr/extract
+      - OCR_ROUTER=on
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      ocr-2: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  # Third OCR worker, reads units from the same ``ocr`` queue but calls the
+  # ocr-3 reader instance. Same concurrency rules apply.
+  worker-ocr-3:
+    image: electoral-pipeline-app:latest
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q ocr
+    env_file: .env
+    environment:
+      - EXTRACTOR_TIMEOUT_SECONDS=5400
+      - PAGES_PER_UNIT=3
+      - TRANSLITERATION_SCHEME=itrans
+      - TEXT_EXTRACTOR_URL=http://ocr-text:8083/ocr/extract
+      - SCANNED_EXTRACTOR_URL=http://ocr-3:8082/ocr/extract
+      - OCR_ROUTER=on
+      - HOST_MOUNT_ROOT=/host
+    volumes: *host-mounts
+    depends_on:
+      init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      ocr-3: {condition: service_healthy}
       minio: {condition: service_healthy}
 
   # Gallery generation is independent of voter OCR. Four processes make the
@@ -453,7 +546,7 @@ services:
       osm-geocoder: {condition: service_started}
 
   beat:
-    build: .
+    image: electoral-pipeline-app:latest
     restart: unless-stopped
     command: celery -A app.tasks.celery_app beat --loglevel=INFO
     env_file: .env
@@ -471,10 +564,12 @@ services:
 volumes:
   pgdata:
   redisdata:
-  lansdown-corpus:
-    external: true
   ocr-results:
   ocr-paddle-cache:
+  ocr-results-2:
+  ocr-paddle-cache-2:
+  ocr-results-3:
+  ocr-paddle-cache-3:
   ocr-text-results:
   image-extractor-results:
   osm-geocoder-data:
