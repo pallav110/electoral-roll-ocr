@@ -161,6 +161,18 @@
     </div>
   </section>
 
+  <section class="dashboard-panel" aria-labelledby="live-activity-heading">
+    <div class="panel-heading"><div><h2 id="live-activity-heading">Live extraction activity</h2><div class="panel-note">Unit-level movement; a PDF may stay processing while its units complete</div></div><div class="panel-action">{% if latest_completed_unit %}Last unit {{ latest_completed_unit.strftime('%H:%M:%S') }} IST{% else %}No completed units yet{% endif %}</div></div>
+    <div class="state-grid" aria-label="Live unit activity">
+      <div class="state-item"><div class="state-label">Units completed</div><div class="state-value green">{{ completed_units }}</div><div class="state-detail">database committed</div></div>
+      <div class="state-item"><div class="state-label">Units processing</div><div class="state-value blue">{{ processing_units }}</div><div class="state-detail">active OCR requests</div></div>
+      <div class="state-item"><div class="state-label">Units queued</div><div class="state-value">{{ queued_units }}</div><div class="state-detail">ready for a worker</div></div>
+      <div class="state-item"><div class="state-label">Pages in flight</div><div class="state-value blue">{{ pages_in_flight }}</div><div class="state-detail">currently being read</div></div>
+      <div class="state-item"><div class="state-label">Pages queued</div><div class="state-value">{{ pages_queued }}</div><div class="state-detail">pending/retry units</div></div>
+      <div class="state-item"><div class="state-label">Recent page rate</div><div class="state-value">{{ '%.1f'|format(recent_pages_per_hour) }}/h</div><div class="state-detail">last hour</div></div>
+    </div>
+  </section>
+
   <section class="metric-grid" aria-label="Processing metrics">
     <div class="dashboard-panel metric-card"><div class="metric-label">PDFs completed today</div><div class="metric-value">{{ processed }}</div><div class="metric-detail">Since midnight IST</div></div>
     <div class="dashboard-panel metric-card"><div class="metric-label">Pages settled</div><div class="metric-value">{{ '{:,}'.format(pages_processed) }}</div><div class="metric-detail">Committed across current sessions</div></div>

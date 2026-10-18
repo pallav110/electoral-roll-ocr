@@ -664,6 +664,25 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         completed_documents=completed,
         remaining_pages=remaining_pages,
     )
+    unit_status_counts = {}
+    for unit in timing_units:
+        unit_status_counts[unit.status] = unit_status_counts.get(unit.status, 0) + 1
+    recent_unit_cutoff = now_utc - timedelta(hours=1)
+    recent_completed_units = [
+        u for u in timing_units
+        if u.status == "completed" and u.completed_at and u.completed_at >= recent_unit_cutoff
+    ]
+    recent_pages_per_hour = sum(
+        max(0, int(u.page_to) - int(u.page_from) + 1)
+        for u in recent_completed_units
+    )
+    recent_pages_per_hour = recent_pages_per_hour * 3600 / max(
+        1.0, (now_utc - recent_unit_cutoff).total_seconds()
+    )
+    latest_completed_unit = max(
+        (u.completed_at for u in timing_units if u.completed_at),
+        default=None,
+    )
     avg_pdf_seconds = timing_metrics["avg_document_wall_seconds"]
     avg_seconds_per_page = timing_metrics["unit_seconds_per_page"]
 
@@ -838,6 +857,22 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         unit_pages_measured=timing_metrics["unit_pages_measured"],
         pages_remaining=pages_remaining,
         pages_per_hour=pages_per_hour,
+        recent_pages_per_hour=recent_pages_per_hour,
+        completed_units=unit_status_counts.get("completed", 0),
+        processing_units=unit_status_counts.get("processing", 0),
+        queued_units=unit_status_counts.get("queued", 0),
+        pending_units=unit_status_counts.get("pending", 0),
+        retry_units=unit_status_counts.get("retry", 0),
+        pages_in_flight=sum(
+            max(0, int(u.page_to) - int(u.page_from) + 1)
+            for u in timing_units if u.status == "processing"
+        ),
+        pages_queued=sum(
+            max(0, int(u.page_to) - int(u.page_from) + 1)
+            for u in timing_units if u.status in ("pending", "queued", "retry")
+        ),
+        latest_completed_unit=latest_completed_unit,
+        latest_heartbeat=latest_heartbeat,
         throughput=throughput,
         throughput_window_label=throughput_window_label,
         eta_hours=eta_hours,
