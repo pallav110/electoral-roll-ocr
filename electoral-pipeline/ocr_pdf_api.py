@@ -1135,6 +1135,52 @@ CARD_OCCUPANCY_BLANK = "blank"
 CARD_OCCUPANCY_UNCERTAIN = "uncertain"
 
 
+def _infer_lattice_shadow(gray: Any) -> dict[str, Any]:
+    """Infer periodic row spacing for shadow comparison only.
+
+    The estimator never returns crop rectangles and never drives extraction. It
+    reports the strongest ink-profile autocorrelation peak plus the harmonic
+    closest to a ten-row page pitch. Unknown/blank input is explicitly
+    ``uncertain`` rather than becoming a guessed geometry.
+    """
+    if gray is None or getattr(gray, "size", 0) == 0:
+        return {"status": "uncertain"}
+    if len(gray.shape) == 3:
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    h = gray.shape[0]
+    if h < 40:
+        return {"status": "uncertain"}
+    ink = gray < 170
+    profile = ink.sum(axis=1).astype(np.float64)
+    if float(profile.max()) <= 0:
+        return {"status": "uncertain"}
+    window = max(4, h // 10)
+    trend = np.convolve(profile, np.ones(window) / window, mode="same")
+    centered = profile - trend
+    scores = []
+    for lag in range(max(4, h // 14), max(5, h // 4)):
+        left, right = centered[:-lag], centered[lag:]
+        denom = (np.linalg.norm(left) * np.linalg.norm(right)) or 1.0
+        scores.append((float(left @ right) / denom, lag))
+    if not scores:
+        return {"status": "uncertain"}
+    score, lag = max(scores)
+    candidates = {"1x": float(lag), "2x": float(lag) / 2,
+                  "3x": float(lag) / 3}
+    expected = h / 10.0
+    harmonic = min(candidates, key=lambda k: abs(candidates[k] - expected))
+    pitch = candidates[harmonic]
+    if score < 0.15 or pitch < 4:
+        return {"status": "uncertain", "autocorr": round(score, 3)}
+    return {
+        "status": "ok",
+        "autocorr": round(score, 3),
+        "peak_lag_px": int(lag),
+        "inferred_pitch_px": round(pitch, 2),
+        "harmonic": harmonic,
+    }
+
+
 def _classify_card_occupancy(image: Any) -> str:
     """Classify an existing card crop without running OCR.
 

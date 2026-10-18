@@ -25,11 +25,35 @@ import numpy as np
 from sqlalchemy import select
 
 import ocr_pdf_api as A
-from app.db import SessionLocal
-from app.models import Document, ElectoralRecord
+import psycopg
 
 DPI = 100
 SCALE = DPI / 72.0
+
+
+def database_rows():
+    """Read only document paths and record positions; never voter fields."""
+    conn = psycopg.connect(
+        "host=db port=5432 dbname=electoral user=electoral password=electoral"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, file_name, source_path
+                FROM documents
+                WHERE status = 'completed'
+                ORDER BY file_name
+            """)
+            docs = cur.fetchall()
+            cur.execute("""
+                SELECT document_id, page_number, card_index
+                FROM electoral_records
+                WHERE page_number IS NOT NULL AND card_index IS NOT NULL
+            """)
+            records = cur.fetchall()
+        return docs, records
+    finally:
+        conn.close()
 
 
 def main() -> int:
@@ -40,16 +64,7 @@ def main() -> int:
     cases = out / "false_blank_cases"
     cases.mkdir(parents=True, exist_ok=True)
 
-    with SessionLocal() as db:
-        docs = db.execute(
-            select(Document.id, Document.file_name, Document.source_path)
-            .where(Document.status == "completed")
-            .order_by(Document.file_name)
-        ).all()
-        record_rows = db.execute(
-            select(ElectoralRecord.document_id, ElectoralRecord.page_number,
-                   ElectoralRecord.card_index)
-        ).all()
+    docs, record_rows = database_rows()
 
     expected = {}
     for document_id, page_number, card_index in record_rows:
