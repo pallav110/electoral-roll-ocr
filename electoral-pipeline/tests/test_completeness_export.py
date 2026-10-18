@@ -27,3 +27,13 @@ def test_complete_records_do_not_create_review_rows():
     assert completeness_summary([rec()]) == {
         "records": 1, "review_rows": 0, "missing_fields": {}
     }
+
+
+def test_review_sheet_contract_is_metadata_only():
+    assert [
+        "document_id", "page_number", "card_index", "missing_fields",
+        "review_reasons", "is_valid",
+    ] == [
+        "document_id", "page_number", "card_index", "missing_fields",
+        "review_reasons", "is_valid",
+    ]

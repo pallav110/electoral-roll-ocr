@@ -38,7 +38,7 @@
 - [ ] Task 10: Normalize large card renders
 - [ ] Task 11: Reduce redundant Paddle calls
 - [x] Task 12 foundation: Add completeness/review summary helpers and tests
-- [ ] Task 12: Wire completeness/review summary into the Excel export route
+- [x] Task 12: Wire completeness/review summary into the Excel export route
 
 ## Deferred by explicit audit skip
 

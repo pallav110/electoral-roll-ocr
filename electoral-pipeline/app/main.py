@@ -37,6 +37,7 @@ from app.document_locations import cover_location_query, location_for_document
 from app.map_verification import verifications_for_document
 from app.visual_assets import assets_for_document, extract_visual_assets
 from app.record_scope import batch_extraction_stats, count_records_for_document, records_for_document, session_gender_counts
+from app.completeness_export import completeness_rows
 from app.presentation import (
     duration_between,
     event_detail,
@@ -1445,9 +1446,11 @@ def _build_document_export_xlsx(document_ids: list[str], chosen: list[str]) -> s
         sheet = workbook.create_sheet("Voter records")
         sheet.freeze_panes = "A2"
         sheet.append(chosen)
+        review_rows = []
         for doc in docs_by_id.values():
             records, record_session = records_for_document(export_db, doc.id)
             attempt = record_session.attempt_number if record_session else ""
+            review_rows.extend(completeness_rows(records))
             for record in records:
                 values = []
                 for label in chosen:
@@ -1459,6 +1462,18 @@ def _build_document_export_xlsx(document_ids: list[str], chosen: list[str]) -> s
                         value = json.dumps(value, ensure_ascii=False) if value else ""
                     values.append(value if value is not None else "")
                 sheet.append(values)
+
+        review = workbook.create_sheet("Review summary")
+        review.freeze_panes = "A2"
+        review.append([
+            "document_id", "page_number", "card_index", "missing_fields",
+            "review_reasons", "is_valid",
+        ])
+        for row in review_rows:
+            review.append([
+                row["document_id"], row["page_number"], row["card_index"],
+                row["missing_fields"], row["review_reasons"], row["is_valid"],
+            ])
 
         temporary = tempfile.NamedTemporaryFile(
             prefix="electoral-records-", suffix=".xlsx", delete=False
