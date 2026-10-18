@@ -1203,6 +1203,49 @@ def _classify_card_occupancy(image: Any) -> str:
     return CARD_OCCUPANCY_UNCERTAIN
 
 
+def _classify_page_occupancy(page: fitz.Page, card_rects: list[fitz.Rect], *, dpi: int = 100) -> list[str]:
+    """Classify all fixed card slots from one cheap page render.
+
+    This is used only to rescue pages rejected by the sampled EPIC probe. It
+    never calls OCR, never changes card rectangles, and returns uncertain for
+    any render/crop failure so a real sparse page is processed rather than
+    silently discarded.
+    """
+    try:
+        pix = page.get_pixmap(dpi=dpi, alpha=False)
+        full = np.frombuffer(pix.samples, np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )[:, :, :3]
+        pw, ph = page.rect.width, page.rect.height
+        states = []
+        for rect in card_rects:
+            x0 = max(0, int(rect.x0 / pw * pix.width))
+            y0 = max(0, int(rect.y0 / ph * pix.height))
+            x1 = min(pix.width, int(rect.x1 / pw * pix.width))
+            y1 = min(pix.height, int(rect.y1 / ph * pix.height))
+            crop = full[y0:y1, x0:x1]
+            states.append(_classify_card_occupancy(crop))
+        return states
+    except Exception as exc:
+        log.warning("Page occupancy rescue failed: %s", exc)
+        return [CARD_OCCUPANCY_UNCERTAIN] * len(card_rects)
+
+
+def _should_process_page_after_grid_probe(states: list[str]) -> bool:
+    """Rescue sparse pages the sampled EPIC gate cannot prove are voter pages.
+
+    The legacy page probe samples only 12 of 30 fixed slots and can reject a
+    real sparse page when its one populated card sits in an unsampled slot.
+    This helper is deliberately conservative: any occupied or uncertain slot
+    keeps the page in the existing fixed-grid path. Only 30 confident blanks
+    justify skipping. An incomplete result also keeps the page, because missing
+    evidence is not evidence of a blank page.
+    """
+    if len(states) != 30:
+        return True
+    return any(state != CARD_OCCUPANCY_BLANK for state in states)
+
+
 def _occupancy_shadow_report(states: list[str], records: list[Any], *, fixed_skipped: bool) -> dict[str, Any]:
     """Summarize shadow occupancy without changing fixed extraction behavior."""
     if len(states) != len(records):
@@ -7664,15 +7707,35 @@ def _extract_pdf_ocr_unlocked(
             probe_elapsed = time.perf_counter() - probe_started
             print(f"[OCR] page={page_number} grid_probe={probe_elapsed:.2f}s voter_grid={looks_like_voter_grid} epic_hits={probe_hits}/{probe_count}", flush=True)
             if not looks_like_voter_grid:
-                _progress(f"page {page_number} SKIPPED (not a voter grid)", force=True)
-                skipped_pages.append({
-                    "page_number": page_number,
-                    "reason": (
-                        f"only {probe_hits} of {probe_count} probed card positions "
-                        f"held an EPIC; {MIN_EPIC_HITS_PER_PAGE} required for a voter grid"
-                    ),
-                })
-                continue
+                rescue_rects = _voter_card_rects(page)
+                rescue_states = _classify_page_occupancy(page, rescue_rects, dpi=100)
+                rescue_process = _should_process_page_after_grid_probe(rescue_states)
+                rescue_report = _occupancy_shadow_report(
+                    rescue_states, [None] * len(rescue_states), fixed_skipped=not rescue_process
+                )
+                log.info("[OCCUPANCY_RESCUE] page=%s legacy_grid=false report=%s",
+                         page_number, rescue_report)
+                _progress(
+                    f"occupancy rescue page={page_number} "
+                    f"occupied={rescue_report['predicted_occupied']} "
+                    f"blank={rescue_report['predicted_blank']} "
+                    f"uncertain={rescue_report['predicted_uncertain']} "
+                    f"decision={'process' if rescue_process else 'skip'}",
+                    force=True,
+                )
+                if not rescue_process:
+                    _progress(f"page {page_number} SKIPPED (not a voter grid)", force=True)
+                    skipped_pages.append({
+                        "page_number": page_number,
+                        "reason": (
+                            f"legacy EPIC probe {probe_hits}/{probe_count}; "
+                            "full occupancy rescue found 30 confident blanks"
+                        ),
+                    })
+                    continue
+                looks_like_voter_grid = True
+                probe_hits = max(probe_hits, rescue_report["predicted_occupied"])
+                probe_count = len(rescue_states)
 
             page_roll_metadata = dict(roll_metadata)
             if len(cover_anubhag_entries) == 1:

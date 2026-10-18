@@ -14,8 +14,16 @@
 - [ ] OCR container restarted with the final shadow code and real logs verified
 
 - [ ] Task 4: Implement shadow lattice inference
-- [ ] Task 5: Add per-card shadow occupancy comparison
+- [x] Task 5: Add per-card shadow occupancy comparison
 - [ ] Task 6: Corpus shadow audit
+
+## Checkpoint: sparse-page rescue
+
+- [x] Legacy page probe remains unchanged
+- [x] Rejected pages are rescanned using all 30 occupancy slots
+- [x] Any occupied/uncertain slot rescues the page
+- [x] Real 14-card Lansdown tail page returns 14 records
+- [ ] Corpus audit verifies zero false-blank pages
 
 ## Checkpoint: dynamic detector gate
 
