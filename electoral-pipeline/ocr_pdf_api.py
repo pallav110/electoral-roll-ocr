@@ -34,6 +34,7 @@ import shlex
 import sys
 import time
 import unicodedata
+from difflib import SequenceMatcher
 import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -6798,6 +6799,34 @@ def _render_region(page: fitz.Page, rect: fitz.Rect, dpi: int) -> Any:
     return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
 
 
+def _resolve_page_section_from_cover(
+    metadata: dict[str, Any], entries: dict[str, str], *,
+    page_code: str, page_name_read: str,
+) -> tuple[str, str, str]:
+    """Resolve a repeated-page section against the authoritative cover list."""
+    page_name = entries.get(page_code, "")
+    if page_code and page_name:
+        return page_code, page_name, ""
+
+    def fold(value: str) -> str:
+        return re.sub(r"[^ऀ-ॿ0-9]", "", value or "").replace("ँ", "")
+
+    folded_read = fold(page_name_read)
+    matching = [
+        code for code, name in entries.items()
+        if name and folded_read and (
+            fold(name) == folded_read
+            or fold(name) in folded_read
+            or folded_read in fold(name)
+            or SequenceMatcher(None, fold(name), folded_read).ratio() >= 0.82
+        )
+    ]
+    if len(matching) == 1:
+        code = matching[0]
+        return code, entries[code], ""
+    return "", page_name_read, "anubhag_cover_entry_unmatched_for_page"
+
+
 def _apply_cover_section_authority(
     metadata: dict[str, Any], entries: dict[str, str]
 ) -> dict[str, Any]:
@@ -7867,24 +7896,22 @@ def _extract_pdf_ocr_unlocked(
                 page_code = _extract_anubhag_code_from_header_fallback(
                     page, cover_anubhag_entries
                 )
-                page_name = cover_anubhag_entries.get(page_code, "")
-                if page_code and not page_name:
-                    # The page printed a section number the cover list did
-                    # not keep. Read the labelled line on this page. Clearing
-                    # the number lets the neighbour fill copy the previous
-                    # section onto this one and leave the name blank.
-                    page_name = _extract_anubhag_name_from_header_fallback(page)
+                page_name_read = _extract_anubhag_name_from_header_fallback(page)
+                page_code, page_name, page_authority_reason = (
+                    _resolve_page_section_from_cover(
+                        page_roll_metadata, cover_anubhag_entries,
+                        page_code=page_code, page_name_read=page_name_read,
+                    )
+                )
                 page_roll_metadata["anubhag_status"] = "per_page"
                 if page_code and page_name:
                     page_roll_metadata["anubhag_code"] = page_code
                     page_roll_metadata["anubhag_name"] = page_name
                     page_roll_metadata["anubhag_review_reason"] = ""
-                elif page_code:
-                    page_roll_metadata["anubhag_code"] = page_code
-                    page_roll_metadata["anubhag_name"] = ""
-                    page_roll_metadata["anubhag_review_reason"] = (
-                        "anubhag_cover_entry_unmatched_for_page"
-                    )
+                elif page_name:
+                    page_roll_metadata["anubhag_code"] = ""
+                    page_roll_metadata["anubhag_name"] = page_name
+                    page_roll_metadata["anubhag_review_reason"] = page_authority_reason
                 elif _page_prints_section_header(page):
                     # The page does print ``अनुभाग संख्या और नाम`` but no
                     # reader could prove which section it is.  A genuine miss.
