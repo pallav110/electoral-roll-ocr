@@ -371,10 +371,10 @@ services:
     build: .
     restart: unless-stopped
     # Serves process_unit only. Concurrency 1 on purpose. Each unit is a 3-page
-    # OCR request, and the OCR service already runs its 30 cards in parallel. Two
-    # units at once put this 8-core box at load 40 (5x oversubscribed) and every
-    # unit slowed to a crawl, which is what made the earlier runs time out rather
-    # than finish.
+    # OCR request, and the OCR service already runs its cards in parallel. Two
+    # units at once overwhelm the OCR service (http://ocr:8082) — extraction
+    # calls hang and no records are produced (observed 2026-10-18: concurrency=2
+    # gave 0 records in 10+ min vs ~37-39/min at concurrency=1). Reverted to 1.
     #
     # Keep this at or above OCR_MAX_INFLIGHT_UNITS (default 2) or the worker
     # idles waiting for a window that can never fill.
