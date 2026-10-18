@@ -393,6 +393,23 @@ def _discover_under(root: Path, label: str, scan_root_id: int | None = None,
                 if existing_id:
                     log.info("[DISCOVER] Document already exists for file %s", path)
                     continue
+                # Content identity is global for local PDFs. The source id
+                # includes the path so different uploads can coexist, but that
+                # must not make byte-identical rolls separate OCR jobs: Windows
+                # commonly preserves repeated downloads as `file.pdf` and
+                # `file (1).pdf`. Keep the first discovered copy canonical and
+                # skip the duplicate before it can create a session or units.
+                duplicate_id = db.scalar(select(Document.id).where(
+                    Document.source_type == "local",
+                    Document.file_hash == file_hash,
+                ).limit(1))
+                if duplicate_id:
+                    log.info(
+                        "[DISCOVER] Skipping duplicate content %s; "
+                        "canonical document=%s file=%s",
+                        path.name, duplicate_id, path,
+                    )
+                    continue
                 result = db.execute(insert(Document).values(**values).on_conflict_do_nothing(
                     index_elements=[Document.source_type, Document.source_document_id],
                     index_where=Document.source_document_id.is_not(None),

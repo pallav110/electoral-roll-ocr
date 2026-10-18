@@ -107,11 +107,12 @@ def test_a_two_megabyte_part_actually_parses():
 
 
 def test_the_same_filename_can_be_uploaded_twice(tmp_path, monkeypatch):
-    """A second upload of roll_001.pdf must produce a second row.
+    """An identical second upload is skipped instead of starting OCR twice.
 
-    This is the user-visible symptom of the identity bug: you upload a batch
-    of six, the page says six, and only two appear because four of the
-    filenames were already used by an earlier upload.
+    Re-uploading the same bytes under the same filename or a Windows-generated
+    `(1)` filename must not create a second processing document. The canonical
+    first document remains the only OCR job; the second batch reports zero new
+    documents for that duplicate content.
     """
     import pytest
 
@@ -139,17 +140,17 @@ def test_the_same_filename_can_be_uploaded_twice(tmp_path, monkeypatch):
             db.add(UploadBatch(id=batch_id, label=f"regression {attempt}", source="files",
                                relative_directory=directory.name, file_count=1))
 
-        assert discover_upload_batch(batch_id) == 1, (
-            f"the {attempt} upload registered nothing -- uq_documents_source "
-            "rejected a file it had already seen under a different directory"
+        expected = 1 if attempt == "first" else 0
+        assert discover_upload_batch(batch_id) == expected, (
+            f"the {attempt} upload registered an unexpected number of new "
+            "documents for identical PDF content"
         )
         with SessionLocal() as db:
             counts.append(db.query(Document).filter(
                 Document.upload_batch_id == batch_id).count())
 
-    assert counts == [1, 1], (
-        "the two uploads did not both register: local_source_id is relative "
-        "to the walked directory, so the same basename collides across uploads"
+    assert counts == [1, 0], (
+        "identical PDF bytes must have one canonical document, not two OCR jobs"
     )
 
 
