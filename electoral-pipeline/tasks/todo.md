@@ -36,7 +36,8 @@
 
 - [ ] Task 7: Add field evidence records
 - [x] Task 8 targeted: Cover-authoritative anubhag arbitration (HIN-100)
-- [ ] Task 8: Harden remaining age and house arbitration
+- [x] Task 8 targeted: Age/house unresolved-value review guards and direct-card fallback
+- [ ] Task 8: Complete corpus-wide age/house validation
 - [ ] Task 9: Enable dynamic occupancy only for proven classes
 - [x] Task 10 foundation: Add measured render-scale diagnostic (no rollout)
 - [ ] Task 10: Normalize large card renders after A/B validation

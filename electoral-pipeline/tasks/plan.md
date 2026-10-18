@@ -131,7 +131,10 @@ for future runs.
   - Dependencies: Tasks 2–6
   - Scope: Medium
 
-- [ ] **Task 8: Harden age and house arbitration**
+- [x] **Task 8 targeted: Harden age/house unresolved-value guards**
+  - Existing review triggers, direct-card recovery, field sources, and blank-safe
+    arbitration preserve values and flag unresolved age/house reads.
+  - Full corpus validation remains open.
   - Acceptance: age/house values cannot be accepted from a crop that lacks the
     relevant label/row; disagreement leaves the value unchanged or blank and
     adds review evidence; all current S24/Lansdown examples are covered.
