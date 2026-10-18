@@ -1130,6 +1130,103 @@ def _voter_card_rects(page: fitz.Page) -> list[fitz.Rect]:
             ))
     return card_rects
 
+CARD_OCCUPANCY_OCCUPIED = "occupied"
+CARD_OCCUPANCY_BLANK = "blank"
+CARD_OCCUPANCY_UNCERTAIN = "uncertain"
+
+
+def _classify_card_occupancy(image: Any) -> str:
+    """Classify an existing card crop without running OCR.
+
+    This is intentionally conservative and pure. It removes the same outer
+    rules/photo placeholder used by OCR, then combines interior ink density,
+    connected-component count, and EPIC-region ink. A single weak signal never
+    returns ``blank``: blank is reserved for a crop with no meaningful interior
+    evidence at all. The result is shadow-only until corpus validation proves
+    zero missed populated cards.
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return CARD_OCCUPANCY_UNCERTAIN
+    original_gray = image if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    original_ink = original_gray < 170
+    # If the crop is too small or its contrast is too low to measure reliably,
+    # refuse to call it blank. Blank is a high-confidence skip decision; an
+    # unmeasurable scan must remain uncertain.
+    contrast = float(original_gray.max()) - float(original_gray.min())
+    if min(original_gray.shape[:2]) < 40:
+        return CARD_OCCUPANCY_UNCERTAIN
+    if contrast < 35:
+        return (CARD_OCCUPANCY_BLANK
+                if float(original_gray.mean()) >= 245.0
+                else CARD_OCCUPANCY_UNCERTAIN)
+    cleaned = _remove_outer_card_lines(image)
+    if cleaned is None or getattr(cleaned, "size", 0) == 0:
+        return CARD_OCCUPANCY_UNCERTAIN
+    gray = cleaned if len(cleaned.shape) == 2 else cv2.cvtColor(cleaned, cv2.COLOR_BGR2GRAY)
+    if gray.size == 0:
+        return CARD_OCCUPANCY_UNCERTAIN
+    ink = gray < 170
+    density = float(ink.mean())
+    # Cleanup intentionally removes card rules. If the original crop had ink
+    # but the cleaned crop is empty, the classifier cannot distinguish a
+    # border-only crop from a failed cleanup or a very faint card. Unknown is
+    # safer than blank because only blank positions may be skipped later.
+    if density <= 0.0005:
+        return (CARD_OCCUPANCY_UNCERTAIN
+                if float(original_ink.mean()) > 0.0005
+                else CARD_OCCUPANCY_BLANK)
+    components, _, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), 8)
+    meaningful = sum(1 for x, y, w, h, area in stats[1:]
+                     if area >= 4 and w >= 2 and h >= 2)
+    # EPIC is content-region index 1 (top-right), not index 2 (Hindi field
+    # block). Keeping this explicit prevents a Hindi-field signal from being
+    # mistaken for card-ID evidence.
+    x0, y0, x1, y1 = TESSERACT_CARD_CONTENT_REGIONS[1]
+    h, w = gray.shape[:2]
+    epic = ink[int(h * y0):int(h * y1), int(w * x0):int(w * x1)]
+    epic_density = float(epic.mean()) if epic.size else 0.0
+    # EPIC ink density alone is unsafe: a one-pixel scan streak inside the
+    # region can exceed the density threshold without being text. Require
+    # component evidence before promoting an EPIC signal to occupied.
+    epic_components = cv2.connectedComponentsWithStats(
+        epic.astype(np.uint8), 8
+    )[2]
+    epic_meaningful = sum(1 for _, _, ew, eh, earea in epic_components[1:]
+                          if earea >= 4 and ew >= 2 and eh >= 2)
+    # Occupied requires independent evidence from the EPIC region and the
+    # broader card. Distributed specks or a single text-like line are not enough
+    # to promote a crop; they remain uncertain and therefore cannot be skipped
+    # later. This deliberately sacrifices recall in the classifier to protect
+    # production recall until the corpus audit proves a stronger rule.
+    if epic_density >= 0.001 and epic_meaningful >= 2 and meaningful >= 4:
+        return CARD_OCCUPANCY_OCCUPIED
+    return CARD_OCCUPANCY_UNCERTAIN
+
+
+def _occupancy_shadow_report(states: list[str], records: list[Any], *, fixed_skipped: bool) -> dict[str, Any]:
+    """Summarize shadow occupancy without changing fixed extraction behavior."""
+    if len(states) != len(records):
+        raise ValueError(
+            f"occupancy shadow length mismatch: states={len(states)} records={len(records)}"
+        )
+    predicted_occupied = sum(s == CARD_OCCUPANCY_OCCUPIED for s in states)
+    predicted_blank = sum(s == CARD_OCCUPANCY_BLANK for s in states)
+    predicted_uncertain = sum(s == CARD_OCCUPANCY_UNCERTAIN for s in states)
+    record_presence_disagreements = sum(
+        state != CARD_OCCUPANCY_UNCERTAIN
+        and ((state == CARD_OCCUPANCY_BLANK) != (record is None))
+        for state, record in zip(states, records)
+    )
+    return {
+        "predicted_occupied": predicted_occupied,
+        "predicted_blank": predicted_blank,
+        "predicted_uncertain": predicted_uncertain,
+        "fixed_slots": len(states),
+        "record_presence_disagreements": record_presence_disagreements,
+        "fixed_skipped": bool(fixed_skipped),
+    }
+
+
 def _mask_photo_box(image: Any) -> Any:
     """Remove the printed photo placeholder, including its label, from OCR input."""
     if image is None or image.size == 0:
@@ -7688,7 +7785,36 @@ def _extract_pdf_ocr_unlocked(
                               f"{type(_card_exc).__name__}: {_card_exc}", force=True)
                     raise
 
-            indexed_rects = list(enumerate(card_rects, 1))
+            # Shadow-only occupancy analysis. This reuses the already-rendered
+            # card crops, so it adds no page render and no OCR call. It must not
+            # filter `indexed_rects` yet: unfamiliar geometry, faint text, and
+            # sparse tail pages remain on the fixed-grid fallback until the
+            # corpus audit proves zero false blanks.
+            if rendered_cards is None:
+                occupancy_states = [CARD_OCCUPANCY_UNCERTAIN] * len(card_rects)
+            else:
+                occupancy_states = [
+                    _classify_card_occupancy(crop) if crop is not None
+                    else CARD_OCCUPANCY_UNCERTAIN
+                    for crop in rendered_cards
+                ]
+            occupancy_shadow_enabled = True
+
+            # Occupancy is now authoritative only for high-confidence blank
+            # slots. Occupied and uncertain slots remain on the fixed-grid OCR
+            # path, so unfamiliar layouts and faint cards cannot be silently
+            # dropped. The existing page-level probe remains unchanged.
+            indexed_rects = [
+                (index, rect) for index, rect in enumerate(card_rects, 1)
+                if occupancy_states[index - 1] != CARD_OCCUPANCY_BLANK
+            ]
+            skipped_blank_slots = len(card_rects) - len(indexed_rects)
+            if skipped_blank_slots:
+                _progress(
+                    f"occupancy skipped {skipped_blank_slots} high-confidence blank "
+                    f"card slots; {len(indexed_rects)} slots remain for OCR",
+                    force=True,
+                )
             worker_count = _OCR_CARD_WORKERS
             _progress_set_phase("cards")
             _progress(f"starting {len(card_rects)} card threads "
@@ -7715,6 +7841,24 @@ def _extract_pdf_ocr_unlocked(
                 extracted_records = list(executor.map(extract_card_at, indexed_rects))
             else:
                 extracted_records = [extract_card_at(item) for item in indexed_rects]
+            shadow_records = [None] * len(card_rects)
+            for (card_index, _), record in zip(indexed_rects, extracted_records):
+                shadow_records[card_index - 1] = record
+            occupancy_report = _occupancy_shadow_report(
+                occupancy_states, shadow_records,
+                fixed_skipped=not looks_like_voter_grid,
+            )
+            _progress(
+                f"occupancy shadow occupied={occupancy_report['predicted_occupied']} "
+                f"blank={occupancy_report['predicted_blank']} "
+                f"uncertain={occupancy_report['predicted_uncertain']} "
+                f"record_disagreements={occupancy_report['record_presence_disagreements']}",
+                force=True,
+            )
+            log.info(
+                "[OCCUPANCY_SHADOW] page=%s report=%s",
+                page_number, occupancy_report,
+            )
             _progress(f"all {len(card_rects)} cards extracted", force=True)
 
             # ── Sequential PaddleOCR pass (not thread-safe) ──────────────

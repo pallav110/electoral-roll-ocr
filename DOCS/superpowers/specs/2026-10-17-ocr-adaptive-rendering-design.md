@@ -65,15 +65,57 @@ This is the reason the plan leads with rendering rather than with the vote.
 
 ## Architecture
 
-Three units, in dependency order. Each is independently shippable and
+Four units, in dependency order. Each is independently shippable and
 independently reversible.
 
 ```
-  Unit 1  Adaptive card rendering        <- no dependencies
-  Unit 2  Lexicon data layer             <- no dependencies
-  Unit 3  Corpus harness                 <- consumes Unit 2
-          (card-lattice detection deferred to Unit 4)
+  Unit 1  Adaptive page/card occupancy  <- no dependencies
+  Unit 2  Adaptive card rendering       <- occupancy + scale measurements
+  Unit 3  Lexicon data layer            <- no dependencies
+  Unit 4  Corpus harness                 <- consumes Unit 3
+          (lattice detection starts shadow-only inside Unit 1)
 ```
+
+### Required sparse/blank-page behavior
+
+A page is not a guarantee of 30 populated voter cards. The current extractor
+pays for every grid position after a page passes its coarse probe, so a page
+with 5 cards and 25 blank slots can cost nearly as much as a full page. This
+must change without creating a silent-recall failure.
+
+The occupancy detector has three outcomes for every page/card position:
+
+| Result | Action | Safety rule |
+|---|---|---|
+| `occupied` | Run full OCR for that card | Normal extraction |
+| `blank` | Return no record without Tesseract/Paddle | Only when all occupancy signals agree |
+| `uncertain` | Use the existing fixed-grid fallback | Never skip on weak evidence |
+
+At page level:
+
+- A fully blank/non-voter page is rejected after a cheap low-resolution scan.
+- A sparse page is accepted and only occupied positions are sent to full OCR.
+- A page whose occupancy detector is uncertain is processed using all existing
+  grid positions, preserving current recall.
+- The detector runs in **shadow mode first**: it predicts occupied slots while
+  the fixed extractor still runs, and every disagreement is recorded.
+- It may become authoritative only after it has zero missed populated cards on
+  the 161-roll corpus plus synthetic blank/sparse-page tests.
+
+Occupancy signals should be independent and scale-relative:
+
+1. ink density in the card crop after removing outer rules;
+2. ink/components in the EPIC region;
+3. a cheap EPIC-shape or printed-label signal;
+4. page-level ink distribution to distinguish a blank page from a sparse one.
+
+A single empty run is not sufficient evidence: photos, internal card gaps, and
+scan artefacts can be blank inside a populated card. The detector must combine
+signals and use the `uncertain` fallback.
+
+The hardcoded 3x10 lattice remains the safety fallback. Dynamic geometry can
+suggest positions, but no detected lattice may replace the fallback until
+record yield, EPIC coverage, and disagreement checks pass on the corpus.
 
 ### Unit 1 — Adaptive card rendering
 
