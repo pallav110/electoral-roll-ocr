@@ -92,11 +92,13 @@ services:
     restart: unless-stopped
     ports: ["127.0.0.1:8082:8082"]
     environment:
-      # 12 of the 16 cores the WSL2 VM exposes. The code defaults to
-      # min(8, cpu_count), which would leave half the box idle. Each worker
-      # runs one card through Tesseract subprocesses, and OMP_THREAD_LIMIT=1
-      # keeps those from nesting threads, so one core per worker is the unit.
-      - OCR_CARD_WORKERS=${OCR_CARD_WORKERS:-14}
+      # Card workers per reader. Three readers share 16 cores, so this is the
+      # PER-READER budget: 5 x 3 = 15. The old default of 14 was sized as if
+      # this reader had the whole machine to itself, which with two more
+      # readers running oversubscribed the box three times over. Each worker
+      # runs one card through Tesseract, and OMP_THREAD_LIMIT=1 keeps those
+      # from nesting threads, so one core per worker is the unit.
+      - OCR_CARD_WORKERS=${OCR_CARD_WORKERS:-5}
       # pytesseract (subprocess per read, the original), tesserocr (cached
       # in-process engine), or shadow (runs both and counts disagreements).
       # Defaults to the original so an image without tesserocr behaves as before.
@@ -167,7 +169,11 @@ services:
     restart: unless-stopped
     ports: ["127.0.0.1:8084:8082"]
     environment:
-      - OCR_CARD_WORKERS=4
+      # Same per-reader budget as `ocr`, and for the same reason: three readers
+      # x 5 card workers is 15 of 16 cores.  These were pinned to 4 while the
+      # main reader took 14 from .env, which left the three readers using
+      # different amounts of the same box for no reason.
+      - OCR_CARD_WORKERS=${OCR_CARD_WORKERS:-5}
       - OCR_TESS_BACKEND=tesserocr
       - PADDLE_USE_GPU=0
       - OMP_THREAD_LIMIT=1
@@ -189,7 +195,7 @@ services:
     restart: unless-stopped
     ports: ["127.0.0.1:8085:8082"]
     environment:
-      - OCR_CARD_WORKERS=4
+      - OCR_CARD_WORKERS=${OCR_CARD_WORKERS:-5}
       - OCR_TESS_BACKEND=tesserocr
       - PADDLE_USE_GPU=0
       - OMP_THREAD_LIMIT=1
@@ -424,8 +430,15 @@ services:
     # 10+ min vs ~37-39/min at concurrency=1). Reverted to 1. Three reader
     # instances (ocr, ocr-2, ocr-3) each get their own worker at concurrency 1.
     #
-    # Keep this at or above OCR_MAX_INFLIGHT_UNITS or the worker idles waiting
-    # for the window to fill.
+    # Throughput comes from the NUMBER of readers, not from stacking units on
+    # one reader: ocr_pdf_api.py holds _OCR_LOCK for a whole extraction, so a
+    # second unit on the same reader waits rather than working in parallel.
+    # Scale by adding a reader plus a matching worker, never by raising
+    # --concurrency here.
+    #
+    # OCR_MAX_INFLIGHT_UNITS counts queued AND processing units, so it must sit
+    # above the 3 that can actually run. At exactly 3 the dispatcher computes
+    # room=0 on every tick and stops publishing while readers wait for work.
     command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=1 -Q ocr
     env_file: .env
     environment:
